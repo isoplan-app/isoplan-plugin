@@ -476,7 +476,7 @@ const RUNNER_DOWN_TEXT = {
   "held-off": "Isoplan: this session isn't reaching the office: Isoplan's runner is holding off for up to an hour (runner.log says why)",
   "not-installed": "Isoplan: this session isn't reaching the office: Isoplan's runner isn't installed; run the plugin's install script",
 };
-const EARLIER_TEXT = "Isoplan: this session is reported by an earlier version of the plugin still running for it";
+const EARLIER_TEXT = "Isoplan: an earlier copy of Isoplan reports this session until this window reloads: type /reload-plugins";
 
 // The status line: each office's part that shows anything, or nothing at all.
 function statusText(): string | undefined {

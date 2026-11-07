@@ -17500,7 +17500,8 @@ function watchSessions(o) {
 					holdOff: null,
 					notWanted: {},
 					held: false,
-					tookBack: null
+					tookBack: null,
+					told: null
 				});
 				Object.assign(s, {
 					file,
@@ -17519,6 +17520,10 @@ function watchSessions(o) {
 					if (s.endedFor === hooks && s.endedAt !== null && st.mtimeMs <= s.endedAt) continue;
 					if (await heldByAnother(id, now, config, hooks, s.tookBack)) {
 						s.held = true;
+						if (s.told !== hooks) {
+							s.told = hooks;
+							o.held?.(id, hooks);
+						}
 						continue;
 					}
 					s.held = false;
@@ -18292,6 +18297,13 @@ async function worker() {
 		isOff,
 		log,
 		hooked: (id) => pipe?.hooked(id) ?? null,
+		held: (id, hooks) => {
+			sessionLog(claudeDir, id).say("an earlier version's data layer reports this session, so the runner doesn't: its hooks module is told so, and tries again later");
+			hooks.send({
+				type: "superseded",
+				reason: "earlier"
+			});
+		},
 		report: async ({ sessionId, cwd, notWanted, closed, hooks }) => {
 			const said = sessionLog(claudeDir, sessionId);
 			said.say(hooks ? `the runner reports this session for its hooks module, in ${cwd}` : `the runner reports this session, in ${cwd}`);

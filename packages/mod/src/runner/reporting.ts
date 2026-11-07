@@ -25,7 +25,10 @@
 // report-session.ts, for a copy that isn't outdated, as the report itself decides), and one that lets it go is reported for its hooks module at the next look.
 // One that took the lock back from a hooks module's report (its copy goes by another newest copy) is
 // left the session until it lets go, so the two don't take it from each other again and again. The runner counts a lock as fresh for three of its own slowest passes
-// (lockFreshMs, from its config.json).
+// (lockFreshMs, from its config.json). A connected hooks module whose session such a data layer
+// keeps is told so (`held`), once for each connection, and nothing is reported for it: the runner's
+// worker tells it it is `superseded` (`earlier`), which closes its connection, and its hooks module
+// connects again a while later, when the session is reported for it if the lock has let go (#114).
 //
 // A session it stopped reporting without a hooks module (quiet past `idleMinutes`, nothing to
 // report, its link down five minutes, or an earlier version's data layer took its lock over) is
@@ -83,6 +86,8 @@ export interface ReportingOptions<H extends HookedSession = HookedSession> {
   report: (session: ToReport<H>) => Promise<Ended>;
   /** The session's connected hooks module, or null. */
   hooked?: (sessionId: string) => H | null;
+  /** Tells a connected hooks module that an earlier version's data layer keeps its session, so nothing reports it for that hooks module; once for each. */
+  held?: (sessionId: string, hooks: H) => void;
   /** Whether Claude Code lists the plugin as uninstalled or disabled for a folder. */
   isOff: (folder: string) => Promise<boolean>;
   log: (text: string) => void;
@@ -124,6 +129,8 @@ interface Seen {
   held: boolean;
   /** The process that held its lock as a hooks module's report ended: it took the lock back, and isn't taken it from again. */
   tookBack: number | null;
+  /** The hooks module last told that an earlier version's data layer keeps the session. */
+  told: unknown;
 }
 
 const HEAD_BYTES = 65536;
@@ -229,7 +236,7 @@ export function watchSessions<H extends HookedSession>(o: ReportingOptions<H>): 
         const st = await io.stat(file);
         if (!st) continue;
         let s = seen.get(id);
-        if (!s) seen.set(id, (s = { file, mtimeMs: st.mtimeMs, size: st.size, cwd: null, running: null, endedFor: null, queued: false, endedAt: null, holdOff: null, notWanted: {}, held: false, tookBack: null }));
+        if (!s) seen.set(id, (s = { file, mtimeMs: st.mtimeMs, size: st.size, cwd: null, running: null, endedFor: null, queued: false, endedAt: null, holdOff: null, notWanted: {}, held: false, tookBack: null, told: null }));
         Object.assign(s, { file, mtimeMs: st.mtimeMs, size: st.size });
         const hooks = o.hooked?.(id) ?? null;
         if (s.running) {
@@ -246,6 +253,10 @@ export function watchSessions<H extends HookedSession>(o: ReportingOptions<H>): 
           // Looked at again each look, so it starts as soon as the lock lets go.
           if (await heldByAnother(id, now, config, hooks, s.tookBack)) {
             s.held = true;
+            if (s.told !== hooks) {
+              s.told = hooks;
+              o.held?.(id, hooks);
+            }
             continue;
           }
           s.held = false;
