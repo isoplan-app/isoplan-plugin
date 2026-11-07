@@ -209,6 +209,12 @@ test("hooks: one an earlier version's data layer keeps the session from says so,
   expect(h.slept).toEqual([60000]);
 });
 
+test("hooks: the earlier copy's line, which already asks for /reload-plugins, has no update note beside it", async () => {
+  const h = await start([{ type: "updated" }, { type: "superseded", reason: "earlier" }]);
+  await vi.waitFor(() => expect(h.slept).toEqual([60000]));
+  expect(h.status.at(-1)).toBe("Isoplan: an earlier copy of Isoplan reports this session until this window reloads: type /reload-plugins");
+});
+
 test("hooks: a host with no $.fs.exists, or one that throws, still starts the data layer", async () => {
   const none = host([connected]);
   delete (none.$.fs as { exists?: unknown }).exists;

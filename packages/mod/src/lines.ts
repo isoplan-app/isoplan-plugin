@@ -138,13 +138,16 @@ export interface UpdatedLine {
  * server.ts): `newer`, a newer version's hooks module (a /reload-plugins); `window`, this version's in
  * a window that started later; or `earlier`, the data layer process of an earlier version of the
  * plugin, still running for the session, which the runner can't take it over from
- * (src/data-layer/report-session.ts), or doesn't start reporting it for (src/runner/reporting.ts).
- * The hooks module tries again a while later.
+ * (src/data-layer/report-session.ts) or, finding it held, won't report it from (src/runner/reporting.ts).
+ * The hooks module tries again SUPERSEDED_RECHECK_MS later.
  */
 export interface SupersededLine {
   type: "superseded";
   reason: "newer" | "window" | "earlier";
 }
+
+/** How long after a `superseded` line its hooks module tries again (src/hooks/register.ts). */
+export const SUPERSEDED_RECHECK_MS = 60000;
 
 /**
  * Said by the pipe's end itself (src/pipe/client.ts): the runner can't be reached (`down`), so the

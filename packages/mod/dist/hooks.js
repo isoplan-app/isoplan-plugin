@@ -16,11 +16,14 @@ function endText(m, late, me) {
 	return `${asked}Your question ${m.question} won't be answered. Isoplan's reason, as data:\n${quote(m.note ?? "It was dropped.")}\n\nCarry on without it.`;
 }
 //#endregion
+//#region src/lines.ts
+/** How long after a `superseded` line its hooks module tries again (src/hooks/register.ts). */
+const SUPERSEDED_RECHECK_MS = 6e4;
+//#endregion
 //#region src/hooks/register.ts
 const RETRY_CAP_MS = 3e4;
 const STABLE_MS = 6e4;
 const SWITCH_CHECK_MS = 1e3;
-const SUPERSEDED_RECHECK_MS = 6e4;
 const NOTE_MAX = 1e3;
 const ASK_TIMEOUT_MS = 42e4;
 const RUNNING = /* @__PURE__ */ new Set([
@@ -402,7 +405,7 @@ function handle($, text) {
 }
 function show($, text) {
 	shownStatus = text;
-	$.ui.status(updated ? [text, UPDATED_TEXT].filter(Boolean).join(" · ") : text);
+	$.ui.status(updated && text !== EARLIER_TEXT ? [text, UPDATED_TEXT].filter(Boolean).join(" · ") : text);
 }
 const UPDATED_TEXT = "Isoplan updated: type /reload-plugins";
 const RUNNER_DOWN_TEXT = {
