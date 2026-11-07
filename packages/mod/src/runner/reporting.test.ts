@@ -64,7 +64,9 @@ function machine(settings: Partial<Config> = {}) {
 type Hooks = { cwd: string; name: string; root?: string; since?: number; env?: Record<string, string> };
 
 /** watchSessions with a stand-in report: each session it starts is kept, and ends when told (or when the runner stops). */
-function watch(m: ReturnType<typeof machine>, o: { isOff?: (folder: string) => Promise<boolean>; isAlive?: (pid: number) => boolean; gapMs?: number; io?: NodeIo; hooked?: Map<string, Hooks> } = {}) {
+function watch(m: ReturnType<typeof machine>, o: { isOff?: (folder: string) => Promise<boolean>; isAlive?: (pid: number) => boolean; gapMs?: number; io?: NodeIo; hooked?: Map<string, Hooks>; recheckMs?: number } = {}) {
+  // The hooks modules told an earlier version's data layer reports their session.
+  const told: { id: string; name: string }[] = [];
   const started: { id: string; notWanted: Record<string, number>; hooks?: Hooks; cwd: string; end: (ended?: Ended) => void; stoppedFor?: string }[] = [];
   const report = (s: ToReport<Hooks>) =>
     new Promise<Ended>((resolve) => {
@@ -72,9 +74,9 @@ function watch(m: ReturnType<typeof machine>, o: { isOff?: (folder: string) => P
       started.push(entry);
       void s.closed.then((why) => ((entry.stoppedFor = why), resolve({ why: "stopped" })));
     });
-  const w = watchSessions({ claudeDir: m.claudeDir, io: o.io ?? nodeIo(), config: async () => m.config, report, isOff: o.isOff ?? (async () => false), log: () => {}, gapMs: o.gapMs ?? 0, ...(o.isAlive && { isAlive: o.isAlive }), ...(o.hooked && { hooked: (id: string) => o.hooked!.get(id) ?? null }) });
+  const w = watchSessions({ claudeDir: m.claudeDir, io: o.io ?? nodeIo(), config: async () => m.config, report, isOff: o.isOff ?? (async () => false), log: () => {}, gapMs: o.gapMs ?? 0, ...(o.recheckMs !== undefined && { recheckMs: o.recheckMs }), ...(o.isAlive && { isAlive: o.isAlive }), ...(o.hooked && { hooked: (id: string) => o.hooked!.get(id) ?? null }), held: (id, hooks) => void told.push({ id, name: hooks.name }) });
   watching.push(w);
-  return { w, started, ids: () => started.map((s) => s.id) };
+  return { w, started, told, ids: () => started.map((s) => s.id) };
 }
 
 test("each session written within idleMinutes is reported, once; one whose transcript names no folder yet only once it does", async () => {
@@ -171,6 +173,8 @@ test("a hooks module's report that ended by itself starts again only once the tr
   await w.look();
   expect(started).toEqual([]);
   holderAlive = false;
+  // Told, its connection closed; it connects again.
+  hooked.set("s1", { cwd: m.repo, name: "h" });
   await w.look();
   expect(started).toHaveLength(1);
   expect(started[0]!.hooks?.name).toBe("h");
@@ -227,15 +231,79 @@ test("an outdated hooks module (a newer copy is installed for its session) doesn
   m.write("s1");
   const env = { CLAUDE_CODE_PLUGIN_CACHE_DIR: plugins };
   const hooked = new Map<string, Hooks>([["s1", { cwd: m.repo, name: "outdated", root: old, since: 2, env }]]);
-  const { w, started } = watch(m, { hooked, isAlive: () => true });
+  const { w, started, told } = watch(m, { hooked, isAlive: () => true });
   await w.look();
   await w.look();
   expect(started).toEqual([]);
+  // It is told so, once, and nothing reports the session for it (#114).
+  expect(told).toEqual([{ id: "s1", name: "outdated" }]);
   // The newest copy's hooks module does take it over.
   hooked.set("s1", { cwd: m.repo, name: "newest", root: now, since: 2, env });
   w.rehook("s1");
   await until(() => started.length === 1);
   expect(started[0]!.hooks?.name).toBe("newest");
+});
+
+test("a hooks module whose session an earlier version's data layer keeps is told so once for each connection, and the session isn't reported while that data layer holds it; once it lets go, the hooks module connected then is reported for", async () => {
+  const m = machine();
+  let holderAlive = true;
+  fs.mkdirSync(path.dirname(lockPath(m.claudeDir, "s1")), { recursive: true });
+  // Of the hooks module's own copy, in a window that started later: not taken over.
+  fs.writeFileSync(lockPath(m.claudeDir, "s1"), JSON.stringify({ pid: OTHER, dataLayer: path.join(modDir, "dist", "data-layer.js"), detached: false, since: 9, parent: OTHER }));
+  m.write("s1");
+  const hooked = new Map<string, Hooks>([["s1", { cwd: m.repo, name: "first", root: modDir, since: 2 }]]);
+  const { w, started, told } = watch(m, { hooked, isAlive: (pid) => pid !== OTHER || holderAlive });
+  await until(() => told.length === 1);
+  await w.look();
+  await w.look();
+  expect(told).toEqual([{ id: "s1", name: "first" }]);
+  expect(started).toEqual([]);
+  // Told, it closes its connection; it connects again a minute later, and is told again.
+  hooked.delete("s1");
+  w.rehook("s1");
+  await w.look();
+  hooked.set("s1", { cwd: m.repo, name: "again", root: modDir, since: 2 });
+  w.rehook("s1");
+  await until(() => told.length === 2);
+  expect(told[1]).toEqual({ id: "s1", name: "again" });
+  expect(started).toEqual([]);
+  // That data layer goes (its window reloaded or closed) before the told connection has closed:
+  // nothing is reported for that one; the hooks module that connects again is reported for.
+  holderAlive = false;
+  await w.look();
+  expect(started).toEqual([]);
+  hooked.set("s1", { cwd: m.repo, name: "back", root: modDir, since: 2 });
+  await w.look();
+  expect(started.map((s) => s.hooks?.name)).toEqual(["back"]);
+  expect(told).toHaveLength(2);
+});
+
+test("while a hooks module told an earlier version's data layer keeps its session is away for its recheck, the session isn't reported without it, even once the lock lets go and the transcript moves; after the recheck it is", async () => {
+  const m = machine();
+  let holderAlive = true;
+  fs.mkdirSync(path.dirname(lockPath(m.claudeDir, "s1")), { recursive: true });
+  fs.writeFileSync(lockPath(m.claudeDir, "s1"), JSON.stringify({ pid: OTHER, dataLayer: path.join(modDir, "dist", "data-layer.js"), detached: false, since: 9, parent: OTHER }));
+  m.write("s1");
+  const hooked = new Map<string, Hooks>([["s1", { cwd: m.repo, name: "first", root: modDir, since: 2 }]]);
+  const recheckMs = 1500;
+  const { w, started, told } = watch(m, { hooked, isAlive: (pid) => pid !== OTHER || holderAlive, recheckMs });
+  await until(() => told.length === 1);
+  const toldAt = Date.now();
+  // Told, it closes its connection; the data layer lets go and the session writes twice.
+  hooked.delete("s1");
+  holderAlive = false;
+  for (const _ of [1, 2, 3]) {
+    await wait(30);
+    m.write("s1");
+    await w.look();
+  }
+  expect(Date.now() - toldAt).toBeLessThan(recheckMs);
+  expect(started).toEqual([]);
+  // Its hooks module didn't come back: past the recheck, the next write is reported without it.
+  await wait(recheckMs);
+  m.write("s1");
+  await until(() => started.length === 1);
+  expect(started[0]!.hooks).toBeUndefined();
 });
 
 test("an earlier version's data layer that took the lock back from a hooks module's report keeps the session until it lets go: a hooks module that connects again doesn't take it over again", async () => {
@@ -245,7 +313,7 @@ test("an earlier version's data layer that took the lock back from a hooks modul
   fs.writeFileSync(lockPath(m.claudeDir, "s1"), JSON.stringify({ pid: OTHER, dataLayer: "C:/old/dist/data-layer.js", detached: false, since: 1, parent: OTHER }));
   m.write("s1");
   const hooked = new Map<string, Hooks>([["s1", { cwd: m.repo, name: "first", root: modDir, since: 2 }]]);
-  const { w, started } = watch(m, { hooked, isAlive: (pid) => pid !== OTHER || holderAlive });
+  const { w, started, told } = watch(m, { hooked, isAlive: (pid) => pid !== OTHER || holderAlive });
   await until(() => started.length === 1);
   // That data layer takes the lock back (the lock names it again): the report ends, and the hooks module connects again later.
   started[0]!.end({ why: "another data layer reports this session now" });
@@ -255,10 +323,12 @@ test("an earlier version's data layer that took the lock back from a hooks modul
   await w.look();
   await w.look();
   expect(started).toHaveLength(1);
-  // Once it has gone, the session is reported for the hooks module at the next look.
+  expect(told).toEqual([{ id: "s1", name: "again" }]);
+  // Once it has gone, the session is reported for the hooks module that connects again after being told.
   holderAlive = false;
+  hooked.set("s1", { cwd: m.repo, name: "back", root: modDir, since: 2 });
   await w.look();
-  expect(started.map((s) => s.hooks?.name)).toEqual(["first", "again"]);
+  expect(started.map((s) => s.hooks?.name)).toEqual(["first", "back"]);
 });
 
 test("a hooks module's report goes by the session's own SESSION_ENV alone: one the session doesn't set isn't taken from the runner's", () => {

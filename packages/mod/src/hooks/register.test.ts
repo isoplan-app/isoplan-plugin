@@ -205,8 +205,14 @@ test("hooks: a runner that won't start is said plainly, not as starting", async 
 
 test("hooks: one an earlier version's data layer keeps the session from says so, not that it is another window", async () => {
   const h = await start([{ type: "superseded", reason: "earlier" }]);
-  await vi.waitFor(() => expect(h.status.at(-1)).toBe("Isoplan: this session is reported by an earlier version of the plugin still running for it"));
+  await vi.waitFor(() => expect(h.status.at(-1)).toBe("Isoplan: an earlier copy of Isoplan reports this session until this window reloads: type /reload-plugins"));
   expect(h.slept).toEqual([60000]);
+});
+
+test("hooks: the earlier copy's line, which already asks for /reload-plugins, has no update note beside it", async () => {
+  const h = await start([{ type: "updated" }, { type: "superseded", reason: "earlier" }]);
+  await vi.waitFor(() => expect(h.slept).toEqual([60000]));
+  expect(h.status.at(-1)).toBe("Isoplan: an earlier copy of Isoplan reports this session until this window reloads: type /reload-plugins");
 });
 
 test("hooks: a host with no $.fs.exists, or one that throws, still starts the data layer", async () => {

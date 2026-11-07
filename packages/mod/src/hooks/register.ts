@@ -60,7 +60,7 @@
 
 import type { AskedMessage, ConflictMessage } from "@isoplan/protocol";
 import { endText, MAX_WAIT_MS } from "../ask/text.js";
-import type { AnswerTaken, ContextWindow, DataLayerLine, FromOffice, MessageTaken, OwnerAnswerLine, OwnerMessageLine, PairLine, StatusLine, TitleAskLine, WaitMark } from "../lines.js";
+import { SUPERSEDED_RECHECK_MS, type AnswerTaken, type ContextWindow, type DataLayerLine, type FromOffice, type MessageTaken, type OwnerAnswerLine, type OwnerMessageLine, type PairLine, type StatusLine, type TitleAskLine, type WaitMark } from "../lines.js";
 import type { Host, On, ToolCallInput, ToolCallResult } from "./host.js";
 
 const RETRY_CAP_MS = 30000;
@@ -69,8 +69,6 @@ const STABLE_MS = 60000;
 // After a session ends, the process may go on under a new id (a /clear, a resume) with no
 // session.start; the id is looked at again this long after.
 const SWITCH_CHECK_MS = 1000;
-// How long after its data layer handed the session over this module tries again.
-const SUPERSEDED_RECHECK_MS = 60000;
 // The most of a server's note that reaches the model, and of a late reply from the room.
 const NOTE_MAX = 1000;
 // The script's whole wait fits in MAX_WAIT_MS (five minutes) whatever runner.json says, and
@@ -467,7 +465,8 @@ function handle($: Host, text: string): void {
 // the plugin, so a reload clears the note.
 function show($: Host, text: string | undefined): void {
   shownStatus = text;
-  $.ui.status(updated ? [text, UPDATED_TEXT].filter(Boolean).join(" · ") : text);
+  // The earlier copy's line already asks for /reload-plugins.
+  $.ui.status(updated && text !== EARLIER_TEXT ? [text, UPDATED_TEXT].filter(Boolean).join(" · ") : text);
 }
 
 const UPDATED_TEXT = "Isoplan updated: type /reload-plugins";
@@ -476,7 +475,7 @@ const RUNNER_DOWN_TEXT = {
   "held-off": "Isoplan: this session isn't reaching the office: Isoplan's runner is holding off for up to an hour (runner.log says why)",
   "not-installed": "Isoplan: this session isn't reaching the office: Isoplan's runner isn't installed; run the plugin's install script",
 };
-const EARLIER_TEXT = "Isoplan: this session is reported by an earlier version of the plugin still running for it";
+const EARLIER_TEXT = "Isoplan: an earlier copy of Isoplan reports this session until this window reloads: type /reload-plugins";
 
 // The status line: each office's part that shows anything, or nothing at all.
 function statusText(): string | undefined {

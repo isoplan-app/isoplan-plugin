@@ -17396,6 +17396,10 @@ async function takeReply(file) {
 		text: r.text
 	} : null;
 }
+//#endregion
+//#region src/lines.ts
+/** How long after a `superseded` line its hooks module tries again (src/hooks/register.ts). */
+const SUPERSEDED_RECHECK_MS = 6e4;
 const STOP_WAIT_MS = 5e3;
 const HEAD_BYTES = 65536;
 /** The first folder a transcript's lines name, from its first and last 64 KB. */
@@ -17412,7 +17416,7 @@ async function cwdOf(io, file, size) {
 /** Why a report for hooks module `from` stops when the session has `to` (either none), as its log says it. */
 const changed = (from, to) => !to ? "its hooks module's link to the runner closed" : !from ? "its hooks module connected to the runner, which reports it for that hooks module now" : "another hooks module has the session now (another window, or a reload)";
 function watchSessions(o) {
-	const { claudeDir, io, isAlive = alive, pid = process.pid, gapMs = 250, stopWaitMs = STOP_WAIT_MS } = o;
+	const { claudeDir, io, isAlive = alive, pid = process.pid, gapMs = 250, stopWaitMs = STOP_WAIT_MS, recheckMs = SUPERSEDED_RECHECK_MS } = o;
 	const projectsDir = path.join(claudeDir, "projects");
 	const seen = /* @__PURE__ */ new Map();
 	const rehooked = /* @__PURE__ */ new Set();
@@ -17500,7 +17504,9 @@ function watchSessions(o) {
 					holdOff: null,
 					notWanted: {},
 					held: false,
-					tookBack: null
+					tookBack: null,
+					told: null,
+					toldAt: null
 				});
 				Object.assign(s, {
 					file,
@@ -17519,9 +17525,15 @@ function watchSessions(o) {
 					if (s.endedFor === hooks && s.endedAt !== null && st.mtimeMs <= s.endedAt) continue;
 					if (await heldByAnother(id, now, config, hooks, s.tookBack)) {
 						s.held = true;
+						if (s.told !== hooks) {
+							s.told = hooks;
+							s.toldAt = now;
+							o.held?.(id, hooks);
+						}
 						continue;
 					}
 					s.held = false;
+					if (s.told === hooks) continue;
 					s.queued = false;
 					start(id, s, hooks.cwd, hooks);
 					continue;
@@ -17548,6 +17560,7 @@ function watchSessions(o) {
 					s.endedAt = st.mtimeMs;
 					continue;
 				}
+				if (s.toldAt !== null && now - s.toldAt < recheckMs + 2 * config.runnerRetrySeconds * 1e3) continue;
 				s.cwd ??= await cwdOf(io, file, st.size);
 				if (!s.cwd) continue;
 				if (!await fs.stat(s.cwd).then((d) => d.isDirectory(), () => false) || await o.isOff(s.cwd)) {
@@ -18292,6 +18305,13 @@ async function worker() {
 		isOff,
 		log,
 		hooked: (id) => pipe?.hooked(id) ?? null,
+		held: (id, hooks) => {
+			sessionLog(claudeDir, id).say("an earlier version's data layer reports this session, so the runner doesn't: its hooks module is told so, and tries again later");
+			hooks.send({
+				type: "superseded",
+				reason: "earlier"
+			});
+		},
 		report: async ({ sessionId, cwd, notWanted, closed, hooks }) => {
 			const said = sessionLog(claudeDir, sessionId);
 			said.say(hooks ? `the runner reports this session for its hooks module, in ${cwd}` : `the runner reports this session, in ${cwd}`);

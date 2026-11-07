@@ -241,6 +241,10 @@ async function worker(): Promise<number> {
     isOff,
     log,
     hooked: (id) => pipe?.hooked(id) ?? null,
+    held: (id, hooks) => {
+      sessionLog(claudeDir, id).say("an earlier version's data layer reports this session, so the runner doesn't: its hooks module is told so, and tries again later");
+      hooks.send({ type: "superseded", reason: "earlier" });
+    },
     report: async ({ sessionId, cwd, notWanted, closed, hooks }) => {
       const said = sessionLog(claudeDir, sessionId);
       said.say(hooks ? `the runner reports this session for its hooks module, in ${cwd}` : `the runner reports this session, in ${cwd}`);

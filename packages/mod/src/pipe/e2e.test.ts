@@ -108,6 +108,7 @@ async function runner(claudeDir: string) {
     isOff: async () => false,
     log: () => {},
     hooked: (id) => pipe?.hooked(id) ?? null,
+    held: (_id, hooks) => hooks.send({ type: "superseded", reason: "earlier" }),
     report: async ({ sessionId, cwd, closed, notWanted, hooks }) => {
       const said = sessionLog(claudeDir, sessionId);
       if (hooks) return reportSession({ sessionId, cwd, by: "hooks", appDir: modDir, root: hooks.root, takesMessages: hooks.messages, emit: (line) => (said.emit(line), hooks.send(line)), closed: Promise.race([closed, hooks.closed]) });
@@ -128,13 +129,13 @@ async function runner(claudeDir: string) {
 }
 
 /** The hooks module's end for s1, in this process, with what the hooks module would do with a few of its lines. */
-function hooksModule(claudeDir: string, repo: string) {
+function hooksModule(claudeDir: string, repo: string, since = Date.now()) {
   const out: DataLayerLine[] = [];
   let on = true;
   closing.push(async () => void (on = false));
-  void relay({
+  const relayed = relay({
     claudeDir,
-    hello: { session: "s1", cwd: repo, since: Date.now(), messages: true, root: modDir, version: "0.12.0" },
+    hello: { session: "s1", cwd: repo, since, messages: true, root: modDir, version: "0.12.0" },
     out: (line) => {
       out.push(line);
       // As the hooks module marks the question it waits on, where the waits line says.
@@ -144,7 +145,7 @@ function hooksModule(claudeDir: string, repo: string) {
     startRunner: async () => "running",
     retryMs: async () => 100,
   });
-  return { out, of: <T extends DataLayerLine["type"]>(type: T) => out.filter((l): l is Extract<DataLayerLine, { type: T }> => l.type === type) };
+  return { out, relayed, of: <T extends DataLayerLine["type"]>(type: T) => out.filter((l): l is Extract<DataLayerLine, { type: T }> => l.type === type) };
 }
 
 const askScript = (claudeDir: string, repo: string, url: string, question: string) =>
@@ -216,4 +217,27 @@ test("through the runner: the status line, a floor answer and a floor message re
   fs.writeFileSync(h.of("owner-message")[1]!.file, JSON.stringify({ taken: true }));
   await until(() => again.messages.some((m) => m.id === "m2"));
   expect(again.messages.find((m) => m.id === "m2")).toMatchObject({ type: "reply", id: "m2" });
+});
+
+test("a hooks module whose session an earlier version's data layer keeps is told so through the runner, and nothing reaches the office for it; connecting again once that data layer has gone, it has its status line (#114)", async () => {
+  const o = await office();
+  const { claudeDir, repo } = machine(o.url);
+  // An earlier version's data layer, live (this test's parent stands in for it), of the hooks
+  // module's own copy in a window that started later: the runner doesn't take the session from it.
+  const lock = path.join(claudeDir, "isoplan", "live", "s1.json");
+  fs.mkdirSync(path.dirname(lock), { recursive: true });
+  fs.writeFileSync(lock, JSON.stringify({ pid: process.ppid, dataLayer: path.join(modDir, "dist", "data-layer.js"), detached: false, since: Date.now() + 60000, parent: process.ppid, cwd: repo }));
+  await runner(claudeDir);
+  const h = hooksModule(claudeDir, repo);
+  expect(await h.relayed).toBe("superseded");
+  expect(h.out).toEqual([{ type: "superseded", reason: "earlier" }]);
+  expect(o.links()).toEqual([]);
+  expect(JSON.parse(fs.readFileSync(lock, "utf8"))).toMatchObject({ pid: process.ppid });
+
+  // That data layer lets go (its window reloaded); the hooks module tries again, and the runner reports the session for it.
+  fs.rmSync(lock);
+  const again = hooksModule(claudeDir, repo);
+  await until(() => again.of("status").some((l) => l.state === "connected"));
+  expect(again.of("superseded")).toEqual([]);
+  expect(o.links()).toHaveLength(1);
 });

@@ -22,10 +22,15 @@
 // Either way, not while the session's lock in <claude dir>/isoplan/live names another live process
 // that keeps it fresh: the data layer process of an earlier version of the plugin, for a session
 // still on that version; except one a hooks module's report takes the lock over from (takesOver in
-// report-session.ts, for a copy that isn't outdated, as the report itself decides), and one that lets it go is reported for its hooks module at the next look.
+// report-session.ts, for a copy that isn't outdated, as the report itself decides), and one that lets it go is reported for its hooks module once it connects again (below).
 // One that took the lock back from a hooks module's report (its copy goes by another newest copy) is
 // left the session until it lets go, so the two don't take it from each other again and again. The runner counts a lock as fresh for three of its own slowest passes
-// (lockFreshMs, from its config.json).
+// (lockFreshMs, from its config.json). A connected hooks module whose session such a data layer
+// keeps is told so (`held`), once for each connection, and nothing is reported for it: the runner's
+// worker tells it it is `superseded` (`earlier`), which closes its connection, and its hooks module
+// connects again a while later, when the session is reported for it if the lock has let go (#114).
+// Until then (its recheck, SUPERSEDED_RECHECK_MS, and twice `runnerRetrySeconds` to say hello) the
+// session isn't reported without it either, so the hooks module that comes back has the report.
 //
 // A session it stopped reporting without a hooks module (quiet past `idleMinutes`, nothing to
 // report, its link down five minutes, or an earlier version's data layer took its lock over) is
@@ -44,6 +49,7 @@ import { approvedFiles, freshRepos, readApproved } from "../data-layer/approved-
 import { officesOf, type Config } from "../data-layer/config.js";
 import type { NodeIo } from "../data-layer/io.js";
 import { hookedEnv, lockFreshMs, outdatedCopy, takesOver, type Ended } from "../data-layer/report-session.js";
+import { SUPERSEDED_RECHECK_MS } from "../lines.js";
 import { alive, lockPath, readLock } from "../wake/lock.js";
 
 // On its first look, the gap between starting two sessions that are already quiet, so each is
@@ -83,6 +89,8 @@ export interface ReportingOptions<H extends HookedSession = HookedSession> {
   report: (session: ToReport<H>) => Promise<Ended>;
   /** The session's connected hooks module, or null. */
   hooked?: (sessionId: string) => H | null;
+  /** Tells a connected hooks module that an earlier version's data layer keeps its session, so nothing reports it for that hooks module; once for each. */
+  held?: (sessionId: string, hooks: H) => void;
   /** Whether Claude Code lists the plugin as uninstalled or disabled for a folder. */
   isOff: (folder: string) => Promise<boolean>;
   log: (text: string) => void;
@@ -91,6 +99,8 @@ export interface ReportingOptions<H extends HookedSession = HookedSession> {
   pid?: number;
   gapMs?: number;
   stopWaitMs?: number;
+  /** How long a hooks module told `held` waits before it connects again (SUPERSEDED_RECHECK_MS). */
+  recheckMs?: number;
 }
 
 export interface Reporting {
@@ -124,6 +134,10 @@ interface Seen {
   held: boolean;
   /** The process that held its lock as a hooks module's report ended: it took the lock back, and isn't taken it from again. */
   tookBack: number | null;
+  /** The hooks module last told that an earlier version's data layer keeps the session. */
+  told: unknown;
+  /** When it was told. */
+  toldAt: number | null;
 }
 
 const HEAD_BYTES = 65536;
@@ -149,7 +163,7 @@ const changed = (from: unknown, to: unknown) =>
   !to ? "its hooks module's link to the runner closed" : !from ? "its hooks module connected to the runner, which reports it for that hooks module now" : "another hooks module has the session now (another window, or a reload)";
 
 export function watchSessions<H extends HookedSession>(o: ReportingOptions<H>): Reporting {
-  const { claudeDir, io, isAlive = alive, pid = process.pid, gapMs = GAP_MS, stopWaitMs = STOP_WAIT_MS } = o;
+  const { claudeDir, io, isAlive = alive, pid = process.pid, gapMs = GAP_MS, stopWaitMs = STOP_WAIT_MS, recheckMs = SUPERSEDED_RECHECK_MS } = o;
   const projectsDir = path.join(claudeDir, "projects");
   const seen = new Map<string, Seen>();
   // The sessions whose report stopped for a change of hooks module, to look again once it has ended.
@@ -229,7 +243,7 @@ export function watchSessions<H extends HookedSession>(o: ReportingOptions<H>): 
         const st = await io.stat(file);
         if (!st) continue;
         let s = seen.get(id);
-        if (!s) seen.set(id, (s = { file, mtimeMs: st.mtimeMs, size: st.size, cwd: null, running: null, endedFor: null, queued: false, endedAt: null, holdOff: null, notWanted: {}, held: false, tookBack: null }));
+        if (!s) seen.set(id, (s = { file, mtimeMs: st.mtimeMs, size: st.size, cwd: null, running: null, endedFor: null, queued: false, endedAt: null, holdOff: null, notWanted: {}, held: false, tookBack: null, told: null, toldAt: null }));
         Object.assign(s, { file, mtimeMs: st.mtimeMs, size: st.size });
         const hooks = o.hooked?.(id) ?? null;
         if (s.running) {
@@ -243,12 +257,19 @@ export function watchSessions<H extends HookedSession>(o: ReportingOptions<H>): 
         if (hooks) {
           // Its hooks module's report ended by itself: not again before the transcript moves.
           if (s.endedFor === hooks && s.endedAt !== null && st.mtimeMs <= s.endedAt) continue;
-          // Looked at again each look, so it starts as soon as the lock lets go.
+          // Looked at again each look; its hooks module, told, connects again later and is reported for once the lock lets go.
           if (await heldByAnother(id, now, config, hooks, s.tookBack)) {
             s.held = true;
+            if (s.told !== hooks) {
+              s.told = hooks;
+              s.toldAt = now;
+              o.held?.(id, hooks);
+            }
             continue;
           }
           s.held = false;
+          // Told, its connection is closing: the hooks module that connects again is reported for.
+          if (s.told === hooks) continue;
           s.queued = false;
           start(id, s, hooks.cwd, hooks);
           continue;
@@ -279,6 +300,8 @@ export function watchSessions<H extends HookedSession>(o: ReportingOptions<H>): 
           s.endedAt = st.mtimeMs;
           continue;
         }
+        // Its hooks module, told `held`, comes back soon: reported for that one, not without it.
+        if (s.toldAt !== null && now - s.toldAt < recheckMs + 2 * config.runnerRetrySeconds * 1000) continue;
         s.cwd ??= await cwdOf(io, file, st.size);
         if (!s.cwd) continue; // nothing in it names a folder yet: looked at again next time
         if (!(await fs.stat(s.cwd).then((d) => d.isDirectory(), () => false)) || (await o.isOff(s.cwd))) {
