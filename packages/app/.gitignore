@@ -1,0 +1,5 @@
+# Electrobun's toolchain projection and every build output: release builds come from the workflow.
+.hutch/
+build/
+artifacts/
+dist/
