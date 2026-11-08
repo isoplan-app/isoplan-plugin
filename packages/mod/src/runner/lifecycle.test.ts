@@ -7,7 +7,7 @@ import { holdOff, lockHolder, refreshLock, takeLock } from "../wake/lock.js";
 import { wakeRecordPath } from "../wake/wake.js";
 import { anyRoomSince, askableMs, MAX_FAST_FAILURES, NOT_WANTED_CODE, onEscapes, supervise, UNPAIRED_CODE } from "./lifecycle.js";
 import { errorText } from "./scan.js";
-import { applyClaudeDir, desktopAppPath, RUNNER_FRESH_MS, runnerCode, runnerLockPath, startRunner, stopRunner, type DesktopApp } from "./start.js";
+import { appCommand, applyClaudeDir, desktopAppPath, RUNNER_FRESH_MS, runnerCode, runnerLockPath, startRunner, stopRunner, type DesktopApp } from "./start.js";
 
 const OTHER = 4242; // a pid that isn't this process
 
@@ -112,6 +112,16 @@ test("one engine: with the desktop app installed it is opened in place of node, 
   expect(await start(() => false)).toBe("started");
   expect(m.spawned).toHaveLength(1);
   expect(opened).toHaveLength(1);
+});
+
+test("one engine: the app is started hidden with its config folder in CLAUDE_CONFIG_DIR, which its launcher passes on where arguments aren't", () => {
+  const home = path.resolve("/home/me");
+  const app: DesktopApp = { version: "0.1.0", dir: "/home/me/Applications/Isoplan.app", launch: "/home/me/Applications/Isoplan.app/Contents/MacOS/launcher" };
+  const env = { PATH: "/bin", CLAUDE_CONFIG_DIR: "/elsewhere" };
+  expect(appCommand(app, path.join(home, ".claude"), "darwin", env, home)).toEqual({ file: "/usr/bin/open", args: ["-g", app.dir], env: { PATH: "/bin" } });
+  const other = path.join(home, "work-claude");
+  expect(appCommand(app, other, "darwin", env, home)).toEqual({ file: "/usr/bin/open", args: ["-g", "--env", `CLAUDE_CONFIG_DIR=${other}`, app.dir], env: { PATH: "/bin", CLAUDE_CONFIG_DIR: other } });
+  expect(appCommand({ ...app, launch: "C:/Isoplan/bin/launcher.exe" }, other, "win32", env, home)).toEqual({ file: "C:/Isoplan/bin/launcher.exe", args: [], env: { PATH: "/bin", CLAUDE_CONFIG_DIR: other } });
 });
 
 test("one runner: a hold-off keeps it from starting; nothing starts when install recorded no runner, or it is gone", async () => {

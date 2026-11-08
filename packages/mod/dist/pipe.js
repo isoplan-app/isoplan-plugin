@@ -7106,19 +7106,40 @@ async function recordedApp(claudeDir) {
 /** The lock's holder is the desktop app. */
 const isAppLock = (extra) => extra.engine === "app";
 /**
-* Starts the desktop app for `claudeDir` with no window and no focus, and doesn't wait for it: on
-* macOS through `open -g`, so it starts as an app of its own and stays in the background.
+* How the desktop app is started for `claudeDir` with no window and no focus. Electrobun's launcher
+* doesn't pass its arguments on to the app (seen on Windows), so a config folder other than
+* ~/.claude goes in CLAUDE_CONFIG_DIR, as Claude Code reads it; ~/.claude takes it out. On macOS
+* through `open -g`, so it starts as an app of its own and stays in the background; `--env` only
+* when the folder isn't ~/.claude.
 */
-function openApp(app, claudeDir, platform = process.platform) {
-	const [file, args] = platform === "darwin" ? ["/usr/bin/open", [
-		"-g",
-		app.dir,
-		"--args",
-		"--claude-dir",
-		claudeDir
-	]] : [app.launch, ["--claude-dir", claudeDir]];
+function appCommand(app, claudeDir, platform, env, home) {
+	const isDefault = path.resolve(claudeDir) === path.resolve(home, ".claude");
+	const { CLAUDE_CONFIG_DIR: _, ...rest } = env;
+	const appEnv = isDefault ? rest : {
+		...rest,
+		CLAUDE_CONFIG_DIR: claudeDir
+	};
+	if (platform === "darwin") return {
+		file: "/usr/bin/open",
+		args: [
+			"-g",
+			...isDefault ? [] : ["--env", `CLAUDE_CONFIG_DIR=${claudeDir}`],
+			app.dir
+		],
+		env: appEnv
+	};
+	return {
+		file: app.launch,
+		args: [],
+		env: appEnv
+	};
+}
+/** Starts the desktop app (appCommand), and doesn't wait for it. */
+function openApp(app, claudeDir) {
+	const { file, args, env } = appCommand(app, claudeDir, process.platform, process.env, os.homedir());
 	spawn(file, args, {
 		cwd: claudeDir,
+		env,
 		detached: true,
 		stdio: "ignore",
 		windowsHide: true
@@ -7325,10 +7346,16 @@ async function download(get, url, file, asset, timeoutMs) {
 }
 async function swapIn(fresh, dir) {
 	const old = `${dir}.old-${process.pid}`;
-	const had = await fs.rename(dir, old).then(() => true, (err) => {
-		if (err.code === "ENOENT") return false;
-		throw new Error(`the installed app couldn't be moved aside (${err.code}): is it still running?`);
-	});
+	let had = false;
+	for (let tries = 0;; tries++) {
+		const moved = await fs.rename(dir, old).then(() => null, (err) => err);
+		if (!moved) had = true;
+		else if (moved.code !== "ENOENT" && tries < 40) {
+			await new Promise((r) => setTimeout(r, 250));
+			continue;
+		} else if (moved.code !== "ENOENT") throw new Error(`the installed app couldn't be moved aside (${moved.code}): is it still running?`);
+		break;
+	}
 	try {
 		await fs.mkdir(path.dirname(dir), { recursive: true });
 		await fs.rename(fresh, dir);

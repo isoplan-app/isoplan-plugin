@@ -20,6 +20,7 @@
 
 import { spawn as spawnChild } from "node:child_process";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { alive, readLock, releaseLock } from "../wake/lock.js";
 import { wakeRecordPath } from "../wake/wake.js";
@@ -70,12 +71,24 @@ export async function recordedApp(claudeDir: string): Promise<DesktopApp | null>
 export const isAppLock = (extra: Record<string, unknown>) => extra.engine === "app";
 
 /**
- * Starts the desktop app for `claudeDir` with no window and no focus, and doesn't wait for it: on
- * macOS through `open -g`, so it starts as an app of its own and stays in the background.
+ * How the desktop app is started for `claudeDir` with no window and no focus. Electrobun's launcher
+ * doesn't pass its arguments on to the app (seen on Windows), so a config folder other than
+ * ~/.claude goes in CLAUDE_CONFIG_DIR, as Claude Code reads it; ~/.claude takes it out. On macOS
+ * through `open -g`, so it starts as an app of its own and stays in the background; `--env` only
+ * when the folder isn't ~/.claude.
  */
-export function openApp(app: DesktopApp, claudeDir: string, platform: NodeJS.Platform = process.platform): void {
-  const [file, args] = platform === "darwin" ? ["/usr/bin/open", ["-g", app.dir, "--args", "--claude-dir", claudeDir]] : [app.launch, ["--claude-dir", claudeDir]];
-  spawnChild(file, args, { cwd: claudeDir, detached: true, stdio: "ignore", windowsHide: true }).on("error", () => {}).unref();
+export function appCommand(app: DesktopApp, claudeDir: string, platform: NodeJS.Platform, env: Record<string, string | undefined>, home: string): { file: string; args: string[]; env: Record<string, string | undefined> } {
+  const isDefault = path.resolve(claudeDir) === path.resolve(home, ".claude");
+  const { CLAUDE_CONFIG_DIR: _, ...rest } = env;
+  const appEnv = isDefault ? rest : { ...rest, CLAUDE_CONFIG_DIR: claudeDir };
+  if (platform === "darwin") return { file: "/usr/bin/open", args: ["-g", ...(isDefault ? [] : ["--env", `CLAUDE_CONFIG_DIR=${claudeDir}`]), app.dir], env: appEnv };
+  return { file: app.launch, args: [], env: appEnv };
+}
+
+/** Starts the desktop app (appCommand), and doesn't wait for it. */
+export function openApp(app: DesktopApp, claudeDir: string): void {
+  const { file, args, env } = appCommand(app, claudeDir, process.platform, process.env, os.homedir());
+  spawnChild(file, args, { cwd: claudeDir, env, detached: true, stdio: "ignore", windowsHide: true }).on("error", () => {}).unref();
 }
 
 export interface StartOptions {

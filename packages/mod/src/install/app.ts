@@ -178,10 +178,17 @@ async function download(get: typeof fetch, url: string, file: string, asset: App
 // The new copy goes in place of the old, which goes aside first and is put back if the move fails.
 async function swapIn(fresh: string, dir: string): Promise<void> {
   const old = `${dir}.old-${process.pid}`;
-  const had = await fs.rename(dir, old).then(() => true, (err: NodeJS.ErrnoException) => {
-    if (err.code === "ENOENT") return false;
-    throw new Error(`the installed app couldn't be moved aside (${err.code}): is it still running?`);
-  });
+  // Its launcher lets its files go a moment after the app exits.
+  let had = false;
+  for (let tries = 0; ; tries++) {
+    const moved = await fs.rename(dir, old).then(() => null, (err: NodeJS.ErrnoException) => err);
+    if (!moved) had = true;
+    else if (moved.code !== "ENOENT" && tries < 40) {
+      await new Promise((r) => setTimeout(r, 250));
+      continue;
+    } else if (moved.code !== "ENOENT") throw new Error(`the installed app couldn't be moved aside (${moved.code}): is it still running?`);
+    break;
+  }
   try {
     await fs.mkdir(path.dirname(dir), { recursive: true });
     await fs.rename(fresh, dir);

@@ -324,8 +324,14 @@ export async function uninstall(paths: Paths, { optOut = false, settleMs = 0, co
   // Read before the runner's folder, which records it, goes.
   const app = await recordedApp(paths.claudeDir);
   if (await stopOurRunner(paths.claudeDir, runner)) changes.push("stopped the runner, which answered for this machine's rooms");
-  // The desktop app (app.ts), stopped with the runner it is.
-  if (app) await remove(app.dir);
+  // The desktop app (app.ts), stopped with the runner it is. Its launcher lets its files go a moment
+  // after the app exits, so this tries for a while; an app folder left behind doesn't stop the rest.
+  if (app) {
+    await fs.rm(app.dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }).then(
+      () => changes.push(`removed ${app.dir}`),
+      (err: Error) => changes.push(`couldn't remove the desktop app at ${app.dir}: ${err.message}`),
+    );
+  }
   // Before update.json, which records it, goes.
   const autoUpdate = await takeOutAutoUpdate(paths);
   if (autoUpdate) changes.push(autoUpdate);
