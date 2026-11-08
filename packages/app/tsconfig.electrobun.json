@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noEmit": true,
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "target": "ESNext",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "types": ["bun", "node"],
+    "paths": {
+      "electrobun": ["./.hutch/devkit/api/sdks/main/index.ts"],
+      "electrobun/main": ["./.hutch/devkit/api/sdks/main/index.ts"],
+      "electrobun/view": ["./.hutch/devkit/api/browser/index.ts"]
+    }
+  },
+  "include": ["src/bun/index.ts", "src/shared", "src/pairing/main.ts", "src/pairing/vue.d.ts", "electrobun.config.ts", "vite.config.ts"]
+}

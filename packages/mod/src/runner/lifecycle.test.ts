@@ -1,13 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import { expect, test } from "vitest";
-import { NOW, line, session, tempRoot, touch } from "../data-layer/fixture.js";
+import { modDir, NOW, line, session, tempRoot, touch } from "../data-layer/fixture.js";
 import { nodeIo } from "../data-layer/io.js";
 import { holdOff, lockHolder, refreshLock, takeLock } from "../wake/lock.js";
 import { wakeRecordPath } from "../wake/wake.js";
 import { anyRoomSince, askableMs, MAX_FAST_FAILURES, NOT_WANTED_CODE, onEscapes, supervise, UNPAIRED_CODE } from "./lifecycle.js";
 import { errorText } from "./scan.js";
-import { applyClaudeDir, RUNNER_FRESH_MS, runnerCode, runnerLockPath, startRunner, stopRunner } from "./start.js";
+import { appCommand, appOpenPath, applyClaudeDir, desktopAppPath, RUNNER_FRESH_MS, runnerCode, runnerLockPath, startRunner, stopRunner, type DesktopApp } from "./start.js";
 
 const OTHER = 4242; // a pid that isn't this process
 
@@ -81,6 +81,109 @@ test("one runner: a runner on older code is stopped and a new one started; unins
   expect(await stopRunner(m.claudeDir, m.opts())).toBe(true);
   expect(m.killed).toEqual([OTHER, OTHER + 1]);
   expect(await stopRunner(m.claudeDir, m.opts())).toBe(false);
+});
+
+test("one engine: with the desktop app installed it is opened in place of node, a node runner running is stopped first, and a live app is running whatever code it runs", async () => {
+  const m = await machine();
+  const { app } = withApp(m);
+  const opened: { app: DesktopApp; claudeDir: string }[] = [];
+  const start = (isAlive: (pid: number) => boolean = () => true) => startRunner({ ...m.opts(isAlive), open: (a, claudeDir) => opened.push({ app: a, claudeDir }) });
+
+  // A node runner on the current code runs: it is stopped, and the app opened.
+  await m.hold(OTHER);
+  expect(await start()).toBe("started");
+  expect(m.killed).toEqual([OTHER]);
+  expect(opened).toEqual([{ app, claudeDir: m.claudeDir }]);
+  expect(m.spawned).toEqual([]);
+
+  // The app holds the lock: running, on a plugin update's new code too.
+  await takeLock(m.lock, OTHER + 1, () => false, false, Date.now(), { extra: { code: await runnerCode(m.runnerJs), engine: "app" } });
+  fs.writeFileSync(m.runnerJs, "// v2, from a plugin update");
+  expect(await start()).toBe("running");
+  expect(m.killed).toEqual([OTHER]);
+  expect(opened).toHaveLength(1);
+
+  // The app's program gone, node runs again.
+  fs.rmSync(app.launch);
+  expect(await start(() => false)).toBe("started");
+  expect(m.spawned).toHaveLength(1);
+  expect(opened).toHaveLength(1);
+});
+
+// The desktop app installed for the machine's config folder, with the runner copy's runner.json beside its runner.
+function withApp(m: Awaited<ReturnType<typeof machine>>, version = "0.1.0") {
+  fs.copyFileSync(path.join(modDir, "runner.json"), path.join(path.dirname(path.dirname(m.runnerJs)), "runner.json"));
+  const launch = path.join(m.claudeDir, "app", "bin", "launcher.exe");
+  fs.mkdirSync(path.dirname(launch), { recursive: true });
+  fs.writeFileSync(launch, "");
+  const app: DesktopApp = { version, dir: path.dirname(path.dirname(launch)), launch };
+  fs.writeFileSync(desktopAppPath(m.claudeDir), JSON.stringify(app));
+  const opened: DesktopApp[] = [];
+  let clock = Date.now();
+  const start = (isAlive: (pid: number) => boolean = () => false) => startRunner({ ...m.opts(isAlive), now: () => clock, open: (a) => opened.push(a) });
+  const log = () => fs.readFileSync(path.join(m.claudeDir, "isoplan", "logs", "runner.log"), "utf8");
+  return { app, opened, start, log, later: (ms: number) => (clock += ms), now: () => clock };
+}
+
+test("one engine: an app that doesn't take the lock in appStartSeconds is passed over for node, until appRetryHours have passed or another version is installed", async () => {
+  const m = await machine();
+  const a = withApp(m);
+  expect(await a.start()).toBe("started");
+  expect(a.opened).toHaveLength(1);
+  // Still starting: not opened twice, and nothing on node.
+  a.later(60000);
+  expect(await a.start()).toBe("started");
+  expect(a.opened).toHaveLength(1);
+  expect(m.spawned).toEqual([]);
+  // Past appStartSeconds (120) without a lock: node, and runner.log says why.
+  a.later(60001);
+  expect(await a.start()).toBe("started");
+  expect(a.opened).toHaveLength(1);
+  expect(m.spawned).toHaveLength(1);
+  expect(a.log()).toMatch(/the desktop app 0\.1\.0 isn't used until .*: it didn't start being the runner within 120 seconds of being opened/);
+  // Marked failing: node again, not the app.
+  expect(await a.start()).toBe("started");
+  expect(m.spawned).toHaveLength(2);
+  expect(a.opened).toHaveLength(1);
+  // Past appRetryHours (6) it is opened again.
+  a.later(6 * 3600000);
+  expect(await a.start()).toBe("started");
+  expect(a.opened).toHaveLength(2);
+
+  // Another version installed is opened at once, and the app taking the lock is running.
+  const n = await machine();
+  const b = withApp(n);
+  await b.start();
+  b.later(120001);
+  await b.start();
+  expect(b.opened).toHaveLength(1);
+  const fixed = { ...b.app, version: "0.2.0" };
+  fs.writeFileSync(desktopAppPath(n.claudeDir), JSON.stringify(fixed));
+  expect(await b.start()).toBe("started");
+  expect(b.opened).toEqual([b.app, fixed]);
+});
+
+test("one engine: an app whose runner kept crashing on the current code is passed over for node", async () => {
+  const m = await machine();
+  const a = withApp(m);
+  await takeLock(m.lock, OTHER, () => false, false, Date.now(), { extra: { engine: "app" } });
+  await holdOff(m.lock, OTHER, a.now() + 3600000, { reason: "gave-up", code: await runnerCode(m.runnerJs), engine: "app" });
+  expect(await a.start()).toBe("started");
+  expect(a.opened).toEqual([]);
+  expect(m.spawned).toHaveLength(1);
+  expect(fs.existsSync(m.lock)).toBe(false);
+  expect(a.log()).toMatch(/the desktop app 0\.1\.0 isn't used until .*: its runner kept crashing on the app's Bun/);
+  expect(JSON.parse(fs.readFileSync(appOpenPath(m.claudeDir), "utf8"))).toMatchObject({ version: "0.1.0", failed: "its runner kept crashing on the app's Bun" });
+});
+
+test("one engine: the app is started hidden with its config folder in CLAUDE_CONFIG_DIR, which its launcher passes on where arguments aren't", () => {
+  const home = path.resolve("/home/me");
+  const app: DesktopApp = { version: "0.1.0", dir: "/home/me/Applications/Isoplan.app", launch: "/home/me/Applications/Isoplan.app/Contents/MacOS/launcher" };
+  const env = { PATH: "/bin", CLAUDE_CONFIG_DIR: "/elsewhere" };
+  expect(appCommand(app, path.join(home, ".claude"), "darwin", env, home)).toEqual({ file: "/usr/bin/open", args: ["-g", app.dir], env: { PATH: "/bin" } });
+  const other = path.join(home, "work-claude");
+  expect(appCommand(app, other, "darwin", env, home)).toEqual({ file: "/usr/bin/open", args: ["-g", "--env", `CLAUDE_CONFIG_DIR=${other}`, app.dir], env: { PATH: "/bin", CLAUDE_CONFIG_DIR: other } });
+  expect(appCommand({ ...app, launch: "C:/Isoplan/bin/launcher.exe" }, other, "win32", env, home)).toEqual({ file: "C:/Isoplan/bin/launcher.exe", args: [], env: { PATH: "/bin", CLAUDE_CONFIG_DIR: other } });
 });
 
 test("one runner: a hold-off keeps it from starting; nothing starts when install recorded no runner, or it is gone", async () => {

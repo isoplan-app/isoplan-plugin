@@ -37,6 +37,7 @@ import path from "node:path";
 import { noPromptEnv } from "../handoff/git.js";
 import { readSettings, writeSettings } from "../install/install.js";
 import { installs, type Install } from "../install/state.js";
+import { machineNode } from "../runner/claude-binary.js";
 import { forkEnv, killTree } from "../runner/claude.js";
 import { alive, releaseLock, takeLock } from "../wake/lock.js";
 
@@ -75,10 +76,10 @@ export interface GitChoices {
 /**
  * The environment the commands run with: this one's without the session's own variables (as the
  * runner's fork, claude.ts), and nothing that can prompt (as a handoff's git, handoff/git.ts). The
- * askpass, where the person set none (GIT_ASKPASS, SSH_ASKPASS, core.askPass), is node, which takes
+ * askpass, where the person set none (GIT_ASKPASS, SSH_ASKPASS, core.askPass), is node (machineNode), which takes
  * git's prompt for a script it can't find and fails, so git gives up at once instead of asking.
  */
-export function commandEnv(env: Record<string, string | undefined>, git: GitChoices = { sshCommand: false, askPass: false }, node = process.execPath): Record<string, string> {
+export function commandEnv(env: Record<string, string | undefined>, git: GitChoices = { sshCommand: false, askPass: false }, node = machineNode()): Record<string, string> {
   const out = noPromptEnv(forkEnv(env), git.sshCommand);
   if (!git.askPass && !out.GIT_ASKPASS && !out.SSH_ASKPASS) Object.assign(out, { GIT_ASKPASS: node, SSH_ASKPASS: node, SSH_ASKPASS_REQUIRE: "never" });
   return out;

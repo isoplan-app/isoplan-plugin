@@ -7,6 +7,7 @@
 // Kept free of zod and the protocol so install stays small.
 
 import { execFile } from "node:child_process";
+import { statSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -38,8 +39,26 @@ export async function findClaude(env: Record<string, string | undefined>, platfo
   return null;
 }
 
+/**
+ * The machine's node: this process's own runtime, except under Bun (the desktop app runs the
+ * runner's worker on its Bun), where it is the first node on PATH, the environment install recorded.
+ * Bun's own when PATH has none.
+ */
+export function machineNode(env: Record<string, string | undefined> = process.env, platform: NodeJS.Platform = process.platform, runtime: { execPath: string; bun?: string } = { execPath: process.execPath, bun: process.versions.bun }, exists: (p: string) => boolean = isFileSync): string {
+  if (!runtime.bun) return runtime.execPath;
+  const windows = platform === "win32";
+  const pathVar = Object.entries(env).find(([key]) => key.toUpperCase() === "PATH")?.[1] ?? "";
+  for (const dir of pathVar.split(windows ? ";" : ":").filter(Boolean)) {
+    const node = (windows ? path.win32.join : path.posix.join)(dir, windows ? "node.exe" : "node");
+    if (exists(node)) return node;
+  }
+  return runtime.execPath;
+}
+
+const isFileSync = (p: string) => statSync(p, { throwIfNoEntry: false })?.isFile() ?? false;
+
 /** What runs it: the binary itself, or node and the cli.js. */
-export const claudeCommand = (binary: string, node = process.execPath): string[] => (binary.endsWith(".js") ? [node, binary] : [binary]);
+export const claudeCommand = (binary: string, node?: string): string[] => (binary.endsWith(".js") ? [node ?? machineNode(), binary] : [binary]);
 
 /** The recorded binary when it is still there, else a fresh lookup. */
 export async function claudeBinary(claudeDir: string, env: Record<string, string | undefined>, platform: NodeJS.Platform, home: string): Promise<string | null> {

@@ -7360,12 +7360,72 @@ async function liveRunner(claudeDir, now, isAlive) {
 	};
 	return null;
 }
+const desktopAppPath = (claudeDir) => path.join(claudeDir, "isoplan", "runner", "desktop-app.json");
+/** The desktop app install recorded, if it is in use (not switched off) and its program is still there. */
+async function recordedApp(claudeDir) {
+	try {
+		const app = JSON.parse(await fs.readFile(desktopAppPath(claudeDir), "utf8"));
+		if (typeof app.version !== "string" || typeof app.dir !== "string" || typeof app.launch !== "string" || app.off === true) return null;
+		return (await fs.stat(app.launch).catch(() => null))?.isFile() ? {
+			version: app.version,
+			dir: app.dir,
+			launch: app.launch
+		} : null;
+	} catch {
+		return null;
+	}
+}
+const appOpenPath = (claudeDir) => path.join(claudeDir, "isoplan", "runner", "desktop-app-open.json");
+/** The lock's holder is the desktop app. */
+const isAppLock = (extra) => extra.engine === "app";
+/**
+* How the desktop app is started for `claudeDir` with no window and no focus. Electrobun's launcher
+* doesn't pass its arguments on to the app (seen on Windows), so a config folder other than
+* ~/.claude goes in CLAUDE_CONFIG_DIR, as Claude Code reads it; ~/.claude takes it out. On macOS
+* through `open -g`, so it starts as an app of its own and stays in the background; `--env` only
+* when the folder isn't ~/.claude.
+*/
+function appCommand(app, claudeDir, platform, env, home) {
+	const isDefault = path.resolve(claudeDir) === path.resolve(home, ".claude");
+	const { CLAUDE_CONFIG_DIR: _, ...rest } = env;
+	const appEnv = isDefault ? rest : {
+		...rest,
+		CLAUDE_CONFIG_DIR: claudeDir
+	};
+	if (platform === "darwin") return {
+		file: "/usr/bin/open",
+		args: [
+			"-g",
+			...isDefault ? [] : ["--env", `CLAUDE_CONFIG_DIR=${claudeDir}`],
+			app.dir
+		],
+		env: appEnv
+	};
+	return {
+		file: app.launch,
+		args: [],
+		env: appEnv
+	};
+}
+/** Starts the desktop app (appCommand), and doesn't wait for it. */
+function openApp(app, claudeDir) {
+	const { file, args, env } = appCommand(app, claudeDir, process.platform, process.env, os.homedir());
+	spawn(file, args, {
+		cwd: claudeDir,
+		env,
+		detached: true,
+		stdio: "ignore",
+		windowsHide: true
+	}).on("error", () => {}).unref();
+}
 /**
 * Starts the recorded runner unless a live one runs the recorded code. One on older code is
 * replaced. A hold-off keeps it from starting, except a crash loop's hold-off on older code: a new
-* version may have fixed what crashed.
+* version may have fixed what crashed. With the desktop app recorded it opens the app instead,
+* once no node runner runs, and a live app is running; an app that is failing (see above) is
+* passed over for node.
 */
-async function startRunner({ claudeDir, spawn, isAlive = alive, kill = (pid) => process.kill(pid), now = Date.now }) {
+async function startRunner({ claudeDir, spawn, isAlive = alive, kill = (pid) => process.kill(pid), now = Date.now, open = openApp }) {
 	let runner;
 	try {
 		runner = JSON.parse(await fs.readFile(wakeRecordPath(claudeDir), "utf8")).runner;
@@ -7377,11 +7437,15 @@ async function startRunner({ claudeDir, spawn, isAlive = alive, kill = (pid) => 
 	if (!code) return "not-installed";
 	const lockFile = runnerLockPath(claudeDir);
 	const live = await liveRunner(claudeDir, now(), isAlive);
+	if (live && !live.isHoldOff && isAppLock(live.extra)) return "running";
+	const recorded = await recordedApp(claudeDir);
+	const settings = recorded && await loadSettings(nodeIo(), path.join(path.dirname(path.dirname(runner)), "runner.json"), path.join(claudeDir, "isoplan", "runner.json"));
+	const app = recorded && settings && !await appFailing(claudeDir, recorded, live, code, now(), settings) ? recorded : null;
 	if (live?.isHoldOff) {
-		if (live.extra.reason !== "gave-up" || live.extra.code === code) return "held-off";
+		if (live.extra.reason !== "gave-up" || live.extra.code === code && !(recorded && !app && isAppLock(live.extra))) return "held-off";
 		if ((await readLock(lockFile))?.until === live.until) await fs.rm(lockFile, { force: true });
 	} else if (live) {
-		if (live.extra.code === code) return "running";
+		if (live.extra.code === code && !app) return "running";
 		await stopRunner(claudeDir, {
 			isAlive,
 			kill,
@@ -7392,6 +7456,16 @@ async function startRunner({ claudeDir, spawn, isAlive = alive, kill = (pid) => 
 			}
 		});
 	}
+	if (app) {
+		const opened = await readAppOpen(claudeDir);
+		if (opened?.version === app.version && opened.openedAt !== void 0 && !opened.failed && now() - opened.openedAt < settings.appStartSeconds * 1e3) return "started";
+		await fs.writeFile(appOpenPath(claudeDir), JSON.stringify({
+			version: app.version,
+			openedAt: now()
+		}) + "\n");
+		open(app, claudeDir);
+		return "started";
+	}
 	const env = await recordedEnv(claudeDir);
 	spawn([
 		runner,
@@ -7400,6 +7474,38 @@ async function startRunner({ claudeDir, spawn, isAlive = alive, kill = (pid) => 
 		...env ? [] : ["--inherited-env"]
 	], claudeDir, env ?? void 0);
 	return "started";
+}
+async function readAppOpen(claudeDir) {
+	try {
+		return JSON.parse(await fs.readFile(appOpenPath(claudeDir), "utf8"));
+	} catch {
+		return null;
+	}
+}
+/**
+* Whether the recorded app is failing: marked so earlier, and not yet for long enough; or found
+* failing now, when it is marked and runner.log says why.
+*/
+async function appFailing(claudeDir, app, live, code, now, settings) {
+	const opened = await readAppOpen(claudeDir);
+	if (opened?.version === app.version && opened.failed && (opened.until ?? 0) > now) return true;
+	let why = null;
+	if (live?.isHoldOff && isAppLock(live.extra) && live.extra.reason === "gave-up" && live.extra.code === code) why = "its runner kept crashing on the app's Bun";
+	else if (!live?.isHoldOff && opened?.version === app.version && !opened.failed && opened.openedAt !== void 0 && now - opened.openedAt >= settings.appStartSeconds * 1e3) why = `it didn't start being the runner within ${settings.appStartSeconds} seconds of being opened (was it blocked, or did it crash?)`;
+	if (!why) return false;
+	const until = now + settings.appRetryHours * 36e5;
+	await fs.writeFile(appOpenPath(claudeDir), JSON.stringify({
+		version: app.version,
+		failed: why,
+		until
+	}) + "\n");
+	await logLine(claudeDir, `the desktop app ${app.version} isn't used until ${new Date(until).toISOString()}, or until another version is installed: ${why}. The runner runs on node meanwhile.`, now);
+	return true;
+}
+async function logLine(claudeDir, text, now) {
+	const file = path.join(claudeDir, "isoplan", "logs", "runner.log");
+	await fs.mkdir(path.dirname(file), { recursive: true });
+	await fs.appendFile(file, `${new Date(now).toISOString()} ${text}\n`);
 }
 /**
 * Ends the running runner, for uninstall and updates: its worker and forks follow once its
@@ -7629,7 +7735,8 @@ const isUninstalling = (claudeDir) => isHeld(uninstallLockPath(claudeDir));
 /**
 * Ends the runner its lock names, and waits up to `waitMs` for it to exit; its worker and forks
 * follow its supervisor. One whose lock is stale (not kept fresh, after a sleep, say) is ended only
-* when its pid is alive and its command line runs this folder's copy of the runner, since after a
+* when its pid is alive and its command line runs this folder's copy of the runner, or the desktop
+* app install put in place, since after a
 * reboot the pid may name another process. True when one was ended.
 */
 async function stopOurRunner(claudeDir, { isAlive = alive, kill = killTree, now = Date.now, commandOf, waitMs = 0 } = {}) {
@@ -7639,8 +7746,8 @@ async function stopOurRunner(claudeDir, { isAlive = alive, kill = killTree, now 
 	if (!lock || !pid || !isAlive(pid)) return false;
 	if (now() - lock.mtimeMs >= 9e4) {
 		const command = commandOf ? await commandOf(pid) : null;
-		const runner = normalPath(path.join(runnerAppDir(claudeDir), copiedAs("dist/runner.js")));
-		if (!command || !command.replace(/\\/g, "/").toLowerCase().includes(runner.toLowerCase())) return false;
+		const ours = [path.join(runnerAppDir(claudeDir), copiedAs("dist/runner.js")), (await recordedApp(claudeDir))?.dir].filter((p) => !!p).map((p) => normalPath(p).toLowerCase());
+		if (!command || !ours.some((p) => command.replace(/\\/g, "/").toLowerCase().includes(p))) return false;
 	}
 	try {
 		kill(pid);

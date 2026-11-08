@@ -4,7 +4,9 @@ import { execFile, spawn } from "node:child_process";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
-import { statSync } from "node:fs";
+import { createWriteStream, statSync } from "node:fs";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import net from "node:net";
 //#region ../../node_modules/.pnpm/zod@4.6.7/node_modules/zod/v4/core/util.js
 function getEnumValues(entries) {
@@ -6726,6 +6728,53 @@ discriminatedUnion("type", [
 	})
 ]);
 //#endregion
+//#region src/connect/dialog.ts
+const exec = (file, args, env) => new Promise((resolve) => {
+	let stdout = "";
+	const child = spawn(file, args, {
+		windowsHide: true,
+		stdio: [
+			"ignore",
+			"pipe",
+			"ignore"
+		],
+		env: env ? {
+			...process.env,
+			...env
+		} : process.env
+	});
+	child.stdout.on("data", (chunk) => stdout += String(chunk));
+	child.on("error", () => resolve({
+		code: null,
+		stdout
+	}));
+	child.on("close", (code) => resolve({
+		code,
+		stdout
+	}));
+});
+[
+	"$ErrorActionPreference = 'Stop'",
+	"Add-Type -AssemblyName System.Windows.Forms, System.Drawing",
+	...[`Add-Type -Namespace IsoplanWin -Name User32 -MemberDefinition '[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);'`, "$first = New-Object System.Windows.Forms.Form; [void][IsoplanWin.User32]::ShowWindow($first.Handle, 0); $first.Dispose()"],
+	"[System.Windows.Forms.Application]::EnableVisualStyles()",
+	"$f = New-Object System.Windows.Forms.Form",
+	"$f.Text = $env:ISOPLAN_DIALOG_TITLE",
+	"$f.FormBorderStyle = 'FixedDialog'; $f.MaximizeBox = $false; $f.MinimizeBox = $false; $f.StartPosition = 'CenterScreen'; $f.TopMost = $true",
+	"$f.AutoSize = $true; $f.AutoSizeMode = 'GrowAndShrink'; $f.Padding = New-Object System.Windows.Forms.Padding 16",
+	"$layout = New-Object System.Windows.Forms.FlowLayoutPanel; $layout.FlowDirection = 'TopDown'; $layout.AutoSize = $true; $layout.AutoSizeMode = 'GrowAndShrink'",
+	"$label = New-Object System.Windows.Forms.Label; $label.Text = $env:ISOPLAN_DIALOG_TEXT; $label.UseMnemonic = $false; $label.AutoSize = $true; $label.MaximumSize = New-Object System.Drawing.Size 480, 0",
+	"$row = New-Object System.Windows.Forms.FlowLayoutPanel; $row.FlowDirection = 'RightToLeft'; $row.AutoSize = $true; $row.Anchor = 'Right'",
+	"$cancel = New-Object System.Windows.Forms.Button; $cancel.Text = 'Cancel'; $cancel.UseMnemonic = $false; $cancel.AutoSize = $true; $cancel.DialogResult = 'Cancel'",
+	"$connect = New-Object System.Windows.Forms.Button; $connect.Text = 'Connect'; $connect.UseMnemonic = $false; $connect.AutoSize = $true; $connect.DialogResult = 'OK'",
+	"$row.Controls.AddRange(@($cancel, $connect)); $layout.Controls.AddRange(@($label, $row)); $f.Controls.Add($layout)",
+	"$f.AcceptButton = $cancel; $f.CancelButton = $cancel",
+	`$timer = New-Object System.Windows.Forms.Timer; $timer.Interval = 300000; $timer.Add_Tick({ $f.DialogResult = 'Cancel'; $f.Close() })`,
+	"$f.Add_Shown({ $f.Activate(); $cancel.Focus(); $timer.Start() })",
+	"$r = $f.ShowDialog(); $timer.Stop()",
+	"if ($r -eq [System.Windows.Forms.DialogResult]::OK) { exit 0 } else { exit 2 }"
+].join("\n");
+//#endregion
 //#region src/data-layer/config.ts
 async function loadConfig(io, defaultsPath, userPath) {
 	const config = await loadSettings(io, defaultsPath, userPath);
@@ -6841,33 +6890,6 @@ function runCommand([cmd, ...args], { cwd }) {
 	});
 }
 //#endregion
-//#region src/runner/claude-binary.ts
-const claudeBinaryPath = (claudeDir) => path.join(claudeDir, "isoplan", "claude-binary.json");
-const isFile = (p) => fs.stat(p).then((s) => s.isFile(), () => false);
-/**
-* The `claude` binary's path: PATH first, then where Claude Code's installers put it. On Windows
-* an npm install leaves only a claude.cmd shim, which can't be run without a shell, so its cli.js
-* is used instead (run with node). Null when none is found.
-*/
-async function findClaude(env, platform, home, exists = isFile) {
-	const windows = platform === "win32";
-	const join = windows ? path.win32.join : path.posix.join;
-	const dirs = (Object.entries(env).find(([key]) => key.toUpperCase() === "PATH")?.[1] ?? "").split(windows ? ";" : ":").filter(Boolean);
-	const candidates = windows ? [...dirs.map((d) => join(d, "claude.exe")), join(home, ".local", "bin", "claude.exe")] : [
-		...dirs.map((d) => join(d, "claude")),
-		join(home, ".local", "bin", "claude"),
-		join(home, ".claude", "local", "claude"),
-		"/opt/homebrew/bin/claude",
-		"/usr/local/bin/claude"
-	];
-	for (const candidate of candidates) if (await exists(candidate)) return candidate;
-	if (windows) for (const d of dirs) {
-		const cli = join(d, "node_modules", "@anthropic-ai", "claude-code", "cli.js");
-		if (await exists(join(d, "claude.cmd")) && await exists(cli)) return cli;
-	}
-	return null;
-}
-//#endregion
 //#region src/wake/lock.ts
 async function readText(file) {
 	try {
@@ -6965,6 +6987,14 @@ async function takeLock(file, pid, isAlive = alive, force = false, now = Date.no
 async function releaseLock(file, pid) {
 	if (await lockHolder(file) === pid) await fs.rm(file, { force: true });
 }
+/** Turns the lock `pid` holds into a hold-off until `until`, with `extra` beside it; one another has taken is left. */
+async function holdOff(file, pid, until, extra = {}) {
+	if (await lockHolder(file) === pid) await fs.writeFile(file, JSON.stringify({
+		pid: 0,
+		until,
+		...extra
+	}));
+}
 function alive(pid) {
 	try {
 		process.kill(pid, 0);
@@ -7012,12 +7042,72 @@ async function liveRunner(claudeDir, now, isAlive) {
 	};
 	return null;
 }
+const desktopAppPath = (claudeDir) => path.join(claudeDir, "isoplan", "runner", "desktop-app.json");
+/** The desktop app install recorded, if it is in use (not switched off) and its program is still there. */
+async function recordedApp(claudeDir) {
+	try {
+		const app = JSON.parse(await fs.readFile(desktopAppPath(claudeDir), "utf8"));
+		if (typeof app.version !== "string" || typeof app.dir !== "string" || typeof app.launch !== "string" || app.off === true) return null;
+		return (await fs.stat(app.launch).catch(() => null))?.isFile() ? {
+			version: app.version,
+			dir: app.dir,
+			launch: app.launch
+		} : null;
+	} catch {
+		return null;
+	}
+}
+const appOpenPath = (claudeDir) => path.join(claudeDir, "isoplan", "runner", "desktop-app-open.json");
+/** The lock's holder is the desktop app. */
+const isAppLock = (extra) => extra.engine === "app";
+/**
+* How the desktop app is started for `claudeDir` with no window and no focus. Electrobun's launcher
+* doesn't pass its arguments on to the app (seen on Windows), so a config folder other than
+* ~/.claude goes in CLAUDE_CONFIG_DIR, as Claude Code reads it; ~/.claude takes it out. On macOS
+* through `open -g`, so it starts as an app of its own and stays in the background; `--env` only
+* when the folder isn't ~/.claude.
+*/
+function appCommand(app, claudeDir, platform, env, home) {
+	const isDefault = path.resolve(claudeDir) === path.resolve(home, ".claude");
+	const { CLAUDE_CONFIG_DIR: _, ...rest } = env;
+	const appEnv = isDefault ? rest : {
+		...rest,
+		CLAUDE_CONFIG_DIR: claudeDir
+	};
+	if (platform === "darwin") return {
+		file: "/usr/bin/open",
+		args: [
+			"-g",
+			...isDefault ? [] : ["--env", `CLAUDE_CONFIG_DIR=${claudeDir}`],
+			app.dir
+		],
+		env: appEnv
+	};
+	return {
+		file: app.launch,
+		args: [],
+		env: appEnv
+	};
+}
+/** Starts the desktop app (appCommand), and doesn't wait for it. */
+function openApp(app, claudeDir) {
+	const { file, args, env } = appCommand(app, claudeDir, process.platform, process.env, os.homedir());
+	spawn(file, args, {
+		cwd: claudeDir,
+		env,
+		detached: true,
+		stdio: "ignore",
+		windowsHide: true
+	}).on("error", () => {}).unref();
+}
 /**
 * Starts the recorded runner unless a live one runs the recorded code. One on older code is
 * replaced. A hold-off keeps it from starting, except a crash loop's hold-off on older code: a new
-* version may have fixed what crashed.
+* version may have fixed what crashed. With the desktop app recorded it opens the app instead,
+* once no node runner runs, and a live app is running; an app that is failing (see above) is
+* passed over for node.
 */
-async function startRunner({ claudeDir, spawn, isAlive = alive, kill = (pid) => process.kill(pid), now = Date.now }) {
+async function startRunner({ claudeDir, spawn, isAlive = alive, kill = (pid) => process.kill(pid), now = Date.now, open = openApp }) {
 	let runner;
 	try {
 		runner = JSON.parse(await fs.readFile(wakeRecordPath(claudeDir), "utf8")).runner;
@@ -7029,11 +7119,15 @@ async function startRunner({ claudeDir, spawn, isAlive = alive, kill = (pid) => 
 	if (!code) return "not-installed";
 	const lockFile = runnerLockPath(claudeDir);
 	const live = await liveRunner(claudeDir, now(), isAlive);
+	if (live && !live.isHoldOff && isAppLock(live.extra)) return "running";
+	const recorded = await recordedApp(claudeDir);
+	const settings = recorded && await loadSettings(nodeIo(), path.join(path.dirname(path.dirname(runner)), "runner.json"), path.join(claudeDir, "isoplan", "runner.json"));
+	const app = recorded && settings && !await appFailing(claudeDir, recorded, live, code, now(), settings) ? recorded : null;
 	if (live?.isHoldOff) {
-		if (live.extra.reason !== "gave-up" || live.extra.code === code) return "held-off";
+		if (live.extra.reason !== "gave-up" || live.extra.code === code && !(recorded && !app && isAppLock(live.extra))) return "held-off";
 		if ((await readLock(lockFile))?.until === live.until) await fs.rm(lockFile, { force: true });
 	} else if (live) {
-		if (live.extra.code === code) return "running";
+		if (live.extra.code === code && !app) return "running";
 		await stopRunner(claudeDir, {
 			isAlive,
 			kill,
@@ -7044,6 +7138,16 @@ async function startRunner({ claudeDir, spawn, isAlive = alive, kill = (pid) => 
 			}
 		});
 	}
+	if (app) {
+		const opened = await readAppOpen(claudeDir);
+		if (opened?.version === app.version && opened.openedAt !== void 0 && !opened.failed && now() - opened.openedAt < settings.appStartSeconds * 1e3) return "started";
+		await fs.writeFile(appOpenPath(claudeDir), JSON.stringify({
+			version: app.version,
+			openedAt: now()
+		}) + "\n");
+		open(app, claudeDir);
+		return "started";
+	}
 	const env = await recordedEnv(claudeDir);
 	spawn([
 		runner,
@@ -7052,6 +7156,38 @@ async function startRunner({ claudeDir, spawn, isAlive = alive, kill = (pid) => 
 		...env ? [] : ["--inherited-env"]
 	], claudeDir, env ?? void 0);
 	return "started";
+}
+async function readAppOpen(claudeDir) {
+	try {
+		return JSON.parse(await fs.readFile(appOpenPath(claudeDir), "utf8"));
+	} catch {
+		return null;
+	}
+}
+/**
+* Whether the recorded app is failing: marked so earlier, and not yet for long enough; or found
+* failing now, when it is marked and runner.log says why.
+*/
+async function appFailing(claudeDir, app, live, code, now, settings) {
+	const opened = await readAppOpen(claudeDir);
+	if (opened?.version === app.version && opened.failed && (opened.until ?? 0) > now) return true;
+	let why = null;
+	if (live?.isHoldOff && isAppLock(live.extra) && live.extra.reason === "gave-up" && live.extra.code === code) why = "its runner kept crashing on the app's Bun";
+	else if (!live?.isHoldOff && opened?.version === app.version && !opened.failed && opened.openedAt !== void 0 && now - opened.openedAt >= settings.appStartSeconds * 1e3) why = `it didn't start being the runner within ${settings.appStartSeconds} seconds of being opened (was it blocked, or did it crash?)`;
+	if (!why) return false;
+	const until = now + settings.appRetryHours * 36e5;
+	await fs.writeFile(appOpenPath(claudeDir), JSON.stringify({
+		version: app.version,
+		failed: why,
+		until
+	}) + "\n");
+	await logLine(claudeDir, `the desktop app ${app.version} isn't used until ${new Date(until).toISOString()}, or until another version is installed: ${why}. The runner runs on node meanwhile.`, now);
+	return true;
+}
+async function logLine(claudeDir, text, now) {
+	const file = path.join(claudeDir, "isoplan", "logs", "runner.log");
+	await fs.mkdir(path.dirname(file), { recursive: true });
+	await fs.appendFile(file, `${new Date(now).toISOString()} ${text}\n`);
 }
 /**
 * Ends the running runner, for uninstall and updates: its worker and forks follow once its
@@ -7070,52 +7206,222 @@ async function stopRunner(claudeDir, { isAlive = alive, kill = (pid) => process.
 	return true;
 }
 //#endregion
-//#region src/connect/dialog.ts
-const exec = (file, args, env) => new Promise((resolve) => {
-	let stdout = "";
-	const child = spawn(file, args, {
-		windowsHide: true,
-		stdio: [
-			"ignore",
-			"pipe",
-			"ignore"
-		],
-		env: env ? {
-			...process.env,
-			...env
-		} : process.env
+//#region src/install/app.ts
+const desktopAppLockPath = (claudeDir) => path.join(claudeDir, "isoplan", "runner", "desktop-app.lock");
+/** Where the app goes for this person, the folder its archive holds at its top, and the program to start in it. */
+function appPlace(platform, home, env) {
+	if (platform === "win32") return {
+		dir: path.win32.join(env.LOCALAPPDATA || path.win32.join(home, "AppData", "Local"), "Programs", "Isoplan"),
+		top: "Isoplan"
+	};
+	if (platform === "darwin") return {
+		dir: path.posix.join(home, "Applications", "Isoplan.app"),
+		top: "Isoplan.app"
+	};
+	return null;
+}
+/** The program that starts the app: Electrobun's launcher on Windows, the bundle's executable on macOS. */
+async function launchOf(dir, platform) {
+	if (platform === "win32") return path.join(dir, "bin", "launcher.exe");
+	const plist = await fs.readFile(path.join(dir, "Contents", "Info.plist"), "utf8");
+	const name = /<key>CFBundleExecutable<\/key>\s*<string>([^<]+)<\/string>/.exec(plist)?.[1];
+	if (!name) throw new Error("its Info.plist names no executable");
+	return path.join(dir, "Contents", "MacOS", name);
+}
+/** The system's own tar, by its full path: another tar first on PATH (Git Bash's) misreads C:\ paths. */
+const systemTar = (platform, env) => platform === "win32" ? path.win32.join(env.SystemRoot || "C:\\Windows", "System32", "tar.exe") : "/usr/bin/tar";
+/**
+* Puts the app this plugin version names in place, unless it is there already. Says what it
+* changed, and why the runner stays on node when it tried and couldn't; nothing when there was
+* nothing to do (in place already, held off, another install under way, no app for this OS, or
+* switched off with none in use). `installed` is true when a new app is in place, for the caller
+* to start it.
+*/
+async function installApp(o) {
+	const { claudeDir, platform } = o;
+	const now = o.now ?? Date.now;
+	const isAlive = o.isAlive ?? alive;
+	const settings = await loadSettings(nodeIo(), path.join(o.from, "runner.json"), path.join(claudeDir, "isoplan", "runner.json"));
+	const recorded = await recordedApp(claudeDir);
+	const place = appPlace(platform, o.home, o.env);
+	const stay = (why) => ({
+		changes: [`the runner stays on node: ${why}`],
+		installed: false
 	});
-	child.stdout.on("data", (chunk) => stdout += String(chunk));
-	child.on("error", () => resolve({
-		code: null,
-		stdout
-	}));
-	child.on("close", (code) => resolve({
-		code,
-		stdout
-	}));
-});
-[
-	"$ErrorActionPreference = 'Stop'",
-	"Add-Type -AssemblyName System.Windows.Forms, System.Drawing",
-	...[`Add-Type -Namespace IsoplanWin -Name User32 -MemberDefinition '[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);'`, "$first = New-Object System.Windows.Forms.Form; [void][IsoplanWin.User32]::ShowWindow($first.Handle, 0); $first.Dispose()"],
-	"[System.Windows.Forms.Application]::EnableVisualStyles()",
-	"$f = New-Object System.Windows.Forms.Form",
-	"$f.Text = $env:ISOPLAN_DIALOG_TITLE",
-	"$f.FormBorderStyle = 'FixedDialog'; $f.MaximizeBox = $false; $f.MinimizeBox = $false; $f.StartPosition = 'CenterScreen'; $f.TopMost = $true",
-	"$f.AutoSize = $true; $f.AutoSizeMode = 'GrowAndShrink'; $f.Padding = New-Object System.Windows.Forms.Padding 16",
-	"$layout = New-Object System.Windows.Forms.FlowLayoutPanel; $layout.FlowDirection = 'TopDown'; $layout.AutoSize = $true; $layout.AutoSizeMode = 'GrowAndShrink'",
-	"$label = New-Object System.Windows.Forms.Label; $label.Text = $env:ISOPLAN_DIALOG_TEXT; $label.UseMnemonic = $false; $label.AutoSize = $true; $label.MaximumSize = New-Object System.Drawing.Size 480, 0",
-	"$row = New-Object System.Windows.Forms.FlowLayoutPanel; $row.FlowDirection = 'RightToLeft'; $row.AutoSize = $true; $row.Anchor = 'Right'",
-	"$cancel = New-Object System.Windows.Forms.Button; $cancel.Text = 'Cancel'; $cancel.UseMnemonic = $false; $cancel.AutoSize = $true; $cancel.DialogResult = 'Cancel'",
-	"$connect = New-Object System.Windows.Forms.Button; $connect.Text = 'Connect'; $connect.UseMnemonic = $false; $connect.AutoSize = $true; $connect.DialogResult = 'OK'",
-	"$row.Controls.AddRange(@($cancel, $connect)); $layout.Controls.AddRange(@($label, $row)); $f.Controls.Add($layout)",
-	"$f.AcceptButton = $cancel; $f.CancelButton = $cancel",
-	`$timer = New-Object System.Windows.Forms.Timer; $timer.Interval = 300000; $timer.Add_Tick({ $f.DialogResult = 'Cancel'; $f.Close() })`,
-	"$f.Add_Shown({ $f.Activate(); $cancel.Focus(); $timer.Start() })",
-	"$r = $f.ShowDialog(); $timer.Stop()",
-	"if ($r -eq [System.Windows.Forms.DialogResult]::OK) { exit 0 } else { exit 2 }"
-].join("\n");
+	if (!settings.desktopApp) {
+		if (!recorded) return {
+			changes: [],
+			installed: false
+		};
+		await stopApp(o, isAlive, now);
+		await fs.writeFile(desktopAppPath(claudeDir), JSON.stringify({
+			...recorded,
+			off: true
+		}, null, 2) + "\n");
+		return {
+			changes: ["took the desktop app out of use, as \"desktopApp\" is off in runner.json; the runner runs on node"],
+			installed: false
+		};
+	}
+	if (!place) return {
+		changes: [],
+		installed: false
+	};
+	const release = JSON.parse(await fs.readFile(path.join(o.from, "app-release.json"), "utf8"));
+	if (recorded?.version === release.version && recorded.dir === place.dir) return {
+		changes: [],
+		installed: false
+	};
+	const lock = desktopAppLockPath(claudeDir);
+	const downloadMs = settings.appDownloadSeconds * 1e3;
+	const retryAt = () => now() + settings.appRetryHours * 36e5;
+	const held = await readLock(lock);
+	if (held?.until && held.until > now() && held.extra.version !== release.version) await fs.rm(lock, { force: true });
+	if (!await takeLock(lock, process.pid, isAlive, false, now(), { freshMs: 2 * downloadMs + 6e4 })) return {
+		changes: [],
+		installed: false
+	};
+	await removeLeftovers(place.dir, isAlive);
+	const staging = `${place.dir}.isoplan-${process.pid}`;
+	try {
+		const manifestUrl = release.manifest.replace(/\{version\}/g, release.version).replace(/\{platform\}/g, platform).replace(/\{arch\}/g, o.arch);
+		const got = await (o.fetch ?? fetch)(manifestUrl, { signal: AbortSignal.timeout(downloadMs) });
+		if (got.status === 404) {
+			await holdOff(lock, process.pid, retryAt(), { version: release.version });
+			return stay(`release ${release.version} has no desktop app for ${platform}-${o.arch} yet; trying again in ${settings.appRetryHours} hours`);
+		}
+		if (!got.ok) throw new Error(`its manifest couldn't be read (${got.status} from ${manifestUrl})`);
+		const asset = await got.json();
+		await fs.rm(staging, {
+			recursive: true,
+			force: true
+		});
+		await fs.mkdir(staging, { recursive: true });
+		const archive = path.join(staging, asset.file);
+		await download(o.fetch ?? fetch, new URL(asset.file, manifestUrl).href, archive, asset, downloadMs);
+		const unpacked = await (o.run ?? exec)(systemTar(platform, o.env), [
+			"-xzf",
+			archive,
+			"-C",
+			staging
+		]);
+		if (unpacked.code !== 0) throw new Error(`tar couldn't unpack ${asset.file} (${unpacked.code})`);
+		const fresh = path.join(staging, place.top);
+		const launch = await launchOf(fresh, platform);
+		if (!(await fs.stat(launch).catch(() => null))?.isFile()) throw new Error(`${asset.file} holds no ${path.basename(launch)}`);
+		await stopApp(o, isAlive, now);
+		await swapIn(fresh, place.dir);
+		const app = {
+			version: release.version,
+			dir: place.dir,
+			launch: await launchOf(place.dir, platform)
+		};
+		await fs.writeFile(desktopAppPath(claudeDir), JSON.stringify(app, null, 2) + "\n");
+		await releaseLock(lock, process.pid);
+		return {
+			changes: [`installed Isoplan's desktop app ${release.version} in ${place.dir}`],
+			installed: true
+		};
+	} catch (err) {
+		await holdOff(lock, process.pid, retryAt(), { version: release.version }).catch(() => {});
+		return stay(`couldn't install the desktop app: ${err.message}; trying again in ${settings.appRetryHours} hours`);
+	} finally {
+		await fs.rm(staging, {
+			recursive: true,
+			force: true,
+			maxRetries: 5
+		}).catch(() => {});
+	}
+}
+async function removeLeftovers(dir, isAlive) {
+	const prefix = `${path.basename(dir)}.`;
+	for (const name of await fs.readdir(path.dirname(dir)).catch(() => [])) {
+		const pid = name.startsWith(prefix) ? /^(?:isoplan|old)-(\d+)$/.exec(name.slice(prefix.length))?.[1] : void 0;
+		if (pid && !isAlive(Number(pid))) await fs.rm(path.join(path.dirname(dir), name), {
+			recursive: true,
+			force: true,
+			maxRetries: 5
+		}).catch(() => {});
+	}
+}
+async function download(get, url, file, asset, timeoutMs) {
+	const res = await get(url, { signal: AbortSignal.timeout(timeoutMs) });
+	if (!res.ok || !res.body) throw new Error(`the download of ${asset.file} failed (${res.status})`);
+	const hash = createHash("sha256");
+	let size = 0;
+	const body = Readable.fromWeb(res.body);
+	body.on("data", (chunk) => {
+		size += chunk.length;
+		hash.update(chunk);
+		if (size > asset.size) body.destroy(/* @__PURE__ */ new Error(`${asset.file} is bigger than the manifest says (${asset.size} bytes)`));
+	});
+	await pipeline(body, createWriteStream(file));
+	if (size !== asset.size) throw new Error(`${asset.file} is ${size} bytes, not the ${asset.size} the manifest says`);
+	if (hash.digest("hex") !== asset.sha256.toLowerCase()) throw new Error(`${asset.file}'s sha256 isn't the one the manifest says`);
+}
+async function swapIn(fresh, dir) {
+	const old = `${dir}.old-${process.pid}`;
+	let had = false;
+	for (let tries = 0;; tries++) {
+		const moved = await fs.rename(dir, old).then(() => null, (err) => err);
+		if (!moved) had = true;
+		else if (moved.code !== "ENOENT" && tries < 40) {
+			await new Promise((r) => setTimeout(r, 250));
+			continue;
+		} else if (moved.code !== "ENOENT") throw new Error(`the installed app couldn't be moved aside (${moved.code}): is it still running?`);
+		break;
+	}
+	try {
+		await fs.mkdir(path.dirname(dir), { recursive: true });
+		await fs.rename(fresh, dir);
+	} catch (err) {
+		if (had) await fs.rename(old, dir).catch(() => {});
+		throw err;
+	}
+	if (had) await fs.rm(old, {
+		recursive: true,
+		force: true,
+		maxRetries: 5
+	}).catch(() => {});
+}
+async function stopApp(o, isAlive, now) {
+	const lock = await readLock(runnerLockPath(o.claudeDir));
+	if (!lock?.pid || !isAppLock(lock.extra)) return;
+	const pid = lock.pid;
+	await stopRunner(o.claudeDir, {
+		isAlive,
+		now,
+		...o.kill && { kill: o.kill }
+	});
+	for (const until = now() + (o.exitMs ?? 1e4); isAlive(pid) && now() < until;) await new Promise((r) => setTimeout(r, 100));
+}
+//#endregion
+//#region src/runner/claude-binary.ts
+const claudeBinaryPath = (claudeDir) => path.join(claudeDir, "isoplan", "claude-binary.json");
+const isFile = (p) => fs.stat(p).then((s) => s.isFile(), () => false);
+/**
+* The `claude` binary's path: PATH first, then where Claude Code's installers put it. On Windows
+* an npm install leaves only a claude.cmd shim, which can't be run without a shell, so its cli.js
+* is used instead (run with node). Null when none is found.
+*/
+async function findClaude(env, platform, home, exists = isFile) {
+	const windows = platform === "win32";
+	const join = windows ? path.win32.join : path.posix.join;
+	const dirs = (Object.entries(env).find(([key]) => key.toUpperCase() === "PATH")?.[1] ?? "").split(windows ? ";" : ":").filter(Boolean);
+	const candidates = windows ? [...dirs.map((d) => join(d, "claude.exe")), join(home, ".local", "bin", "claude.exe")] : [
+		...dirs.map((d) => join(d, "claude")),
+		join(home, ".local", "bin", "claude"),
+		join(home, ".claude", "local", "claude"),
+		"/opt/homebrew/bin/claude",
+		"/usr/local/bin/claude"
+	];
+	for (const candidate of candidates) if (await exists(candidate)) return candidate;
+	if (windows) for (const d of dirs) {
+		const cli = join(d, "node_modules", "@anthropic-ai", "claude-code", "cli.js");
+		if (await exists(join(d, "claude.cmd")) && await exists(cli)) return cli;
+	}
+	return null;
+}
 //#endregion
 //#region src/install/hidden-launch.ts
 /** wscript.exe, by its full path, so no other program of that name is found first. */
@@ -8152,11 +8458,20 @@ const systemPlaces = () => ({
 		node: process.execPath
 	}
 });
+/** This computer, for the desktop app. */
+const appComputer = () => ({
+	platform: process.platform,
+	arch: process.arch,
+	home: os.homedir(),
+	env: process.env
+});
 /**
 * The machine's part of a current copy of the plugin's start (the hooks module's end of the pipe, src/pipe/main.ts): the wake hook and the runner's copy
 * (src/install), then the runner (src/runner/start.ts), which replaces one running older code. The
 * runner answers for the machine's rooms and reports every session. Not
-* while the plugin is disabled for the machine, though a session's project enables it.
+* while the plugin is disabled for the machine, though a session's project enables it. Then, in the
+* background (`app`), the desktop app this version names, which takes over from the node runner once
+* it is in place.
 */
 function startMachine(o) {
 	const self = path.join(o.here, "data-layer.js");
@@ -8170,12 +8485,26 @@ function startMachine(o) {
 		linkHandler: o.linkHandler,
 		loginItem: o.loginItem
 	}).then((changes) => changes.forEach((text) => o.log(text)), (err) => o.log(`couldn't install the wake hook: ${String(err?.message ?? err)}`));
+	const started = installed.then(async () => await pluginState(o.place, self) === "enabled" ? startRunner({
+		claudeDir: o.place.claudeDir,
+		spawn: o.spawn
+	}) : null).catch(() => null);
 	return {
 		installed,
-		started: installed.then(async () => await pluginState(o.place, self) === "enabled" ? startRunner({
-			claudeDir: o.place.claudeDir,
-			spawn: o.spawn
-		}) : null).catch(() => null)
+		started,
+		app: started.then(async (runner) => {
+			if (!o.app || runner === null) return;
+			const { changes } = await installApp({
+				...o.app,
+				claudeDir: o.place.claudeDir,
+				from: path.join(o.here, "..")
+			});
+			changes.forEach((text) => o.log(text));
+			if (changes.length) await startRunner({
+				claudeDir: o.place.claudeDir,
+				spawn: o.spawn
+			});
+		}).catch((err) => o.log(`couldn't install the desktop app: ${String(err?.message ?? err)}`))
 	};
 }
 /**
@@ -8350,7 +8679,8 @@ async function pipeMain(argv, appDir) {
 			type: "log",
 			text
 		}),
-		...systemPlaces()
+		...systemPlaces(),
+		app: appComputer()
 	}).started;
 	const io = nodeIo();
 	const version = await fs.readFile(path.join(appDir, ".claude-plugin", "plugin.json"), "utf8").then((text) => String(JSON.parse(text).version ?? "0.0.0")).catch(() => "0.0.0");
