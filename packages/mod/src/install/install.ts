@@ -27,7 +27,8 @@
 // that doesn't parse is left alone. Each file is written whole beside its target and moved over
 // it, so neither Claude Code nor a running hook reads half of one.
 //
-// Uninstalling takes out everything install and the plugin put in place: the running runner, the
+// Uninstalling takes out everything install and the plugin put in place: the running runner (the
+// desktop app, src/install/app.ts, when it is the runner, and its folder), the
 // plugin's files under <claude dir>/isoplan, and last the hooks, so a stop part way never leaves
 // settings.json naming a wake.mjs that has gone. The files a person writes there are kept:
 // config.json, runner.json, secret-patterns.json, and a claude-binary.json set by hand. The install
@@ -48,7 +49,7 @@ import { promisify } from "node:util";
 import { loadConfig } from "../data-layer/config.js";
 import { nodeIo } from "../data-layer/io.js";
 import { claudeBinaryPath } from "../runner/claude-binary.js";
-import { RUNNER_FRESH_MS, runnerLockPath } from "../runner/start.js";
+import { recordedApp, RUNNER_FRESH_MS, runnerLockPath } from "../runner/start.js";
 import { alive, holdOff, isHeld, readLock, releaseLock, takeLock } from "../wake/lock.js";
 import { wakeRecordPath, type WakeRecord } from "../wake/wake.js";
 import { registerLinkHandler, unregisterLinkHandler, type LinkHandler } from "./link-handler.js";
@@ -320,7 +321,11 @@ export async function uninstall(paths: Paths, { optOut = false, settleMs = 0, co
   const reinstalled = "stopped: Claude Code lists the plugin as installed again";
 
   if (!(await isStillGone())) return stopped(reinstalled);
+  // Read before the runner's folder, which records it, goes.
+  const app = await recordedApp(paths.claudeDir);
   if (await stopOurRunner(paths.claudeDir, runner)) changes.push("stopped the runner, which answered for this machine's rooms");
+  // The desktop app (app.ts), stopped with the runner it is.
+  if (app) await remove(app.dir);
   // Before update.json, which records it, goes.
   const autoUpdate = await takeOutAutoUpdate(paths);
   if (autoUpdate) changes.push(autoUpdate);
@@ -449,7 +454,8 @@ export interface StopOptions {
 /**
  * Ends the runner its lock names, and waits up to `waitMs` for it to exit; its worker and forks
  * follow its supervisor. One whose lock is stale (not kept fresh, after a sleep, say) is ended only
- * when its pid is alive and its command line runs this folder's copy of the runner, since after a
+ * when its pid is alive and its command line runs this folder's copy of the runner, or the desktop
+ * app install put in place, since after a
  * reboot the pid may name another process. True when one was ended.
  */
 export async function stopOurRunner(claudeDir: string, { isAlive = alive, kill = killTree, now = Date.now, commandOf, waitMs = 0 }: StopOptions = {}): Promise<boolean> {
@@ -459,8 +465,9 @@ export async function stopOurRunner(claudeDir: string, { isAlive = alive, kill =
   if (!lock || !pid || !isAlive(pid)) return false;
   if (now() - lock.mtimeMs >= RUNNER_FRESH_MS) {
     const command = commandOf ? await commandOf(pid) : null;
-    const runner = normalPath(path.join(runnerAppDir(claudeDir), copiedAs("dist/runner.js")));
-    if (!command || !command.replace(/\\/g, "/").toLowerCase().includes(runner.toLowerCase())) return false;
+    // The node runner's copy, or the desktop app's folder when the app is the runner.
+    const ours = [path.join(runnerAppDir(claudeDir), copiedAs("dist/runner.js")), (await recordedApp(claudeDir))?.dir].filter((p): p is string => !!p).map((p) => normalPath(p).toLowerCase());
+    if (!command || !ours.some((p) => command.replace(/\\/g, "/").toLowerCase().includes(p))) return false;
   }
   try {
     kill(pid);

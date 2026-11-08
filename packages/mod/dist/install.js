@@ -3,9 +3,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { statSync } from "node:fs";
-import { promisify } from "node:util";
+import { createWriteStream, statSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { promisify } from "node:util";
 //#region src/data-layer/git.ts
 function isAbsolute(p) {
 	return /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("/") || p.startsWith("\\");
@@ -416,6 +418,14 @@ async function takeLock(file, pid, isAlive = alive, force = false, now = Date.no
 async function releaseLock(file, pid) {
 	if (await lockHolder(file) === pid) await fs.rm(file, { force: true });
 }
+/** Turns the lock `pid` holds into a hold-off until `until`, with `extra` beside it; one another has taken is left. */
+async function holdOff(file, pid, until, extra = {}) {
+	if (await lockHolder(file) === pid) await fs.writeFile(file, JSON.stringify({
+		pid: 0,
+		until,
+		...extra
+	}));
+}
 function alive(pid) {
 	try {
 		process.kill(pid, 0);
@@ -450,12 +460,45 @@ async function liveRunner(claudeDir, now, isAlive) {
 	};
 	return null;
 }
+const desktopAppPath = (claudeDir) => path.join(claudeDir, "isoplan", "runner", "desktop-app.json");
+/** The desktop app install recorded, if its program is still there. */
+async function recordedApp(claudeDir) {
+	try {
+		const app = JSON.parse(await fs.readFile(desktopAppPath(claudeDir), "utf8"));
+		if (typeof app.version !== "string" || typeof app.dir !== "string" || typeof app.launch !== "string") return null;
+		return (await fs.stat(app.launch).catch(() => null))?.isFile() ? app : null;
+	} catch {
+		return null;
+	}
+}
+/** The lock's holder is the desktop app. */
+const isAppLock = (extra) => extra.engine === "app";
+/**
+* Starts the desktop app for `claudeDir` with no window and no focus, and doesn't wait for it: on
+* macOS through `open -g`, so it starts as an app of its own and stays in the background.
+*/
+function openApp(app, claudeDir, platform = process.platform) {
+	const [file, args] = platform === "darwin" ? ["/usr/bin/open", [
+		"-g",
+		app.dir,
+		"--args",
+		"--claude-dir",
+		claudeDir
+	]] : [app.launch, ["--claude-dir", claudeDir]];
+	spawn(file, args, {
+		cwd: claudeDir,
+		detached: true,
+		stdio: "ignore",
+		windowsHide: true
+	}).on("error", () => {}).unref();
+}
 /**
 * Starts the recorded runner unless a live one runs the recorded code. One on older code is
 * replaced. A hold-off keeps it from starting, except a crash loop's hold-off on older code: a new
-* version may have fixed what crashed.
+* version may have fixed what crashed. With the desktop app recorded it opens the app instead,
+* once no node runner runs, and a live app is running.
 */
-async function startRunner({ claudeDir, spawn, isAlive = alive, kill = (pid) => process.kill(pid), now = Date.now }) {
+async function startRunner({ claudeDir, spawn, isAlive = alive, kill = (pid) => process.kill(pid), now = Date.now, open = openApp }) {
 	let runner;
 	try {
 		runner = JSON.parse(await fs.readFile(wakeRecordPath(claudeDir), "utf8")).runner;
@@ -466,12 +509,13 @@ async function startRunner({ claudeDir, spawn, isAlive = alive, kill = (pid) => 
 	const code = await runnerCode(runner);
 	if (!code) return "not-installed";
 	const lockFile = runnerLockPath(claudeDir);
+	const app = await recordedApp(claudeDir);
 	const live = await liveRunner(claudeDir, now(), isAlive);
 	if (live?.isHoldOff) {
 		if (live.extra.reason !== "gave-up" || live.extra.code === code) return "held-off";
 		if ((await readLock(lockFile))?.until === live.until) await fs.rm(lockFile, { force: true });
 	} else if (live) {
-		if (live.extra.code === code) return "running";
+		if (isAppLock(live.extra) || live.extra.code === code && !app) return "running";
 		await stopRunner(claudeDir, {
 			isAlive,
 			kill,
@@ -481,6 +525,10 @@ async function startRunner({ claudeDir, spawn, isAlive = alive, kill = (pid) => 
 				code: live.extra.code
 			}
 		});
+	}
+	if (app) {
+		open(app, claudeDir);
+		return "started";
 	}
 	const env = await recordedEnv(claudeDir);
 	spawn([
@@ -554,6 +602,172 @@ const exec = (file, args, env) => new Promise((resolve) => {
 	"$r = $f.ShowDialog(); $timer.Stop()",
 	"if ($r -eq [System.Windows.Forms.DialogResult]::OK) { exit 0 } else { exit 2 }"
 ].join("\n");
+//#endregion
+//#region src/install/app.ts
+const desktopAppLockPath = (claudeDir) => path.join(claudeDir, "isoplan", "runner", "desktop-app.lock");
+/** Where the app goes for this person, the folder its archive holds at its top, and the program to start in it. */
+function appPlace(platform, home, env) {
+	if (platform === "win32") return {
+		dir: path.win32.join(env.LOCALAPPDATA || path.win32.join(home, "AppData", "Local"), "Programs", "Isoplan"),
+		top: "Isoplan"
+	};
+	if (platform === "darwin") return {
+		dir: path.posix.join(home, "Applications", "Isoplan.app"),
+		top: "Isoplan.app"
+	};
+	return null;
+}
+/** The program that starts the app: Electrobun's launcher on Windows, the bundle's executable on macOS. */
+async function launchOf(dir, platform) {
+	if (platform === "win32") return path.join(dir, "bin", "launcher.exe");
+	const plist = await fs.readFile(path.join(dir, "Contents", "Info.plist"), "utf8");
+	const name = /<key>CFBundleExecutable<\/key>\s*<string>([^<]+)<\/string>/.exec(plist)?.[1];
+	if (!name) throw new Error("its Info.plist names no executable");
+	return path.join(dir, "Contents", "MacOS", name);
+}
+/** The system's own tar, by its full path: another tar first on PATH (Git Bash's) misreads C:\ paths. */
+const systemTar = (platform, env) => platform === "win32" ? path.win32.join(env.SystemRoot || "C:\\Windows", "System32", "tar.exe") : "/usr/bin/tar";
+/**
+* Puts the app this plugin version names in place, unless it is there already. Says what it
+* changed, and, when nothing was installed, why the runner stays on node; `installed` is true when
+* a new app is in place, for the caller to start it.
+*/
+async function installApp(o) {
+	const { claudeDir, platform } = o;
+	const now = o.now ?? Date.now;
+	const isAlive = o.isAlive ?? alive;
+	const settings = await loadSettings(nodeIo(), path.join(o.from, "runner.json"), path.join(claudeDir, "isoplan", "runner.json"));
+	const recorded = await recordedApp(claudeDir);
+	const place = appPlace(platform, o.home, o.env);
+	const stay = (why) => ({
+		changes: [`the runner stays on node: ${why}`],
+		installed: false
+	});
+	if (!settings.desktopApp) {
+		if (!recorded) return {
+			changes: [],
+			installed: false
+		};
+		await stopApp(o, isAlive, now);
+		await fs.rm(desktopAppPath(claudeDir), { force: true });
+		return {
+			changes: ["took the desktop app out of use, as \"desktopApp\" is off in runner.json; the runner runs on node"],
+			installed: false
+		};
+	}
+	if (!place) return {
+		changes: [],
+		installed: false
+	};
+	const release = JSON.parse(await fs.readFile(path.join(o.from, "app-release.json"), "utf8"));
+	if (recorded?.version === release.version && recorded.dir === place.dir) return {
+		changes: [],
+		installed: false
+	};
+	const lock = desktopAppLockPath(claudeDir);
+	const downloadMs = settings.appDownloadSeconds * 1e3;
+	if (!await takeLock(lock, process.pid, isAlive, false, now(), { freshMs: 2 * downloadMs + 6e4 })) return {
+		changes: [],
+		installed: false
+	};
+	const staging = `${place.dir}.isoplan-${process.pid}`;
+	try {
+		const manifestUrl = release.manifest.replace(/\{version\}/g, release.version);
+		const got = await (o.fetch ?? fetch)(manifestUrl, { signal: AbortSignal.timeout(downloadMs) });
+		if (!got.ok) throw new Error(`the release's manifest isn't there (${got.status} from ${manifestUrl})`);
+		const manifest = await got.json();
+		const key = `${platform}-${o.arch}`;
+		const asset = manifest.assets?.[key];
+		if (!asset) {
+			await holdOff(lock, process.pid, now() + settings.appRetryHours * 36e5);
+			return stay(`release ${release.version} has no desktop app for ${key}`);
+		}
+		await fs.rm(staging, {
+			recursive: true,
+			force: true
+		});
+		await fs.mkdir(staging, { recursive: true });
+		const archive = path.join(staging, asset.file);
+		await download(o.fetch ?? fetch, new URL(asset.file, manifestUrl).href, archive, asset, downloadMs);
+		const unpacked = await (o.run ?? exec)(systemTar(platform, o.env), [
+			"-xzf",
+			archive,
+			"-C",
+			staging
+		]);
+		if (unpacked.code !== 0) throw new Error(`tar couldn't unpack ${asset.file} (${unpacked.code})`);
+		const fresh = path.join(staging, place.top);
+		const launch = await launchOf(fresh, platform);
+		if (!(await fs.stat(launch).catch(() => null))?.isFile()) throw new Error(`${asset.file} holds no ${path.basename(launch)}`);
+		await stopApp(o, isAlive, now);
+		await swapIn(fresh, place.dir);
+		const app = {
+			version: release.version,
+			dir: place.dir,
+			launch: await launchOf(place.dir, platform)
+		};
+		await fs.writeFile(desktopAppPath(claudeDir), JSON.stringify(app, null, 2) + "\n");
+		await releaseLock(lock, process.pid);
+		return {
+			changes: [`installed Isoplan's desktop app ${release.version} in ${place.dir}`],
+			installed: true
+		};
+	} catch (err) {
+		await holdOff(lock, process.pid, now() + settings.appRetryHours * 36e5).catch(() => {});
+		return stay(`couldn't install the desktop app: ${err.message}; trying again in ${settings.appRetryHours} hours`);
+	} finally {
+		await fs.rm(staging, {
+			recursive: true,
+			force: true,
+			maxRetries: 5
+		}).catch(() => {});
+	}
+}
+async function download(get, url, file, asset, timeoutMs) {
+	const res = await get(url, { signal: AbortSignal.timeout(timeoutMs) });
+	if (!res.ok || !res.body) throw new Error(`the download of ${asset.file} failed (${res.status})`);
+	const hash = createHash("sha256");
+	let size = 0;
+	const body = Readable.fromWeb(res.body);
+	body.on("data", (chunk) => {
+		size += chunk.length;
+		hash.update(chunk);
+		if (size > asset.size) body.destroy(/* @__PURE__ */ new Error(`${asset.file} is bigger than the manifest says (${asset.size} bytes)`));
+	});
+	await pipeline(body, createWriteStream(file));
+	if (size !== asset.size) throw new Error(`${asset.file} is ${size} bytes, not the ${asset.size} the manifest says`);
+	if (hash.digest("hex") !== asset.sha256.toLowerCase()) throw new Error(`${asset.file}'s sha256 isn't the one the manifest says`);
+}
+async function swapIn(fresh, dir) {
+	const old = `${dir}.old-${process.pid}`;
+	const had = await fs.rename(dir, old).then(() => true, (err) => {
+		if (err.code === "ENOENT") return false;
+		throw new Error(`the installed app couldn't be moved aside (${err.code}): is it still running?`);
+	});
+	try {
+		await fs.mkdir(path.dirname(dir), { recursive: true });
+		await fs.rename(fresh, dir);
+	} catch (err) {
+		if (had) await fs.rename(old, dir).catch(() => {});
+		throw err;
+	}
+	if (had) await fs.rm(old, {
+		recursive: true,
+		force: true,
+		maxRetries: 5
+	}).catch(() => {});
+}
+async function stopApp(o, isAlive, now) {
+	const lock = await readLock(runnerLockPath(o.claudeDir));
+	if (!lock?.pid || !isAppLock(lock.extra)) return;
+	const pid = lock.pid;
+	await stopRunner(o.claudeDir, {
+		isAlive,
+		now,
+		...o.kill && { kill: o.kill }
+	});
+	for (const until = now() + (o.exitMs ?? 1e4); isAlive(pid) && now() < until;) await new Promise((r) => setTimeout(r, 100));
+}
 //#endregion
 //#region src/install/hidden-launch.ts
 /** wscript.exe, by its full path, so no other program of that name is found first. */
@@ -1392,7 +1606,9 @@ async function uninstall$1(paths, { optOut = false, settleMs = 0, confirm, runne
 	});
 	const reinstalled = "stopped: Claude Code lists the plugin as installed again";
 	if (!await isStillGone()) return stopped(reinstalled);
+	const app = await recordedApp(paths.claudeDir);
 	if (await stopOurRunner(paths.claudeDir, runner)) changes.push("stopped the runner, which answered for this machine's rooms");
+	if (app) await remove(app.dir);
 	const autoUpdate = await takeOutAutoUpdate(paths);
 	if (autoUpdate) changes.push(autoUpdate);
 	if (linkHandler) {
@@ -1467,7 +1683,8 @@ async function settleMs(claudeDir, defaultsPath) {
 /**
 * Ends the runner its lock names, and waits up to `waitMs` for it to exit; its worker and forks
 * follow its supervisor. One whose lock is stale (not kept fresh, after a sleep, say) is ended only
-* when its pid is alive and its command line runs this folder's copy of the runner, since after a
+* when its pid is alive and its command line runs this folder's copy of the runner, or the desktop
+* app install put in place, since after a
 * reboot the pid may name another process. True when one was ended.
 */
 async function stopOurRunner(claudeDir, { isAlive = alive, kill = killTree, now = Date.now, commandOf, waitMs = 0 } = {}) {
@@ -1477,8 +1694,8 @@ async function stopOurRunner(claudeDir, { isAlive = alive, kill = killTree, now 
 	if (!lock || !pid || !isAlive(pid)) return false;
 	if (now() - lock.mtimeMs >= 9e4) {
 		const command = commandOf ? await commandOf(pid) : null;
-		const runner = normalPath(path.join(runnerAppDir(claudeDir), copiedAs("dist/runner.js")));
-		if (!command || !command.replace(/\\/g, "/").toLowerCase().includes(runner.toLowerCase())) return false;
+		const ours = [path.join(runnerAppDir(claudeDir), copiedAs("dist/runner.js")), (await recordedApp(claudeDir))?.dir].filter((p) => !!p).map((p) => normalPath(p).toLowerCase());
+		if (!command || !ours.some((p) => command.replace(/\\/g, "/").toLowerCase().includes(p))) return false;
 	}
 	try {
 		kill(pid);
@@ -1671,6 +1888,14 @@ try {
 	if (!uninstall) {
 		if (!await fs.stat(claudeBinaryPath(claudeDir)).catch(() => null)) console.log("Couldn't find the claude binary, so the runner can't answer for this machine's rooms; set its path in " + claudeBinaryPath(claudeDir) + " as { \"path\": \"...\" }.");
 		if (await recordEnv(claudeDir, process.env)) console.log(`recorded the runner's environment in ${runnerEnvPath(claudeDir)}`);
+		for (const change of (await installApp({
+			claudeDir,
+			from: path.join(here, ".."),
+			platform: process.platform,
+			arch: process.arch,
+			home: os.homedir(),
+			env: process.env
+		})).changes) console.log(change);
 		const runner = await startRunner({
 			claudeDir,
 			spawn: start

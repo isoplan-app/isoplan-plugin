@@ -1,0 +1,4 @@
+{
+  "version": "0.1.0",
+  "manifest": "https://github.com/isoplan-app/isoplan-plugin/releases/download/app-v{version}/isoplan-app-manifest.json"
+}

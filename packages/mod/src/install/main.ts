@@ -5,6 +5,8 @@
 // (src/runner), with an environment recorded from this shell: the runner answers for the machine's
 // rooms, and as it starts reports every session written inside the lights-off window, so an install
 // that starts it fills the office back in; one already running reports those sessions already.
+// Before it starts the runner it installs the desktop app this plugin version names, which then is
+// the runner, with its icon in the tray or menu bar (app.ts); without one, the runner runs on node.
 //
 //   node dist/install.js [--uninstall]
 //
@@ -21,6 +23,7 @@ import { nodeIo } from "../data-layer/io.js";
 import { claudeBinaryPath, findClaude } from "../runner/claude-binary.js";
 import { recordEnv, runnerEnvPath } from "../runner/environment.js";
 import { startRunner } from "../runner/start.js";
+import { installApp } from "./app.js";
 import { installWake, processCommand, settleMs, uninstall as uninstallAll } from "./install.js";
 import { managedDir, pluginDirsOf, pluginsDir } from "./state.js";
 
@@ -53,6 +56,8 @@ try {
     if (!(await fs.stat(claudeBinaryPath(claudeDir)).catch(() => null))) console.log("Couldn't find the claude binary, so the runner can't answer for this machine's rooms; set its path in " + claudeBinaryPath(claudeDir) + ' as { "path": "..." }.');
     // The runner starts with this shell's environment, not a session's (src/runner/environment.ts).
     if (await recordEnv(claudeDir, process.env)) console.log(`recorded the runner's environment in ${runnerEnvPath(claudeDir)}`);
+    // The desktop app, where this plugin version has one for this computer, is then the runner (app.ts).
+    for (const change of (await installApp({ claudeDir, from: path.join(here, ".."), platform: process.platform, arch: process.arch, home: os.homedir(), env: process.env })).changes) console.log(change);
     const runner = await startRunner({ claudeDir, spawn: start });
     console.log(
       {

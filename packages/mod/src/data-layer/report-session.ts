@@ -68,6 +68,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { PROTOCOL_VERSION, type Facts, type Project } from "@isoplan/protocol";
+import { installApp, type InstallApp } from "../install/app.js";
 import { installWake, type LinkHandlerPlace } from "../install/install.js";
 import type { LoginItemPlace } from "../install/login-item.js";
 import { managedDir, newestDataLayer, normalPath, pluginDirsOf, pluginIdOf, pluginState, pluginsDir, type Place } from "../install/state.js";
@@ -788,15 +789,22 @@ export interface MachineStart {
   findClaude?: () => Promise<string | null>;
   linkHandler?: LinkHandlerPlace;
   loginItem?: LoginItemPlace;
+  /** This computer, for the desktop app (src/install/app.ts); without it the app isn't installed. */
+  app?: Omit<InstallApp, "claudeDir" | "from">;
 }
+
+/** This computer, for the desktop app. */
+export const appComputer = (): Omit<InstallApp, "claudeDir" | "from"> => ({ platform: process.platform, arch: process.arch, home: os.homedir(), env: process.env });
 
 /**
  * The machine's part of a current copy of the plugin's start (the hooks module's end of the pipe, src/pipe/main.ts): the wake hook and the runner's copy
  * (src/install), then the runner (src/runner/start.ts), which replaces one running older code. The
  * runner answers for the machine's rooms and reports every session. Not
- * while the plugin is disabled for the machine, though a session's project enables it.
+ * while the plugin is disabled for the machine, though a session's project enables it. Then, in the
+ * background (`app`), the desktop app this version names, which takes over from the node runner once
+ * it is in place.
  */
-export function startMachine(o: MachineStart): { installed: Promise<void>; started: Promise<Started | null> } {
+export function startMachine(o: MachineStart): { installed: Promise<void>; started: Promise<Started | null>; app: Promise<void> } {
   const self = path.join(o.here, "data-layer.js");
   const installed = installWake({ ...o.place, settings: path.join(o.place.claudeDir, "settings.json") }, self, path.join(o.here, "wake.js"), {
     auto: true,
@@ -809,7 +817,13 @@ export function startMachine(o: MachineStart): { installed: Promise<void>; start
     (err: unknown) => o.log(`couldn't install the wake hook: ${String((err as Error)?.message ?? err)}`),
   );
   const started = installed.then(async () => ((await pluginState(o.place, self)) === "enabled" ? startRunner({ claudeDir: o.place.claudeDir, spawn: o.spawn }) : null)).catch(() => null);
-  return { installed, started };
+  const app = started.then(async (runner) => {
+    if (!o.app || runner === null) return;
+    const { changes } = await installApp({ ...o.app, claudeDir: o.place.claudeDir, from: path.join(o.here, "..") });
+    changes.forEach((text) => o.log(text));
+    if (changes.length) await startRunner({ claudeDir: o.place.claudeDir, spawn: o.spawn });
+  }).catch((err: unknown) => o.log(`couldn't install the desktop app: ${String((err as Error)?.message ?? err)}`));
+  return { installed, started, app };
 }
 
 /**

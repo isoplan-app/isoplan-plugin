@@ -283,12 +283,45 @@ async function liveRunner(claudeDir, now, isAlive) {
 	};
 	return null;
 }
+const desktopAppPath = (claudeDir) => path.join(claudeDir, "isoplan", "runner", "desktop-app.json");
+/** The desktop app install recorded, if its program is still there. */
+async function recordedApp(claudeDir) {
+	try {
+		const app = JSON.parse(await fs.readFile(desktopAppPath(claudeDir), "utf8"));
+		if (typeof app.version !== "string" || typeof app.dir !== "string" || typeof app.launch !== "string") return null;
+		return (await fs.stat(app.launch).catch(() => null))?.isFile() ? app : null;
+	} catch {
+		return null;
+	}
+}
+/** The lock's holder is the desktop app. */
+const isAppLock = (extra) => extra.engine === "app";
+/**
+* Starts the desktop app for `claudeDir` with no window and no focus, and doesn't wait for it: on
+* macOS through `open -g`, so it starts as an app of its own and stays in the background.
+*/
+function openApp(app, claudeDir, platform = process.platform) {
+	const [file, args] = platform === "darwin" ? ["/usr/bin/open", [
+		"-g",
+		app.dir,
+		"--args",
+		"--claude-dir",
+		claudeDir
+	]] : [app.launch, ["--claude-dir", claudeDir]];
+	spawn(file, args, {
+		cwd: claudeDir,
+		detached: true,
+		stdio: "ignore",
+		windowsHide: true
+	}).on("error", () => {}).unref();
+}
 /**
 * Starts the recorded runner unless a live one runs the recorded code. One on older code is
 * replaced. A hold-off keeps it from starting, except a crash loop's hold-off on older code: a new
-* version may have fixed what crashed.
+* version may have fixed what crashed. With the desktop app recorded it opens the app instead,
+* once no node runner runs, and a live app is running.
 */
-async function startRunner({ claudeDir, spawn, isAlive = alive, kill = (pid) => process.kill(pid), now = Date.now }) {
+async function startRunner({ claudeDir, spawn, isAlive = alive, kill = (pid) => process.kill(pid), now = Date.now, open = openApp }) {
 	let runner;
 	try {
 		runner = JSON.parse(await fs.readFile(wakeRecordPath(claudeDir), "utf8")).runner;
@@ -299,12 +332,13 @@ async function startRunner({ claudeDir, spawn, isAlive = alive, kill = (pid) => 
 	const code = await runnerCode(runner);
 	if (!code) return "not-installed";
 	const lockFile = runnerLockPath(claudeDir);
+	const app = await recordedApp(claudeDir);
 	const live = await liveRunner(claudeDir, now(), isAlive);
 	if (live?.isHoldOff) {
 		if (live.extra.reason !== "gave-up" || live.extra.code === code) return "held-off";
 		if ((await readLock(lockFile))?.until === live.until) await fs.rm(lockFile, { force: true });
 	} else if (live) {
-		if (live.extra.code === code) return "running";
+		if (isAppLock(live.extra) || live.extra.code === code && !app) return "running";
 		await stopRunner(claudeDir, {
 			isAlive,
 			kill,
@@ -314,6 +348,10 @@ async function startRunner({ claudeDir, spawn, isAlive = alive, kill = (pid) => 
 				code: live.extra.code
 			}
 		});
+	}
+	if (app) {
+		open(app, claudeDir);
+		return "started";
 	}
 	const env = await recordedEnv(claudeDir);
 	spawn([
@@ -711,7 +749,9 @@ async function uninstall(paths, { optOut = false, settleMs = 0, confirm, runner 
 	});
 	const reinstalled = "stopped: Claude Code lists the plugin as installed again";
 	if (!await isStillGone()) return stopped(reinstalled);
+	const app = await recordedApp(paths.claudeDir);
 	if (await stopOurRunner(paths.claudeDir, runner)) changes.push("stopped the runner, which answered for this machine's rooms");
+	if (app) await remove(app.dir);
 	const autoUpdate = await takeOutAutoUpdate(paths);
 	if (autoUpdate) changes.push(autoUpdate);
 	if (linkHandler) {
@@ -826,7 +866,8 @@ async function settleMs(claudeDir, defaultsPath) {
 /**
 * Ends the runner its lock names, and waits up to `waitMs` for it to exit; its worker and forks
 * follow its supervisor. One whose lock is stale (not kept fresh, after a sleep, say) is ended only
-* when its pid is alive and its command line runs this folder's copy of the runner, since after a
+* when its pid is alive and its command line runs this folder's copy of the runner, or the desktop
+* app install put in place, since after a
 * reboot the pid may name another process. True when one was ended.
 */
 async function stopOurRunner(claudeDir, { isAlive = alive, kill = killTree, now = Date.now, commandOf, waitMs = 0 } = {}) {
@@ -836,8 +877,8 @@ async function stopOurRunner(claudeDir, { isAlive = alive, kill = killTree, now 
 	if (!lock || !pid || !isAlive(pid)) return false;
 	if (now() - lock.mtimeMs >= 9e4) {
 		const command = commandOf ? await commandOf(pid) : null;
-		const runner = normalPath(path.join(runnerAppDir(claudeDir), copiedAs("dist/runner.js")));
-		if (!command || !command.replace(/\\/g, "/").toLowerCase().includes(runner.toLowerCase())) return false;
+		const ours = [path.join(runnerAppDir(claudeDir), copiedAs("dist/runner.js")), (await recordedApp(claudeDir))?.dir].filter((p) => !!p).map((p) => normalPath(p).toLowerCase());
+		if (!command || !ours.some((p) => command.replace(/\\/g, "/").toLowerCase().includes(p))) return false;
 	}
 	try {
 		kill(pid);

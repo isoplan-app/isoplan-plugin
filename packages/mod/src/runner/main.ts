@@ -38,6 +38,8 @@
 // and list. A hooks module gets its session's lines down the pipe, and the ask_room script asks the
 // room through it (src/ask/machine.ts), only for a session whose hooks module is connected. Its
 // address and token are in <claude dir>/isoplan/runner/pipe.json, which the worker writes as it starts.
+// Each office's link, and the links waiting to pair the machine, go to <claude dir>/isoplan/runner/status.json
+// as they change (status.ts), for the desktop app's menu (packages/app).
 //
 // The worker also drives its person's sessions from the floor (session.ts; its hello says `drive`),
 // for every office through one driver, and records every process it starts for that, and every
@@ -90,6 +92,7 @@ import { createPairLinks } from "./pair-links.js";
 import { startPlaces, startWhere } from "./start-where.js";
 import { runnerEnvPath } from "./environment.js";
 import { applyClaudeDir, LOCK_REFRESH_MS, RUNNER_FRESH_MS, runnerCode, runnerLockPath } from "./start.js";
+import { createStatus, statusPath } from "./status.js";
 
 // The runner's log starts over once it is this big.
 const LOG_CAP_BYTES = 256 * 1024;
@@ -187,6 +190,8 @@ async function worker(): Promise<number> {
   const account = await accountOf({ readText: (p) => fs.readFile(p, "utf8").catch(() => null), run: io.run }, claudeJson, os.homedir());
   // The machine's links to pair it, to the sessions waiting for them.
   const pairLinks = createPairLinks();
+  // Each office's link and the links to pair the machine, for the desktop app's menu (status.ts).
+  const status = createStatus({ file: statusPath(claudeDir), offices: answering.map(({ server, label }) => ({ server, label })) });
   const emitFor = (server: string): Parameters<typeof createLink>[0]["emit"] => (line) => {
     if (line.type === "log") log(line.text);
     else if (line.type === "error") log(`the office server at ${server} says: ${line.message} (${line.code})`);
@@ -195,6 +200,7 @@ async function worker(): Promise<number> {
       // The machine's one pairing: its link is in the status line of each session waiting for it.
       const label = offices.find((o) => o.server === line.server)?.label;
       pairLinks.pair({ ...line, ...(label && { label }) });
+      status.pair({ ...line, ...(label && { label }) });
     }
   };
   // Each office's pairing and list of repos (src/data-layer/approved.ts), one of each for the
@@ -509,6 +515,7 @@ async function worker(): Promise<number> {
     open: (office, said) => {
       const { pairing, runner } = answerers[answering.indexOf(office)]!;
       log(`the runner's worker ${process.pid} is answering for this machine through ${office.server}`);
+      status.opening(office.server);
       return createLink({
         url: office.server,
         emit: emitFor(office.server),
@@ -516,11 +523,11 @@ async function worker(): Promise<number> {
         onMessage: (message) => runner.take(message),
         onDrive: (message) => drive.take(office.server, message),
         // At every hello and every drop, this office's drive-policy no longer holds; nothing driven goes on the new connection until its first one, which `holding` follows.
-        onOpen: () => drive.linked(office.server),
-        onClose: () => drive.unlinked(office.server),
-        onNotWanted: said.notWanted,
+        onOpen: () => (status.opened(office.server), drive.linked(office.server)),
+        onClose: () => (status.closed(office.server), drive.unlinked(office.server)),
+        onNotWanted: () => (status.stopped(office.server, "not-wanted"), said.notWanted()),
         // A revoked or lapsed pairing closes this link: the sessions' links pair the machine again.
-        onPairingEnded: said.unpaired,
+        onPairingEnded: () => (status.stopped(office.server, "unpaired"), said.unpaired()),
         hello: {
           type: "runner",
           v: PROTOCOL_VERSION,
@@ -550,6 +557,7 @@ async function worker(): Promise<number> {
   // Each session's link closes, and its log says so, before the worker exits; one stuck in a pass is left after STOP_WAIT_MS (reporting.ts).
   await reporting.stop();
   await pipe?.close();
+  await status.written();
   return ended === "not-wanted" ? NOT_WANTED_CODE : ended === "unpaired" ? UNPAIRED_CODE : 0;
 }
 

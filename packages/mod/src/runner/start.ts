@@ -11,7 +11,14 @@
 // A supervisor that stops for a reason a restart won't mend (the server doesn't want it, it kept
 // crashing) leaves a hold-off, `{ pid: 0, until, reason, code }`, which keeps it from starting
 // until then.
+//
+// Once install has put the desktop app in place (src/install/app.ts, recorded in
+// runner/desktop-app.json), the app is the runner: its main process is the supervisor and holds the
+// same lock, with `engine: "app"` in it (packages/app). Then startRunner opens the app instead of
+// starting node, and stops a node runner it finds running, so the machine never runs both. A live
+// app counts as running whatever code it runs: it starts its worker again on new code itself.
 
+import { spawn as spawnChild } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { alive, readLock, releaseLock } from "../wake/lock.js";
@@ -39,6 +46,38 @@ async function liveRunner(claudeDir: string, now: number, isAlive: (pid: number)
   return null;
 }
 
+/** The desktop app install put in place: its version, its folder (Isoplan.app on macOS) and the program to start. */
+export interface DesktopApp {
+  version: string;
+  dir: string;
+  launch: string;
+}
+
+export const desktopAppPath = (claudeDir: string) => path.join(claudeDir, "isoplan", "runner", "desktop-app.json");
+
+/** The desktop app install recorded, if its program is still there. */
+export async function recordedApp(claudeDir: string): Promise<DesktopApp | null> {
+  try {
+    const app = JSON.parse(await fs.readFile(desktopAppPath(claudeDir), "utf8")) as Partial<DesktopApp>;
+    if (typeof app.version !== "string" || typeof app.dir !== "string" || typeof app.launch !== "string") return null;
+    return (await fs.stat(app.launch).catch(() => null))?.isFile() ? (app as DesktopApp) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The lock's holder is the desktop app. */
+export const isAppLock = (extra: Record<string, unknown>) => extra.engine === "app";
+
+/**
+ * Starts the desktop app for `claudeDir` with no window and no focus, and doesn't wait for it: on
+ * macOS through `open -g`, so it starts as an app of its own and stays in the background.
+ */
+export function openApp(app: DesktopApp, claudeDir: string, platform: NodeJS.Platform = process.platform): void {
+  const [file, args] = platform === "darwin" ? ["/usr/bin/open", ["-g", app.dir, "--args", "--claude-dir", claudeDir]] : [app.launch, ["--claude-dir", claudeDir]];
+  spawnChild(file, args, { cwd: claudeDir, detached: true, stdio: "ignore", windowsHide: true }).on("error", () => {}).unref();
+}
+
 export interface StartOptions {
   claudeDir: string;
   /** Starts `node <args>` in `cwd`, detached, with `env` (else this process's), and doesn't wait for it. */
@@ -46,6 +85,8 @@ export interface StartOptions {
   isAlive?: (pid: number) => boolean;
   kill?: (pid: number) => void;
   now?: () => number;
+  /** Starts the desktop app (openApp). */
+  open?: (app: DesktopApp, claudeDir: string) => void;
 }
 
 /**
@@ -57,9 +98,10 @@ export type Started = "started" | "running" | "held-off" | "not-installed";
 /**
  * Starts the recorded runner unless a live one runs the recorded code. One on older code is
  * replaced. A hold-off keeps it from starting, except a crash loop's hold-off on older code: a new
- * version may have fixed what crashed.
+ * version may have fixed what crashed. With the desktop app recorded it opens the app instead,
+ * once no node runner runs, and a live app is running.
  */
-export async function startRunner({ claudeDir, spawn, isAlive = alive, kill = (pid) => process.kill(pid), now = Date.now }: StartOptions): Promise<Started> {
+export async function startRunner({ claudeDir, spawn, isAlive = alive, kill = (pid) => process.kill(pid), now = Date.now, open = openApp }: StartOptions): Promise<Started> {
   let runner: unknown;
   try {
     runner = (JSON.parse(await fs.readFile(wakeRecordPath(claudeDir), "utf8")) as { runner?: unknown }).runner;
@@ -70,14 +112,19 @@ export async function startRunner({ claudeDir, spawn, isAlive = alive, kill = (p
   const code = await runnerCode(runner);
   if (!code) return "not-installed";
   const lockFile = runnerLockPath(claudeDir);
+  const app = await recordedApp(claudeDir);
   const live = await liveRunner(claudeDir, now(), isAlive);
   if (live?.isHoldOff) {
     if (live.extra.reason !== "gave-up" || live.extra.code === code) return "held-off";
     // Taken out only if it is still the same hold-off.
     if ((await readLock(lockFile))?.until === live.until) await fs.rm(lockFile, { force: true });
   } else if (live) {
-    if (live.extra.code === code) return "running";
+    if (isAppLock(live.extra) || (live.extra.code === code && !app)) return "running";
     await stopRunner(claudeDir, { isAlive, kill, now, expect: { pid: live.pid!, code: live.extra.code } });
+  }
+  if (app) {
+    open(app, claudeDir);
+    return "started";
   }
   // The config folder goes with it, so the runner uses the one its starter found, whatever its
   // environment says. The environment is the one install recorded (environment.ts), never this

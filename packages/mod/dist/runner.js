@@ -15690,6 +15690,27 @@ function createDriver(o) {
 		settled: () => busy === 0 ? Promise.resolve() : new Promise((resolve) => waiting.push(resolve))
 	};
 }
+[
+	"$ErrorActionPreference = 'Stop'",
+	"Add-Type -AssemblyName System.Windows.Forms, System.Drawing",
+	...[`Add-Type -Namespace IsoplanWin -Name User32 -MemberDefinition '[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);'`, "$first = New-Object System.Windows.Forms.Form; [void][IsoplanWin.User32]::ShowWindow($first.Handle, 0); $first.Dispose()"],
+	"[System.Windows.Forms.Application]::EnableVisualStyles()",
+	"$f = New-Object System.Windows.Forms.Form",
+	"$f.Text = $env:ISOPLAN_DIALOG_TITLE",
+	"$f.FormBorderStyle = 'FixedDialog'; $f.MaximizeBox = $false; $f.MinimizeBox = $false; $f.StartPosition = 'CenterScreen'; $f.TopMost = $true",
+	"$f.AutoSize = $true; $f.AutoSizeMode = 'GrowAndShrink'; $f.Padding = New-Object System.Windows.Forms.Padding 16",
+	"$layout = New-Object System.Windows.Forms.FlowLayoutPanel; $layout.FlowDirection = 'TopDown'; $layout.AutoSize = $true; $layout.AutoSizeMode = 'GrowAndShrink'",
+	"$label = New-Object System.Windows.Forms.Label; $label.Text = $env:ISOPLAN_DIALOG_TEXT; $label.UseMnemonic = $false; $label.AutoSize = $true; $label.MaximumSize = New-Object System.Drawing.Size 480, 0",
+	"$row = New-Object System.Windows.Forms.FlowLayoutPanel; $row.FlowDirection = 'RightToLeft'; $row.AutoSize = $true; $row.Anchor = 'Right'",
+	"$cancel = New-Object System.Windows.Forms.Button; $cancel.Text = 'Cancel'; $cancel.UseMnemonic = $false; $cancel.AutoSize = $true; $cancel.DialogResult = 'Cancel'",
+	"$connect = New-Object System.Windows.Forms.Button; $connect.Text = 'Connect'; $connect.UseMnemonic = $false; $connect.AutoSize = $true; $connect.DialogResult = 'OK'",
+	"$row.Controls.AddRange(@($cancel, $connect)); $layout.Controls.AddRange(@($label, $row)); $f.Controls.Add($layout)",
+	"$f.AcceptButton = $cancel; $f.CancelButton = $cancel",
+	`$timer = New-Object System.Windows.Forms.Timer; $timer.Interval = 300000; $timer.Add_Tick({ $f.DialogResult = 'Cancel'; $f.Close() })`,
+	"$f.Add_Shown({ $f.Activate(); $cancel.Focus(); $timer.Start() })",
+	"$r = $f.ShowDialog(); $timer.Stop()",
+	"if ($r -eq [System.Windows.Forms.DialogResult]::OK) { exit 0 } else { exit 2 }"
+].join("\n");
 //#endregion
 //#region src/wake/wake.ts
 const wakeRecordPath = (claudeDir) => path.join(claudeDir, "isoplan", "wake.json");
@@ -15718,27 +15739,6 @@ function applyClaudeDir(argv, env, home) {
 	if (path.resolve(dir) === path.resolve(home, ".claude")) delete env.CLAUDE_CONFIG_DIR;
 	else env.CLAUDE_CONFIG_DIR = dir;
 }
-[
-	"$ErrorActionPreference = 'Stop'",
-	"Add-Type -AssemblyName System.Windows.Forms, System.Drawing",
-	...[`Add-Type -Namespace IsoplanWin -Name User32 -MemberDefinition '[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);'`, "$first = New-Object System.Windows.Forms.Form; [void][IsoplanWin.User32]::ShowWindow($first.Handle, 0); $first.Dispose()"],
-	"[System.Windows.Forms.Application]::EnableVisualStyles()",
-	"$f = New-Object System.Windows.Forms.Form",
-	"$f.Text = $env:ISOPLAN_DIALOG_TITLE",
-	"$f.FormBorderStyle = 'FixedDialog'; $f.MaximizeBox = $false; $f.MinimizeBox = $false; $f.StartPosition = 'CenterScreen'; $f.TopMost = $true",
-	"$f.AutoSize = $true; $f.AutoSizeMode = 'GrowAndShrink'; $f.Padding = New-Object System.Windows.Forms.Padding 16",
-	"$layout = New-Object System.Windows.Forms.FlowLayoutPanel; $layout.FlowDirection = 'TopDown'; $layout.AutoSize = $true; $layout.AutoSizeMode = 'GrowAndShrink'",
-	"$label = New-Object System.Windows.Forms.Label; $label.Text = $env:ISOPLAN_DIALOG_TEXT; $label.UseMnemonic = $false; $label.AutoSize = $true; $label.MaximumSize = New-Object System.Drawing.Size 480, 0",
-	"$row = New-Object System.Windows.Forms.FlowLayoutPanel; $row.FlowDirection = 'RightToLeft'; $row.AutoSize = $true; $row.Anchor = 'Right'",
-	"$cancel = New-Object System.Windows.Forms.Button; $cancel.Text = 'Cancel'; $cancel.UseMnemonic = $false; $cancel.AutoSize = $true; $cancel.DialogResult = 'Cancel'",
-	"$connect = New-Object System.Windows.Forms.Button; $connect.Text = 'Connect'; $connect.UseMnemonic = $false; $connect.AutoSize = $true; $connect.DialogResult = 'OK'",
-	"$row.Controls.AddRange(@($cancel, $connect)); $layout.Controls.AddRange(@($label, $row)); $f.Controls.Add($layout)",
-	"$f.AcceptButton = $cancel; $f.CancelButton = $cancel",
-	`$timer = New-Object System.Windows.Forms.Timer; $timer.Interval = 300000; $timer.Add_Tick({ $f.DialogResult = 'Cancel'; $f.Close() })`,
-	"$f.Add_Shown({ $f.Activate(); $cancel.Focus(); $timer.Start() })",
-	"$r = $f.ShowDialog(); $timer.Stop()",
-	"if ($r -eq [System.Windows.Forms.DialogResult]::OK) { exit 0 } else { exit 2 }"
-].join("\n");
 //#endregion
 //#region src/install/state.ts
 /** Claude Code's plugins folder: $CLAUDE_CODE_PLUGIN_CACHE_DIR when it is set, else <claude dir>/plugins. */
@@ -18141,6 +18141,61 @@ async function startWhere(start, bin, o) {
 	}, o);
 }
 //#endregion
+//#region src/runner/status.ts
+const statusPath = (claudeDir) => path.join(claudeDir, "isoplan", "runner", "status.json");
+function createStatus({ file, offices, pid = process.pid, now = Date.now }) {
+	const status = {
+		pid,
+		offices: offices.map(({ server, label }) => ({
+			server,
+			label,
+			open: false,
+			since: now()
+		})),
+		pairs: []
+	};
+	let writing = Promise.resolve();
+	const write = () => {
+		const text = JSON.stringify(status, null, 2) + "\n";
+		writing = writing.then(async () => {
+			await fs.mkdir(path.dirname(file), { recursive: true });
+			const temp = `${file}.${pid}`;
+			await fs.writeFile(temp, text);
+			await fs.rename(temp, file);
+		}).catch(() => {});
+	};
+	const change = (server, to) => {
+		const office = status.offices.find((o) => o.server === server);
+		if (!office) return;
+		to(office);
+		write();
+	};
+	write();
+	return {
+		opening: (server) => change(server, (o) => delete o.stopped),
+		opened: (server) => change(server, (o) => {
+			o.open = true;
+			o.since = now();
+			status.pairs = status.pairs.filter((p) => p.server !== server);
+		}),
+		closed: (server) => change(server, (o) => {
+			if (o.open) o.since = now();
+			o.open = false;
+		}),
+		stopped: (server, why) => change(server, (o) => o.stopped = why),
+		pair: (line) => {
+			status.pairs = [...status.pairs.filter((p) => p.server !== line.server), {
+				server: line.server,
+				...line.label && { label: line.label },
+				url: line.url,
+				expires: line.expires
+			}];
+			write();
+		},
+		written: () => writing
+	};
+}
+//#endregion
 //#region src/runner/main.ts
 const LOG_CAP_BYTES = 262144;
 const CHECK_MS = 6e4;
@@ -18241,6 +18296,13 @@ async function worker() {
 		run: io.run
 	}, claudeJson, os.homedir());
 	const pairLinks = createPairLinks();
+	const status = createStatus({
+		file: statusPath(claudeDir),
+		offices: answering.map(({ server, label }) => ({
+			server,
+			label
+		}))
+	});
 	const emitFor = (server) => (line) => {
 		if (line.type === "log") log(line.text);
 		else if (line.type === "error") log(`the office server at ${server} says: ${line.message} (${line.code})`);
@@ -18248,6 +18310,10 @@ async function worker() {
 			log(`to answer for this machine's rooms through ${line.server}, pair it: click ${line.url} on this computer and approve it in the office (it works until ${line.expires})`);
 			const label = offices.find((o) => o.server === line.server)?.label;
 			pairLinks.pair({
+				...line,
+				...label && { label }
+			});
+			status.pair({
 				...line,
 				...label && { label }
 			});
@@ -18590,16 +18656,17 @@ async function worker() {
 		open: (office, said) => {
 			const { pairing, runner } = answerers[answering.indexOf(office)];
 			log(`the runner's worker ${process.pid} is answering for this machine through ${office.server}`);
+			status.opening(office.server);
 			return createLink({
 				url: office.server,
 				emit: emitFor(office.server),
 				pairing,
 				onMessage: (message) => runner.take(message),
 				onDrive: (message) => drive.take(office.server, message),
-				onOpen: () => drive.linked(office.server),
-				onClose: () => drive.unlinked(office.server),
-				onNotWanted: said.notWanted,
-				onPairingEnded: said.unpaired,
+				onOpen: () => (status.opened(office.server), drive.linked(office.server)),
+				onClose: () => (status.closed(office.server), drive.unlinked(office.server)),
+				onNotWanted: () => (status.stopped(office.server, "not-wanted"), said.notWanted()),
+				onPairingEnded: () => (status.stopped(office.server, "unpaired"), said.unpaired()),
 				hello: {
 					type: "runner",
 					v: 1,
@@ -18627,6 +18694,7 @@ async function worker() {
 	const ended = await links.ended;
 	await reporting.stop();
 	await pipe?.close();
+	await status.written();
 	return ended === "not-wanted" ? 3 : ended === "unpaired" ? 4 : 0;
 }
 process.exitCode = await (process.argv.includes("--worker") ? worker() : supervisor());

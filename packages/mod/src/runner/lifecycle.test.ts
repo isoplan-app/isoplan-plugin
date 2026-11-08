@@ -7,7 +7,7 @@ import { holdOff, lockHolder, refreshLock, takeLock } from "../wake/lock.js";
 import { wakeRecordPath } from "../wake/wake.js";
 import { anyRoomSince, askableMs, MAX_FAST_FAILURES, NOT_WANTED_CODE, onEscapes, supervise, UNPAIRED_CODE } from "./lifecycle.js";
 import { errorText } from "./scan.js";
-import { applyClaudeDir, RUNNER_FRESH_MS, runnerCode, runnerLockPath, startRunner, stopRunner } from "./start.js";
+import { applyClaudeDir, desktopAppPath, RUNNER_FRESH_MS, runnerCode, runnerLockPath, startRunner, stopRunner, type DesktopApp } from "./start.js";
 
 const OTHER = 4242; // a pid that isn't this process
 
@@ -81,6 +81,37 @@ test("one runner: a runner on older code is stopped and a new one started; unins
   expect(await stopRunner(m.claudeDir, m.opts())).toBe(true);
   expect(m.killed).toEqual([OTHER, OTHER + 1]);
   expect(await stopRunner(m.claudeDir, m.opts())).toBe(false);
+});
+
+test("one engine: with the desktop app installed it is opened in place of node, a node runner running is stopped first, and a live app is running whatever code it runs", async () => {
+  const m = await machine();
+  const launch = path.join(m.claudeDir, "app", "bin", "launcher.exe");
+  fs.mkdirSync(path.dirname(launch), { recursive: true });
+  fs.writeFileSync(launch, "");
+  const app: DesktopApp = { version: "0.1.0", dir: path.dirname(path.dirname(launch)), launch };
+  fs.writeFileSync(desktopAppPath(m.claudeDir), JSON.stringify(app));
+  const opened: { app: DesktopApp; claudeDir: string }[] = [];
+  const start = (isAlive: (pid: number) => boolean = () => true) => startRunner({ ...m.opts(isAlive), open: (a, claudeDir) => opened.push({ app: a, claudeDir }) });
+
+  // A node runner on the current code runs: it is stopped, and the app opened.
+  await m.hold(OTHER);
+  expect(await start()).toBe("started");
+  expect(m.killed).toEqual([OTHER]);
+  expect(opened).toEqual([{ app, claudeDir: m.claudeDir }]);
+  expect(m.spawned).toEqual([]);
+
+  // The app holds the lock: running, on a plugin update's new code too.
+  await takeLock(m.lock, OTHER + 1, () => false, false, Date.now(), { extra: { code: await runnerCode(m.runnerJs), engine: "app" } });
+  fs.writeFileSync(m.runnerJs, "// v2, from a plugin update");
+  expect(await start()).toBe("running");
+  expect(m.killed).toEqual([OTHER]);
+  expect(opened).toHaveLength(1);
+
+  // The app's program gone, node runs again.
+  fs.rmSync(launch);
+  expect(await start(() => false)).toBe("started");
+  expect(m.spawned).toHaveLength(1);
+  expect(opened).toHaveLength(1);
 });
 
 test("one runner: a hold-off keeps it from starting; nothing starts when install recorded no runner, or it is gone", async () => {

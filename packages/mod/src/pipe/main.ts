@@ -4,7 +4,8 @@
 //
 // As it starts, unless a newer version of the plugin is on disk, it puts this version's wake hook
 // and the runner's copy in place and starts the runner (startMachine), as the plugin's data layer
-// did, so a session that loads a new version brings the machine's runner up to it. Then it relays
+// did, so a session that loads a new version brings the machine's runner up to it, and, in the
+// background, the desktop app this version names (src/install/app.ts). Then it relays
 // the runner's lines for the session to stdout. Claude Code ends it with the session; as a backstop
 // it also ends when stdout breaks or its parent process has gone (on POSIX an orphan is re-parented,
 // so a changed ppid means gone even if the old pid is reused).
@@ -17,7 +18,7 @@ import type { DataLayerLine } from "../lines.js";
 import { loadConfig } from "../data-layer/config.js";
 import { claudePaths } from "../data-layer/identity.js";
 import { nodeIo } from "../data-layer/io.js";
-import { sessionLog, spawnHidden, startMachine, systemPlaces } from "../data-layer/report-session.js";
+import { appComputer, sessionLog, spawnHidden, startMachine, systemPlaces } from "../data-layer/report-session.js";
 import { managedDir, newestDataLayer, pluginDirsOf, pluginsDir, type Place } from "../install/state.js";
 import { startRunner } from "../runner/start.js";
 import { alive } from "../wake/lock.js";
@@ -56,7 +57,8 @@ export async function pipeMain(argv: string[], appDir: string): Promise<number> 
   const self = path.join(here, "data-layer.js");
   // An outdated copy installs nothing, so it never hands the wake hook and the runner back to older code.
   const outdated = (await newestDataLayer(place.plugins, self, cwd).catch(() => self)) !== self;
-  if (!outdated) await startMachine({ place, here, spawn: spawnHidden, log: (text) => out({ type: "log", text }), ...systemPlaces() }).started;
+  // The desktop app installs in the background while the session runs (startMachine's `app`).
+  if (!outdated) await startMachine({ place, here, spawn: spawnHidden, log: (text) => out({ type: "log", text }), ...systemPlaces(), app: appComputer() }).started;
 
   const io = nodeIo();
   const version = await fs
