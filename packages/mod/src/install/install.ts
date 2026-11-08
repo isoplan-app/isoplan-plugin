@@ -49,7 +49,7 @@ import { promisify } from "node:util";
 import { loadConfig } from "../data-layer/config.js";
 import { nodeIo } from "../data-layer/io.js";
 import { claudeBinaryPath } from "../runner/claude-binary.js";
-import { recordedApp, RUNNER_FRESH_MS, runnerLockPath } from "../runner/start.js";
+import { recordedApp, recordedAppDir, RUNNER_FRESH_MS, runnerLockPath } from "../runner/start.js";
 import { alive, holdOff, isHeld, readLock, releaseLock, takeLock } from "../wake/lock.js";
 import { wakeRecordPath, type WakeRecord } from "../wake/wake.js";
 import { registerLinkHandler, unregisterLinkHandler, type LinkHandler } from "./link-handler.js";
@@ -322,14 +322,15 @@ export async function uninstall(paths: Paths, { optOut = false, settleMs = 0, co
 
   if (!(await isStillGone())) return stopped(reinstalled);
   // Read before the runner's folder, which records it, goes.
-  const app = await recordedApp(paths.claudeDir);
+  const appDir = await recordedAppDir(paths.claudeDir);
   if (await stopOurRunner(paths.claudeDir, runner)) changes.push("stopped the runner, which answered for this machine's rooms");
-  // The desktop app (app.ts), stopped with the runner it is. Its launcher lets its files go a moment
-  // after the app exits, so this tries for a while; an app folder left behind doesn't stop the rest.
-  if (app) {
-    await fs.rm(app.dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }).then(
-      () => changes.push(`removed ${app.dir}`),
-      (err: Error) => changes.push(`couldn't remove the desktop app at ${app.dir}: ${err.message}`),
+  // The desktop app (app.ts), stopped with the runner it is, or switched off. Its launcher lets its
+  // files go a moment after the app exits, so this tries for a while; an app folder left behind
+  // doesn't stop the rest.
+  if (appDir && (await exists(appDir))) {
+    await fs.rm(appDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }).then(
+      () => changes.push(`removed ${appDir}`),
+      (err: Error) => changes.push(`couldn't remove the desktop app at ${appDir}: ${err.message}`),
     );
   }
   // Before update.json, which records it, goes.

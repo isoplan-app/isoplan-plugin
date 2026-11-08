@@ -13,10 +13,12 @@ import path from "node:path";
 import { claudePaths } from "../../../mod/src/data-layer/claude-paths.js";
 import { loadSettings } from "../../../mod/src/data-layer/config.js";
 import { nodeIo } from "../../../mod/src/data-layer/io.js";
+import { LOCK_REFRESH_MS } from "../../../mod/src/runner/start.js";
 import { readStatus, statusPath, type RunnerStatus } from "../../../mod/src/runner/status.js";
+import { alive } from "../../../mod/src/wake/lock.js";
 import type { PairingRPC } from "../shared/pairing-rpc.ts";
 import { startEngine } from "./engine.ts";
-import { pairingView, trayMenu, type MenuInput } from "./menu.ts";
+import { currentStatus, pairingView, trayMenu, type MenuInput } from "./menu.ts";
 import pkg from "../../package.json" with { type: "json" };
 
 const LOG_CAP_BYTES = 256 * 1024;
@@ -39,19 +41,37 @@ function log(text: string) {
 // A menu-bar app: no Dock icon.
 if (process.platform === "darwin") Utils.setDockIconVisible(false);
 
-// The tray's settings, as the runner reads its own: its copy's runner.json, then the person's.
-const settings = () => loadSettings<{ trayRefreshSeconds: number; officeUnreachableSeconds: number }>(nodeIo(), path.join(isoplanDir, "runner", "app", "runner.json"), path.join(isoplanDir, "runner.json"));
+// The tray's settings, as the runner reads its own: its copy's runner.json, then the person's. One
+// that can't be read keeps the last that could.
+type TraySettings = { trayRefreshSeconds: number; officeUnreachableSeconds: number };
+let good: TraySettings | null = null;
+async function settings(): Promise<TraySettings> {
+  try {
+    good = await loadSettings<TraySettings>(nodeIo(), path.join(isoplanDir, "runner", "app", "runner.json"), path.join(isoplanDir, "runner.json"));
+  } catch (err) {
+    if (!good) throw err;
+  }
+  return good;
+}
+
+// A menu that couldn't be brought up to date says why once, not at every refresh.
+let lastProblem = "";
+function problem(err: unknown): void {
+  const text = String((err as Error)?.message ?? err);
+  if (text !== lastProblem) log(`couldn't bring the menu up to date: ${text}`);
+  lastProblem = text;
+}
 
 let tray: Tray | null = null;
 let pairing: BrowserWindow | null = null;
 let shown = "";
 let status: RunnerStatus | null = null;
 
-const engine = startEngine({ claudeDir, version: pkg.version, log, onChange: () => void update() });
+const engine = startEngine({ claudeDir, version: pkg.version, log, onChange: () => void update().catch(problem) });
 
 async function input(): Promise<MenuInput> {
   const s = await settings();
-  if (engine.state() === "running") status = await readStatus(statusPath(claudeDir));
+  if (engine.state() === "running") status = currentStatus(await readStatus(statusPath(claudeDir)), alive);
   return { engine: engine.state(), status, now: Date.now(), unreachableMs: s.officeUnreachableSeconds * 1000 };
 }
 
@@ -65,6 +85,7 @@ async function update(): Promise<void> {
   }
   if (!tray) return;
   const menu = JSON.stringify(trayMenu(await input()));
+  lastProblem = "";
   if (menu === shown) return;
   shown = menu;
   tray.setMenu(JSON.parse(menu));
@@ -87,11 +108,11 @@ function openPairing(): void {
   const rpc = BrowserView.defineRPC<PairingRPC>({
     maxRequestTime: 5000,
     handlers: {
-      requests: { view: async () => pairingView(await input()) },
+      requests: { view: async () => pairingView(await input(), (await settings()).trayRefreshSeconds * 1000) },
       messages: {
         // Only a link the runner made to pair this computer, and only from a click in the window.
         open: async ({ url }) => {
-          if (pairingView(await input()).waiting.some((p) => p.url === url)) Utils.openExternal(url);
+          if (pairingView(await input(), 0).waiting.some((p) => p.url === url)) Utils.openExternal(url);
         },
       },
     },
@@ -100,10 +121,14 @@ function openPairing(): void {
   pairing.on("close", () => (pairing = null));
 }
 
-settings().then(
-  (s) => setInterval(() => void update().catch(() => {}), s.trayRefreshSeconds * 1000),
-  (err: Error) => log(`couldn't read the runner's settings, so the menu won't follow its state: ${err.message}`),
-);
+// The menu follows the runner every trayRefreshSeconds; until the settings can first be read, it
+// tries again every lock refresh.
+function refresh(): void {
+  void update()
+    .catch(problem)
+    .finally(() => setTimeout(refresh, good ? good.trayRefreshSeconds * 1000 : LOCK_REFRESH_MS));
+}
+refresh();
 
 engine.ended.then(async (why) => {
   log(`the app ends: ${why}`);

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, expect, test } from "vitest";
-import { runnerCode, runnerLockPath, startRunner } from "../../../mod/src/runner/start.js";
+import { appOpenPath, runnerCode, runnerLockPath, startRunner } from "../../../mod/src/runner/start.js";
 import { readLock, takeLock } from "../../../mod/src/wake/lock.js";
 import { wakeRecordPath } from "../../../mod/src/wake/wake.js";
 import { startEngine, type Worker } from "./engine.ts";
@@ -43,8 +43,11 @@ test("engine: the app takes the runner's lock from a node runner, stopping it fi
   const m = machine();
   m.alive.add(NODE);
   await takeLock(m.lock, NODE, () => false, false, Date.now(), { extra: { code: await runnerCode(m.runner) } });
+  // startRunner's record that it opened the app goes once the app is the runner.
+  fs.writeFileSync(appOpenPath(m.claudeDir), JSON.stringify({ version: "0.1.0", openedAt: Date.now() }));
   const engine = m.start();
   await settle();
+  expect(fs.existsSync(appOpenPath(m.claudeDir))).toBe(false);
   expect(m.killed).toEqual([NODE]);
   expect(engine.state()).toBe("running");
   expect(m.workers.map((w) => w.args)).toEqual([["--claude-dir", m.claudeDir, "--worker"]]);

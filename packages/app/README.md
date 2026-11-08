@@ -7,7 +7,9 @@ The machine's runner as a desktop app (ADR 0007, 8 Nov update): an [Electrobun](
 - `src/bun/index.ts`: the tray and the pairing window. `src/pairing/`: the window (Vue).
 - The plugin installs it (`packages/mod/src/install/app.ts`). `packages/mod/app-release.json` names the app version the plugin wants. Without one for the computer, the runner runs on node as before.
 
-Its settings are in `packages/mod/runner.json`, and a person can override them in `~/.claude/isoplan/runner.json`: `desktopApp` (false keeps the runner on node), `appDownloadSeconds`, `appRetryHours`, `officeUnreachableSeconds`, `trayRefreshSeconds`. It logs to `~/.claude/isoplan/logs/app.log`.
+Its settings are in `packages/mod/runner.json`, and a person can override them in `~/.claude/isoplan/runner.json`: `desktopApp` (false keeps the runner on node), `appDownloadSeconds`, `appRetryHours`, `appStartSeconds`, `officeUnreachableSeconds`, `trayRefreshSeconds`. It logs to `~/.claude/isoplan/logs/app.log`.
+
+If the app doesn't become the runner within `appStartSeconds` of being opened (blocked by Defender, SmartScreen or Gatekeeper, say), or its runner keeps crashing on its Bun, the plugin runs the runner on node instead and says why in `~/.claude/isoplan/logs/runner.log`. It doesn't open that app version again for `appRetryHours`, or until another version is installed.
 
 ## Build it locally
 
@@ -31,7 +33,19 @@ Use PowerShell on Windows, not Git Bash, whose `tar` breaks Electrobun's fallbac
    gh release create app-v0.1.0 --repo isoplan-app/isoplan-plugin --title "Desktop app 0.1.0" --notes "..."
    ```
 
-`.github/workflows/app-release.yml` builds Windows on `windows-latest` and macOS on the self-hosted MacBook. It signs each when its secrets are set, and uploads `isoplan-app-<version>-<platform>-<arch>.tar.gz`, a `.sha256` for each, and `isoplan-app-manifest.json` to the release. Without the secrets, it builds unsigned and says so in a warning.
+`.github/workflows/app-release.yml` builds Windows on `windows-latest` and macOS on the self-hosted MacBook, in two independent jobs. It signs each when its secrets are set; without them, it builds unsigned and says so in a warning. Each job uploads its own files to the release as soon as it is done, so Windows doesn't wait for the Mac: `isoplan-app-<version>-<platform>-<arch>.tar.gz`, its `.sha256`, and last `isoplan-app-<platform>-<arch>.json`, the manifest the plugin reads. Until a platform's manifest is there, its machines keep the runner on node and try again after `appRetryHours`.
+
+Only one Mac build runs at a time. The macOS job is in the concurrency group `app-release-mac`, which cancels an older Mac build, queued or running, when a newer release starts one. The Windows job has no such group.
+
+### Rebuild one platform
+
+GitHub drops a job that waits more than 24 hours for the self-hosted Mac, for example while the MacBook is off. To build it again for the release that exists, run the workflow by hand with the app's version and the platform (`windows`, `macos` or `both`):
+
+```sh
+gh workflow run app-release.yml --repo isoplan-app/isoplan-plugin -f version=0.1.0 -f platform=macos
+```
+
+It builds the `app-v<version>` tag and replaces that platform's files on the release.
 
 ## One-time setup
 
@@ -39,7 +53,7 @@ Use PowerShell on Windows, not Git Bash, whose `tar` breaks Electrobun's fallbac
 
 The macOS build runs on `runs-on: [self-hosted, macOS, isoplan]`.
 
-1. On the MacBook, install the Xcode command line tools: `xcode-select --install`. They provide `codesign`, `iconutil` and `xcrun notarytool`. Node comes from the workflow.
+1. On the MacBook, install the Xcode command line tools: `xcode-select --install`. They provide `codesign`, `iconutil` and `xcrun notarytool`. Install the GitHub CLI too (`brew install gh`), which uploads the build to the release; it needs no sign-in, as the workflow gives it its token. Node comes from the workflow.
 2. On GitHub, open isoplan-app/isoplan-plugin → Settings → Actions → Runners → New self-hosted runner. Pick macOS and the MacBook's architecture (x64 for the Intel MacBook), and run the download and `config.sh` commands it shows, adding the label:
 
    ```sh
@@ -54,7 +68,7 @@ The MacBook builds for its own CPU, so an Intel MacBook makes `darwin-x64` only.
 
 ### Secrets
 
-Add these under isoplan-app/isoplan-plugin → Settings → Secrets and variables → Actions, or with `gh secret set <NAME> --repo isoplan-app/isoplan-plugin`. Each platform signs only when all of its own secrets are set.
+Add these under isoplan-app/isoplan-plugin → Settings → Secrets and variables → Actions, or with `gh secret set <NAME> --repo isoplan-app/isoplan-plugin`. Windows signs only when both of its secrets are set. macOS signs when the .p12 and its password are set, and notarizes only when the three App Store Connect secrets are set too.
 
 **Windows (code signing certificate)**
 
@@ -76,7 +90,7 @@ signtool signs `launcher.exe`, `bun.exe`, `bspatch.exe`, `zig-zstd.exe`, `Electr
 | `ASC_ISSUER_ID` | The issuer ID shown above that list of keys | Same page |
 | `ASC_PRIVATE_KEY_BASE64` | The key's `AuthKey_<id>.p8`, which can be downloaded only once. Give the file itself or the file base64-encoded | `base64 -i AuthKey_XXXX.p8 \| gh secret set ASC_PRIVATE_KEY_BASE64 --repo isoplan-app/isoplan-plugin` |
 
-The workflow imports the certificate into a throwaway keychain, the only one searched while the job runs, and deletes the keychain and the .p8 at the end, even when the build fails. Electrobun signs the app with it (`ELECTROBUN_DEVELOPER_ID`), then notarizes and staples it with the API key. If the certificate is set but the API key isn't, the app is signed but not notarized.
+The workflow imports the certificate into a throwaway keychain, the only one searched while the job runs, and deletes the keychain, the .p12 and the .p8 at the end, even when the build or the import fails. Electrobun signs the app with it (`ELECTROBUN_DEVELOPER_ID`), then notarizes and staples it with the API key. If the certificate is set but the API key isn't, the app is signed but not notarized.
 
 ## Memory
 

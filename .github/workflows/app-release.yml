@@ -1,40 +1,57 @@
-# Release build of the desktop app (packages/app): runs only when a release is published for a tag
+# Release build of the desktop app (packages/app): runs when a release is published for a tag
 # app-v<version>, and fails unless that version is the one in packages/app/package.json. Never on a
-# push or a pull request.
+# push or a pull request. Run by hand (workflow_dispatch) with a version and a platform, it rebuilds
+# that platform for the existing release app-v<version>: GitHub drops a job left queued for the
+# self-hosted Mac after 24 hours.
 #
 # Windows builds on GitHub's windows-latest; macOS on the self-hosted MacBook, by its explicit
-# labels, so it can never land on a GitHub-hosted Mac. Each is signed when its secrets are set and
-# built unsigned, with a warning, when they aren't (packages/app/README.md lists them). The release
-# gets, for each platform, isoplan-app-<version>-<platform>-<arch>.tar.gz and its .sha256, and
-# isoplan-app-manifest.json, which the plugin's install reads (packages/mod/src/install/app.ts):
-# `{ version, assets: { "<platform>-<arch>": { file, size, sha256 } } }`. A platform whose build
-# failed is left out of the manifest, and its machines keep the runner on node.
+# labels, so it can never land on a GitHub-hosted Mac. The two jobs are independent: each uploads
+# its own files to the release as soon as it is done, so Windows never waits for the Mac. The macOS
+# job alone is in a concurrency group that cancels an older one, queued or running, when a newer
+# release starts one. Each is signed when its secrets are set and built unsigned, with a warning,
+# when they aren't (packages/app/README.md lists them). For each platform the release gets
+# isoplan-app-<version>-<platform>-<arch>.tar.gz, its .sha256, and, uploaded last,
+# isoplan-app-<platform>-<arch>.json, which the plugin's install reads
+# (packages/mod/src/install/app.ts): `{ version, file, size, sha256 }`. A platform without it isn't
+# built yet, and its machines keep the runner on node.
 name: Desktop app release
 
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "The app version to rebuild, as in packages/app/package.json. Its release, app-v<version>, must exist."
+        required: true
+        type: string
+      platform:
+        description: Which platform to rebuild
+        required: true
+        type: choice
+        options: [both, windows, macos]
+        default: both
 
 permissions:
   contents: read
 
-concurrency:
-  group: app-release-${{ github.event.release.tag_name }}
-  cancel-in-progress: false
+env:
+  TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || format('app-v{0}', inputs.version) }}
 
 jobs:
   windows:
-    if: startsWith(github.event.release.tag_name, 'app-v')
+    if: ${{ (github.event_name == 'release' && startsWith(github.event.release.tag_name, 'app-v')) || (github.event_name == 'workflow_dispatch' && inputs.platform != 'macos') }}
     runs-on: windows-latest
     timeout-minutes: 45
+    permissions:
+      contents: write
     defaults:
       run:
         shell: pwsh
-    outputs:
-      asset: ${{ steps.pack.outputs.asset }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: refs/tags/${{ env.TAG }}
           persist-credentials: false
       # The pnpm version comes from packageManager in package.json.
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
@@ -43,8 +60,6 @@ jobs:
           node-version: 24
       - name: Check the tag names the app's version
         id: version
-        env:
-          TAG: ${{ github.event.release.tag_name }}
         run: |
           $version = node -p "require('./packages/app/package.json').version"
           if ($env:TAG -ne "app-v$version") { Write-Error "The tag $env:TAG doesn't match packages/app/package.json, which is at $version; tag it app-v$version."; exit 1 }
@@ -101,27 +116,39 @@ jobs:
           $sha = (Get-FileHash -Algorithm SHA256 "out\$file").Hash.ToLower()
           $size = (Get-Item "out\$file").Length
           "$sha  $file" | Out-File -Encoding ascii -NoNewline "out\$file.sha256"
-          "asset={""key"":""win32-x64"",""file"":""$file"",""size"":$size,""sha256"":""$sha""}" >> $env:GITHUB_OUTPUT
+          [ordered]@{ version = $env:VERSION; file = $file; size = $size; sha256 = $sha } | ConvertTo-Json | Out-File -Encoding utf8NoBOM "out\isoplan-app-win32-x64.json"
+          "file=$file" >> $env:GITHUB_OUTPUT
           "### Windows: $file, $([math]::Round($size / 1MB, 1)) MB" >> $env:GITHUB_STEP_SUMMARY
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: windows
-          path: out/*
-          if-no-files-found: error
+      # The archive first and its manifest last, so no machine finds a manifest before its archive.
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FILE: ${{ steps.pack.outputs.file }}
+        run: |
+          gh release upload $env:TAG "out\$env:FILE" "out\$env:FILE.sha256" --clobber --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE) { exit 1 }
+          gh release upload $env:TAG out\isoplan-app-win32-x64.json --clobber --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE) { exit 1 }
       - name: Remove the signing certificate
         if: always()
         run: Remove-Item -Force -ErrorAction SilentlyContinue "$env:RUNNER_TEMP\sign.pfx"
 
   macos:
-    if: startsWith(github.event.release.tag_name, 'app-v')
+    if: ${{ (github.event_name == 'release' && startsWith(github.event.release.tag_name, 'app-v')) || (github.event_name == 'workflow_dispatch' && inputs.platform != 'windows') }}
     # Explicit labels, so it never runs on a GitHub-hosted Mac.
     runs-on: [self-hosted, macOS, isoplan]
     timeout-minutes: 60
-    outputs:
-      asset: ${{ steps.pack.outputs.asset }}
+    permissions:
+      contents: write
+    # One Mac build at a time, the newest: a newer release cancels an older one queued while the Mac
+    # is offline, or running.
+    concurrency:
+      group: app-release-mac
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: refs/tags/${{ env.TAG }}
           persist-credentials: false
           # A long-lived runner keeps its workspace between jobs: no build of last time's survives.
           clean: true
@@ -131,8 +158,6 @@ jobs:
           node-version: 24
       - name: Check the tag names the app's version
         id: version
-        env:
-          TAG: ${{ github.event.release.tag_name }}
         run: |
           version=$(node -p "require('./packages/app/package.json').version")
           if [ "$TAG" != "app-v$version" ]; then
@@ -159,6 +184,9 @@ jobs:
           KC_PW="$(openssl rand -base64 24)"
           echo "::add-mask::$KC_PW"
           security create-keychain -p "$KC_PW" "$KC"
+          # From here on the cleanup at the end runs, whatever fails below.
+          echo "created=true" >> "$GITHUB_OUTPUT"
+          echo "path=$KC" >> "$GITHUB_OUTPUT"
           # No auto-lock: a keychain that locks mid-build fails signing with errSecInternalComponent.
           security set-keychain-settings "$KC"
           security unlock-keychain -p "$KC_PW" "$KC"
@@ -181,7 +209,6 @@ jobs:
           fi
           echo "ELECTROBUN_DEVELOPER_ID=$identity" >> "$GITHUB_ENV"
           echo "active=true" >> "$GITHUB_OUTPUT"
-          echo "path=$KC" >> "$GITHUB_OUTPUT"
 
       - name: Set up notarization
         # The App Store Connect API key Electrobun notarizes with. Signed without it, the app isn't notarized.
@@ -263,53 +290,25 @@ jobs:
           sha=$(shasum -a 256 "out/$file" | cut -d' ' -f1)
           size=$(stat -f%z "out/$file")
           printf '%s  %s' "$sha" "$file" > "out/$file.sha256"
-          echo "asset={\"key\":\"darwin-$ARCH\",\"file\":\"$file\",\"size\":$size,\"sha256\":\"$sha\"}" >> "$GITHUB_OUTPUT"
+          printf '{\n  "version": "%s",\n  "file": "%s",\n  "size": %s,\n  "sha256": "%s"\n}\n' "$VERSION" "$file" "$size" "$sha" > "out/isoplan-app-darwin-$ARCH.json"
+          echo "file=$file" >> "$GITHUB_OUTPUT"
           echo "### macOS ($ARCH): $file, $((size / 1048576)) MB" >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: macos
-          path: out/*
-          if-no-files-found: error
+      # The archive first and its manifest last, so no machine finds a manifest before its archive.
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FILE: ${{ steps.pack.outputs.file }}
+          ARCH: ${{ steps.version.outputs.arch }}
+        run: |
+          gh release upload "$TAG" "out/$FILE" "out/$FILE.sha256" --clobber --repo "$GITHUB_REPOSITORY"
+          gh release upload "$TAG" "out/isoplan-app-darwin-$ARCH.json" --clobber --repo "$GITHUB_REPOSITORY"
       - name: Remove the signing keychain
-        if: ${{ always() && steps.keychain.outputs.active == 'true' }}
+        if: ${{ always() && steps.keychain.outputs.created == 'true' }}
         run: |
           security list-keychains -d user -s login.keychain-db
           security delete-keychain "${{ steps.keychain.outputs.path }}" || true
+          rm -f "$RUNNER_TEMP/devid.p12"
       - name: Remove the App Store Connect key
         if: ${{ always() && steps.notary.outputs.active == 'true' }}
         run: rm -f "${{ steps.notary.outputs.keyfile }}"
 
-  publish:
-    needs: [windows, macos]
-    # Whatever built goes out: a platform missing from the manifest keeps its machines on node.
-    if: ${{ always() && startsWith(github.event.release.tag_name, 'app-v') && (needs.windows.result == 'success' || needs.macos.result == 'success') }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          path: out
-          merge-multiple: true
-      - name: Write the manifest
-        env:
-          TAG: ${{ github.event.release.tag_name }}
-          WINDOWS: ${{ needs.windows.outputs.asset }}
-          MACOS: ${{ needs.macos.outputs.asset }}
-        run: |
-          node -e '
-            const assets = {};
-            for (const text of [process.env.WINDOWS, process.env.MACOS]) {
-              if (!text) continue;
-              const { key, ...asset } = JSON.parse(text);
-              assets[key] = asset;
-            }
-            const manifest = { version: process.env.TAG.replace(/^app-v/, ""), assets };
-            require("fs").writeFileSync("out/isoplan-app-manifest.json", JSON.stringify(manifest, null, 2) + "\n");
-            console.log(JSON.stringify(manifest, null, 2));
-          '
-      - name: Upload to the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$TAG" out/* --clobber --repo "$GITHUB_REPOSITORY"

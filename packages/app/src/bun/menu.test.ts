@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import type { RunnerStatus } from "../../../mod/src/runner/status.js";
-import { pairingView, trayMenu, type MenuInput } from "./menu.ts";
+import { currentStatus, pairingView, trayMenu, type MenuInput } from "./menu.ts";
 
 const NOW = Date.parse("2026-11-08T12:00:00Z");
 const status: RunnerStatus = {
@@ -46,8 +46,16 @@ test("menu: paused, it offers resume and tells no office's state; starting, noth
   expect(trayMenu(input({ status: { pid: 1, offices: [], pairs: [] } }))[2]).toMatchObject({ submenu: [{ label: "No office yet" }] });
 });
 
+test("menu: a worker that has gone (crashed, or replaced on new code) isn't believed; the offices show as starting until the new one says", () => {
+  expect(currentStatus(status, (pid) => pid === 1)).toBe(status);
+  expect(currentStatus(status, () => false)).toBeNull();
+  expect(trayMenu(input({ status: currentStatus(status, () => false) }))[2]).toEqual({ type: "normal", label: "Offices", submenu: [{ type: "normal", label: "Starting…", enabled: false }] });
+  expect(pairingView(input({ status: null }), 2000)).toEqual({ refreshMs: 2000, running: true, waiting: [], connected: [] });
+});
+
 test("menu: the pairing window lists the links that haven't expired, named by office", () => {
-  expect(pairingView(input())).toEqual({ running: true, waiting: [{ office: "New", url: "https://new.example/pair/abc", expires: "2026-11-08T12:10:00Z" }], connected: ["Lorveil"] });
-  expect(pairingView(input({ now: Date.parse("2026-11-08T12:10:00Z") })).waiting).toEqual([]);
-  expect(pairingView(input({ engine: "paused" }))).toEqual({ running: false, waiting: [], connected: [] });
+  expect(pairingView(input(), 2000)).toEqual({ refreshMs: 2000, running: true, waiting: [{ office: "New", url: "https://new.example/pair/abc", expires: "2026-11-08T12:10:00Z" }], connected: ["Lorveil"] });
+  expect(pairingView(input({ now: Date.parse("2026-11-08T12:10:00Z") }), 2000).waiting).toEqual([]);
+  // The window asks again at the pace trayRefreshSeconds sets.
+  expect(pairingView(input({ engine: "paused" }), 5000)).toEqual({ refreshMs: 5000, running: false, waiting: [], connected: [] });
 });

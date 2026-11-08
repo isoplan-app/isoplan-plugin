@@ -16,7 +16,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import { recordedEnv } from "../../../mod/src/runner/environment.js";
 import { supervise, type Stopped } from "../../../mod/src/runner/lifecycle.js";
-import { isAppLock, LOCK_REFRESH_MS, RUNNER_FRESH_MS, runnerCode, runnerLockPath, stopRunner } from "../../../mod/src/runner/start.js";
+import { appOpenPath, isAppLock, LOCK_REFRESH_MS, RUNNER_FRESH_MS, runnerCode, runnerLockPath, stopRunner } from "../../../mod/src/runner/start.js";
 import { alive, HOLD_OFF_MS, holdOff, readLock, refreshLock, releaseLock, takeLock } from "../../../mod/src/wake/lock.js";
 import { wakeRecordPath } from "../../../mod/src/wake/wake.js";
 
@@ -130,6 +130,8 @@ export function startEngine(o: EngineOptions): Engine {
       return "quit";
     }
     o.log(`the app ${pid} is the runner`);
+    // It started: startRunner's record of opening it (or of it failing) goes.
+    await fs.rm(appOpenPath(o.claudeDir), { force: true }).catch(() => {});
     const lost = new Promise<"taken">((resolve) => (taken = () => resolve("taken")));
     refresh = setInterval(() => {
       void (async () => {

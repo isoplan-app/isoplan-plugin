@@ -9,7 +9,7 @@ export type MenuItem = { type: "divider" } | { type: "normal"; label: string; ac
 
 export interface MenuInput {
   engine: EngineState;
-  /** What the worker last wrote; only read while the engine runs. */
+  /** What the current worker last wrote (currentStatus); only read while the engine runs. */
   status: RunnerStatus | null;
   now: number;
   unreachableMs: number;
@@ -30,10 +30,18 @@ const LINK: Record<LinkState, string> = {
   "not-answering": "not answering for this computer",
 };
 
+/**
+ * The status file's, if the worker that wrote it is still alive: a crashed or stopped worker's last
+ * word ("connected") isn't what the offices see now.
+ */
+export const currentStatus = (status: RunnerStatus | null, isAlive: (pid: number) => boolean): RunnerStatus | null => (status && isAlive(status.pid) ? status : null);
+
 /** Each office's line in the Offices submenu. */
 export function officeLines({ engine, status, now, unreachableMs }: MenuInput): string[] {
   if (engine !== "running") return [engine === "paused" ? "Paused: no office is told anything" : "Not running"];
-  if (!status?.offices.length) return ["No office yet"];
+  // Its worker is starting, or starting again: it hasn't said yet.
+  if (!status) return ["Starting…"];
+  if (!status.offices.length) return ["No office yet"];
   return status.offices.map((office) => `${office.label}: ${LINK[linkState(office, status.pairs, now, unreachableMs)]}`);
 }
 
@@ -63,12 +71,15 @@ export interface PairingView {
   running: boolean;
   waiting: { office: string; url: string; expires: string }[];
   connected: string[];
+  /** How often the window asks again, from `trayRefreshSeconds`. */
+  refreshMs: number;
 }
 
-export function pairingView(input: MenuInput): PairingView {
+export function pairingView(input: MenuInput, refreshMs: number): PairingView {
   const running = input.engine === "running";
   const status = running ? input.status : null;
   return {
+    refreshMs,
     running,
     waiting: pairsWaiting(status, input.now),
     connected: (status?.offices ?? []).filter((o) => o.open).map((o) => o.label),

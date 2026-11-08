@@ -6,17 +6,24 @@ import { onMounted, onUnmounted, ref } from "vue";
 import type { PairingView } from "../bun/menu.ts";
 import type { PairingRPC } from "../shared/pairing-rpc.ts";
 
-const rpc = Electroview.defineRPC<PairingRPC>({ maxRequestTime: 5000, handlers: { requests: {}, messages: {} } });
+// How long the app may take to answer; unanswered, it is asked again after as long.
+const REQUEST_MS = 5000;
+const rpc = Electroview.defineRPC<PairingRPC>({ maxRequestTime: REQUEST_MS, handlers: { requests: {}, messages: {} } });
 new Electroview({ rpc });
 
 const view = ref<PairingView | null>(null);
-let timer: ReturnType<typeof setInterval> | undefined;
-const load = async () => (view.value = await rpc.request.view({}).catch(() => view.value));
-onMounted(() => {
-	void load();
-	timer = setInterval(load, 2000);
+let timer: ReturnType<typeof setTimeout> | undefined;
+let closed = false;
+// Asked again at the pace the app gives (trayRefreshSeconds).
+const load = async () => {
+	view.value = await rpc.request.view({}).catch(() => view.value);
+	if (!closed) timer = setTimeout(load, view.value?.refreshMs ?? REQUEST_MS);
+};
+onMounted(() => void load());
+onUnmounted(() => {
+	closed = true;
+	clearTimeout(timer);
 });
-onUnmounted(() => clearInterval(timer));
 
 const open = (url: string) => rpc.send.open({ url });
 const until = (expires: string) => new Date(expires).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });

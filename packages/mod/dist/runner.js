@@ -10870,8 +10870,27 @@ async function findClaude(env, platform, home, exists = isFile$1) {
 	}
 	return null;
 }
+/**
+* The machine's node: this process's own runtime, except under Bun (the desktop app runs the
+* runner's worker on its Bun), where it is the first node on PATH, the environment install recorded.
+* Bun's own when PATH has none.
+*/
+function machineNode(env = process.env, platform = process.platform, runtime = {
+	execPath: process.execPath,
+	bun: process.versions.bun
+}, exists = isFileSync) {
+	if (!runtime.bun) return runtime.execPath;
+	const windows = platform === "win32";
+	const pathVar = Object.entries(env).find(([key]) => key.toUpperCase() === "PATH")?.[1] ?? "";
+	for (const dir of pathVar.split(windows ? ";" : ":").filter(Boolean)) {
+		const node = (windows ? path.win32.join : path.posix.join)(dir, windows ? "node.exe" : "node");
+		if (exists(node)) return node;
+	}
+	return runtime.execPath;
+}
+const isFileSync = (p) => statSync(p, { throwIfNoEntry: false })?.isFile() ?? false;
 /** What runs it: the binary itself, or node and the cli.js. */
-const claudeCommand = (binary, node = process.execPath) => binary.endsWith(".js") ? [node, binary] : [binary];
+const claudeCommand = (binary, node) => binary.endsWith(".js") ? [node ?? machineNode(), binary] : [binary];
 /** The recorded binary when it is still there, else a fresh lookup. */
 async function claudeBinary(claudeDir, env, platform, home) {
 	try {
@@ -16069,13 +16088,13 @@ function updatesOffBy(env) {
 /**
 * The environment the commands run with: this one's without the session's own variables (as the
 * runner's fork, claude.ts), and nothing that can prompt (as a handoff's git, handoff/git.ts). The
-* askpass, where the person set none (GIT_ASKPASS, SSH_ASKPASS, core.askPass), is node, which takes
+* askpass, where the person set none (GIT_ASKPASS, SSH_ASKPASS, core.askPass), is node (machineNode), which takes
 * git's prompt for a script it can't find and fails, so git gives up at once instead of asking.
 */
 function commandEnv(env, git = {
 	sshCommand: false,
 	askPass: false
-}, node = process.execPath) {
+}, node = machineNode()) {
 	const out = noPromptEnv(forkEnv(env), git.sshCommand);
 	if (!git.askPass && !out.GIT_ASKPASS && !out.SSH_ASKPASS) Object.assign(out, {
 		GIT_ASKPASS: node,

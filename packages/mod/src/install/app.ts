@@ -4,8 +4,8 @@
 // for this person only, with no admin rights, no window and nothing to click.
 //
 // app-release.json, in the plugin's folder, names the app version this plugin version wants and
-// where its release's manifest is. The manifest lists one archive per platform and CPU, each with
-// its size and sha256. When the release has one for this computer, it is downloaded (public, no
+// where its release's manifests are: one per platform and CPU, naming its archive with its size and
+// sha256. When the release has one for this computer, the archive is downloaded (public, no
 // sign-in), checked against both, unpacked with the system's own tar, hidden, and moved into place:
 // %LOCALAPPDATA%\Programs\Isoplan on Windows, ~/Applications/Isoplan.app on macOS. Then
 // runner/desktop-app.json records it, and startRunner opens the app from then on in place of node
@@ -13,9 +13,12 @@
 //
 // On anything else (no app for this computer, `desktopApp` off in runner.json, a download or check
 // that fails) the runner goes on running on node, exactly as before, and the reason is logged. A
-// failure holds off trying again for `appRetryHours`. A plugin version that names a newer app
-// replaces the installed one the same way: the running app is stopped once the new one is ready, and
-// started again by the caller. One install runs at a time on the machine (runner/desktop-app.lock).
+// failure, or a release with no manifest for this computer yet (not built yet), holds off trying
+// that version again for `appRetryHours`; a plugin naming another version tries at once. A plugin
+// version that names a newer app replaces the installed one the same way: the running app is
+// stopped once the new one is ready, and started again by the caller. One install runs at a time
+// for a config folder (runner/desktop-app.lock). Switched off, the app's record stays, marked
+// `off`, so uninstall still finds its folder.
 
 import { createHash } from "node:crypto";
 import { createWriteStream } from "node:fs";
@@ -35,21 +38,16 @@ export const desktopAppLockPath = (claudeDir: string) => path.join(claudeDir, "i
 /** What app-release.json says. */
 export interface AppRelease {
   version: string;
-  /** The manifest's address; `{version}` stands for the version. */
+  /** A platform's manifest's address; `{version}`, `{platform}` and `{arch}` stand for the version and the computer's, as Node names them (win32-x64, darwin-x64, darwin-arm64). */
   manifest: string;
 }
 
-/** One archive the manifest lists. */
-export interface AppAsset {
+/** A platform's manifest: the archive its release job uploaded for it. */
+export interface AppManifest {
+  version: string;
   file: string;
   size: number;
   sha256: string;
-}
-
-export interface AppManifest {
-  version: string;
-  /** By `<platform>-<arch>`, as Node names them: win32-x64, darwin-x64, darwin-arm64. */
-  assets: Record<string, AppAsset>;
 }
 
 /** Where the app goes for this person, the folder its archive holds at its top, and the program to start in it. */
@@ -98,8 +96,10 @@ interface AppSettings {
 
 /**
  * Puts the app this plugin version names in place, unless it is there already. Says what it
- * changed, and, when nothing was installed, why the runner stays on node; `installed` is true when
- * a new app is in place, for the caller to start it.
+ * changed, and why the runner stays on node when it tried and couldn't; nothing when there was
+ * nothing to do (in place already, held off, another install under way, no app for this OS, or
+ * switched off with none in use). `installed` is true when a new app is in place, for the caller
+ * to start it.
  */
 export async function installApp(o: InstallApp): Promise<{ changes: string[]; installed: boolean }> {
   const { claudeDir, platform } = o;
@@ -112,7 +112,7 @@ export async function installApp(o: InstallApp): Promise<{ changes: string[]; in
   if (!settings.desktopApp) {
     if (!recorded) return { changes: [], installed: false };
     await stopApp(o, isAlive, now);
-    await fs.rm(desktopAppPath(claudeDir), { force: true });
+    await fs.writeFile(desktopAppPath(claudeDir), JSON.stringify({ ...recorded, off: true }, null, 2) + "\n");
     return { changes: ['took the desktop app out of use, as "desktopApp" is off in runner.json; the runner runs on node'], installed: false };
   }
   if (!place) return { changes: [], installed: false };
@@ -121,20 +121,23 @@ export async function installApp(o: InstallApp): Promise<{ changes: string[]; in
 
   const lock = desktopAppLockPath(claudeDir);
   const downloadMs = settings.appDownloadSeconds * 1000;
-  // Another install is under way, or one failed and holds off.
+  const retryAt = () => now() + settings.appRetryHours * 3600000;
+  // A hold-off for another version than this plugin's doesn't hold it off.
+  const held = await readLock(lock);
+  if (held?.until && held.until > now() && held.extra.version !== release.version) await fs.rm(lock, { force: true });
+  // Another install is under way, or one of this version failed and holds off.
   if (!(await takeLock(lock, process.pid, isAlive, false, now(), { freshMs: 2 * downloadMs + 60000 }))) return { changes: [], installed: false };
+  await removeLeftovers(place.dir, isAlive);
   const staging = `${place.dir}.isoplan-${process.pid}`;
   try {
-    const manifestUrl = release.manifest.replace(/\{version\}/g, release.version);
+    const manifestUrl = release.manifest.replace(/\{version\}/g, release.version).replace(/\{platform\}/g, platform).replace(/\{arch\}/g, o.arch);
     const got = await (o.fetch ?? fetch)(manifestUrl, { signal: AbortSignal.timeout(downloadMs) });
-    if (!got.ok) throw new Error(`the release's manifest isn't there (${got.status} from ${manifestUrl})`);
-    const manifest = (await got.json()) as AppManifest;
-    const key = `${platform}-${o.arch}`;
-    const asset = manifest.assets?.[key];
-    if (!asset) {
-      await holdOff(lock, process.pid, now() + settings.appRetryHours * 3600000);
-      return stay(`release ${release.version} has no desktop app for ${key}`);
+    if (got.status === 404) {
+      await holdOff(lock, process.pid, retryAt(), { version: release.version });
+      return stay(`release ${release.version} has no desktop app for ${platform}-${o.arch} yet; trying again in ${settings.appRetryHours} hours`);
     }
+    if (!got.ok) throw new Error(`its manifest couldn't be read (${got.status} from ${manifestUrl})`);
+    const asset = (await got.json()) as AppManifest;
     await fs.rm(staging, { recursive: true, force: true });
     await fs.mkdir(staging, { recursive: true });
     const archive = path.join(staging, asset.file);
@@ -151,15 +154,25 @@ export async function installApp(o: InstallApp): Promise<{ changes: string[]; in
     await releaseLock(lock, process.pid);
     return { changes: [`installed Isoplan's desktop app ${release.version} in ${place.dir}`], installed: true };
   } catch (err) {
-    await holdOff(lock, process.pid, now() + settings.appRetryHours * 3600000).catch(() => {});
+    await holdOff(lock, process.pid, retryAt(), { version: release.version }).catch(() => {});
     return stay(`couldn't install the desktop app: ${(err as Error).message}; trying again in ${settings.appRetryHours} hours`);
   } finally {
     await fs.rm(staging, { recursive: true, force: true, maxRetries: 5 }).catch(() => {});
   }
 }
 
+// What an install that ended without its `finally` (its process was killed mid-download, say) left
+// beside the app: a staging folder or an old copy named for a pid that has gone.
+async function removeLeftovers(dir: string, isAlive: (pid: number) => boolean): Promise<void> {
+  const prefix = `${path.basename(dir)}.`;
+  for (const name of await fs.readdir(path.dirname(dir)).catch(() => [] as string[])) {
+    const pid = name.startsWith(prefix) ? /^(?:isoplan|old)-(\d+)$/.exec(name.slice(prefix.length))?.[1] : undefined;
+    if (pid && !isAlive(Number(pid))) await fs.rm(path.join(path.dirname(dir), name), { recursive: true, force: true, maxRetries: 5 }).catch(() => {});
+  }
+}
+
 // Streams the archive to `file`, checking its size as it comes and its sha256 at the end.
-async function download(get: typeof fetch, url: string, file: string, asset: AppAsset, timeoutMs: number): Promise<void> {
+async function download(get: typeof fetch, url: string, file: string, asset: AppManifest, timeoutMs: number): Promise<void> {
   const res = await get(url, { signal: AbortSignal.timeout(timeoutMs) });
   if (!res.ok || !res.body) throw new Error(`the download of ${asset.file} failed (${res.status})`);
   const hash = createHash("sha256");

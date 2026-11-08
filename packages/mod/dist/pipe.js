@@ -7093,16 +7093,21 @@ async function liveRunner(claudeDir, now, isAlive) {
 	return null;
 }
 const desktopAppPath = (claudeDir) => path.join(claudeDir, "isoplan", "runner", "desktop-app.json");
-/** The desktop app install recorded, if its program is still there. */
+/** The desktop app install recorded, if it is in use (not switched off) and its program is still there. */
 async function recordedApp(claudeDir) {
 	try {
 		const app = JSON.parse(await fs.readFile(desktopAppPath(claudeDir), "utf8"));
-		if (typeof app.version !== "string" || typeof app.dir !== "string" || typeof app.launch !== "string") return null;
-		return (await fs.stat(app.launch).catch(() => null))?.isFile() ? app : null;
+		if (typeof app.version !== "string" || typeof app.dir !== "string" || typeof app.launch !== "string" || app.off === true) return null;
+		return (await fs.stat(app.launch).catch(() => null))?.isFile() ? {
+			version: app.version,
+			dir: app.dir,
+			launch: app.launch
+		} : null;
 	} catch {
 		return null;
 	}
 }
+const appOpenPath = (claudeDir) => path.join(claudeDir, "isoplan", "runner", "desktop-app-open.json");
 /** The lock's holder is the desktop app. */
 const isAppLock = (extra) => extra.engine === "app";
 /**
@@ -7149,7 +7154,8 @@ function openApp(app, claudeDir) {
 * Starts the recorded runner unless a live one runs the recorded code. One on older code is
 * replaced. A hold-off keeps it from starting, except a crash loop's hold-off on older code: a new
 * version may have fixed what crashed. With the desktop app recorded it opens the app instead,
-* once no node runner runs, and a live app is running.
+* once no node runner runs, and a live app is running; an app that is failing (see above) is
+* passed over for node.
 */
 async function startRunner({ claudeDir, spawn, isAlive = alive, kill = (pid) => process.kill(pid), now = Date.now, open = openApp }) {
 	let runner;
@@ -7162,13 +7168,16 @@ async function startRunner({ claudeDir, spawn, isAlive = alive, kill = (pid) => 
 	const code = await runnerCode(runner);
 	if (!code) return "not-installed";
 	const lockFile = runnerLockPath(claudeDir);
-	const app = await recordedApp(claudeDir);
 	const live = await liveRunner(claudeDir, now(), isAlive);
+	if (live && !live.isHoldOff && isAppLock(live.extra)) return "running";
+	const recorded = await recordedApp(claudeDir);
+	const settings = recorded && await loadSettings(nodeIo(), path.join(path.dirname(path.dirname(runner)), "runner.json"), path.join(claudeDir, "isoplan", "runner.json"));
+	const app = recorded && settings && !await appFailing(claudeDir, recorded, live, code, now(), settings) ? recorded : null;
 	if (live?.isHoldOff) {
-		if (live.extra.reason !== "gave-up" || live.extra.code === code) return "held-off";
+		if (live.extra.reason !== "gave-up" || live.extra.code === code && !(recorded && !app && isAppLock(live.extra))) return "held-off";
 		if ((await readLock(lockFile))?.until === live.until) await fs.rm(lockFile, { force: true });
 	} else if (live) {
-		if (isAppLock(live.extra) || live.extra.code === code && !app) return "running";
+		if (live.extra.code === code && !app) return "running";
 		await stopRunner(claudeDir, {
 			isAlive,
 			kill,
@@ -7180,6 +7189,12 @@ async function startRunner({ claudeDir, spawn, isAlive = alive, kill = (pid) => 
 		});
 	}
 	if (app) {
+		const opened = await readAppOpen(claudeDir);
+		if (opened?.version === app.version && opened.openedAt !== void 0 && !opened.failed && now() - opened.openedAt < settings.appStartSeconds * 1e3) return "started";
+		await fs.writeFile(appOpenPath(claudeDir), JSON.stringify({
+			version: app.version,
+			openedAt: now()
+		}) + "\n");
 		open(app, claudeDir);
 		return "started";
 	}
@@ -7191,6 +7206,38 @@ async function startRunner({ claudeDir, spawn, isAlive = alive, kill = (pid) => 
 		...env ? [] : ["--inherited-env"]
 	], claudeDir, env ?? void 0);
 	return "started";
+}
+async function readAppOpen(claudeDir) {
+	try {
+		return JSON.parse(await fs.readFile(appOpenPath(claudeDir), "utf8"));
+	} catch {
+		return null;
+	}
+}
+/**
+* Whether the recorded app is failing: marked so earlier, and not yet for long enough; or found
+* failing now, when it is marked and runner.log says why.
+*/
+async function appFailing(claudeDir, app, live, code, now, settings) {
+	const opened = await readAppOpen(claudeDir);
+	if (opened?.version === app.version && opened.failed && (opened.until ?? 0) > now) return true;
+	let why = null;
+	if (live?.isHoldOff && isAppLock(live.extra) && live.extra.reason === "gave-up" && live.extra.code === code) why = "its runner kept crashing on the app's Bun";
+	else if (!live?.isHoldOff && opened?.version === app.version && !opened.failed && opened.openedAt !== void 0 && now - opened.openedAt >= settings.appStartSeconds * 1e3) why = `it didn't start being the runner within ${settings.appStartSeconds} seconds of being opened (was it blocked, or did it crash?)`;
+	if (!why) return false;
+	const until = now + settings.appRetryHours * 36e5;
+	await fs.writeFile(appOpenPath(claudeDir), JSON.stringify({
+		version: app.version,
+		failed: why,
+		until
+	}) + "\n");
+	await logLine(claudeDir, `the desktop app ${app.version} isn't used until ${new Date(until).toISOString()}, or until another version is installed: ${why}. The runner runs on node meanwhile.`, now);
+	return true;
+}
+async function logLine(claudeDir, text, now) {
+	const file = path.join(claudeDir, "isoplan", "logs", "runner.log");
+	await fs.mkdir(path.dirname(file), { recursive: true });
+	await fs.appendFile(file, `${new Date(now).toISOString()} ${text}\n`);
 }
 /**
 * Ends the running runner, for uninstall and updates: its worker and forks follow once its
@@ -7235,8 +7282,10 @@ async function launchOf(dir, platform) {
 const systemTar = (platform, env) => platform === "win32" ? path.win32.join(env.SystemRoot || "C:\\Windows", "System32", "tar.exe") : "/usr/bin/tar";
 /**
 * Puts the app this plugin version names in place, unless it is there already. Says what it
-* changed, and, when nothing was installed, why the runner stays on node; `installed` is true when
-* a new app is in place, for the caller to start it.
+* changed, and why the runner stays on node when it tried and couldn't; nothing when there was
+* nothing to do (in place already, held off, another install under way, no app for this OS, or
+* switched off with none in use). `installed` is true when a new app is in place, for the caller
+* to start it.
 */
 async function installApp(o) {
 	const { claudeDir, platform } = o;
@@ -7255,7 +7304,10 @@ async function installApp(o) {
 			installed: false
 		};
 		await stopApp(o, isAlive, now);
-		await fs.rm(desktopAppPath(claudeDir), { force: true });
+		await fs.writeFile(desktopAppPath(claudeDir), JSON.stringify({
+			...recorded,
+			off: true
+		}, null, 2) + "\n");
 		return {
 			changes: ["took the desktop app out of use, as \"desktopApp\" is off in runner.json; the runner runs on node"],
 			installed: false
@@ -7272,22 +7324,24 @@ async function installApp(o) {
 	};
 	const lock = desktopAppLockPath(claudeDir);
 	const downloadMs = settings.appDownloadSeconds * 1e3;
+	const retryAt = () => now() + settings.appRetryHours * 36e5;
+	const held = await readLock(lock);
+	if (held?.until && held.until > now() && held.extra.version !== release.version) await fs.rm(lock, { force: true });
 	if (!await takeLock(lock, process.pid, isAlive, false, now(), { freshMs: 2 * downloadMs + 6e4 })) return {
 		changes: [],
 		installed: false
 	};
+	await removeLeftovers(place.dir, isAlive);
 	const staging = `${place.dir}.isoplan-${process.pid}`;
 	try {
-		const manifestUrl = release.manifest.replace(/\{version\}/g, release.version);
+		const manifestUrl = release.manifest.replace(/\{version\}/g, release.version).replace(/\{platform\}/g, platform).replace(/\{arch\}/g, o.arch);
 		const got = await (o.fetch ?? fetch)(manifestUrl, { signal: AbortSignal.timeout(downloadMs) });
-		if (!got.ok) throw new Error(`the release's manifest isn't there (${got.status} from ${manifestUrl})`);
-		const manifest = await got.json();
-		const key = `${platform}-${o.arch}`;
-		const asset = manifest.assets?.[key];
-		if (!asset) {
-			await holdOff(lock, process.pid, now() + settings.appRetryHours * 36e5);
-			return stay(`release ${release.version} has no desktop app for ${key}`);
+		if (got.status === 404) {
+			await holdOff(lock, process.pid, retryAt(), { version: release.version });
+			return stay(`release ${release.version} has no desktop app for ${platform}-${o.arch} yet; trying again in ${settings.appRetryHours} hours`);
 		}
+		if (!got.ok) throw new Error(`its manifest couldn't be read (${got.status} from ${manifestUrl})`);
+		const asset = await got.json();
 		await fs.rm(staging, {
 			recursive: true,
 			force: true
@@ -7319,10 +7373,21 @@ async function installApp(o) {
 			installed: true
 		};
 	} catch (err) {
-		await holdOff(lock, process.pid, now() + settings.appRetryHours * 36e5).catch(() => {});
+		await holdOff(lock, process.pid, retryAt(), { version: release.version }).catch(() => {});
 		return stay(`couldn't install the desktop app: ${err.message}; trying again in ${settings.appRetryHours} hours`);
 	} finally {
 		await fs.rm(staging, {
+			recursive: true,
+			force: true,
+			maxRetries: 5
+		}).catch(() => {});
+	}
+}
+async function removeLeftovers(dir, isAlive) {
+	const prefix = `${path.basename(dir)}.`;
+	for (const name of await fs.readdir(path.dirname(dir)).catch(() => [])) {
+		const pid = name.startsWith(prefix) ? /^(?:isoplan|old)-(\d+)$/.exec(name.slice(prefix.length))?.[1] : void 0;
+		if (pid && !isAlive(Number(pid))) await fs.rm(path.join(path.dirname(dir), name), {
 			recursive: true,
 			force: true,
 			maxRetries: 5

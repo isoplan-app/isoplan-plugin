@@ -17,11 +17,20 @@
 // same lock, with `engine: "app"` in it (packages/app). Then startRunner opens the app instead of
 // starting node, and stops a node runner it finds running, so the machine never runs both. A live
 // app counts as running whatever code it runs: it starts its worker again on new code itself.
+//
+// startRunner doesn't wait for the app it opens; it records when it did (runner/desktop-app-open.json),
+// and the app takes that record away once it holds the lock. A later startRunner that finds the
+// record older than `appStartSeconds` with no app holding the lock, or the app's crash-loop hold-off
+// on the current code, marks that app version as failing in the record, says why in runner.log and
+// starts node. A failing version isn't opened again for `appRetryHours`, or until install puts
+// another version in place.
 
 import { spawn as spawnChild } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { loadSettings } from "../data-layer/config.js";
+import { nodeIo } from "../data-layer/io.js";
 import { alive, readLock, releaseLock } from "../wake/lock.js";
 import { wakeRecordPath } from "../wake/wake.js";
 import { recordedEnv } from "./environment.js";
@@ -56,12 +65,32 @@ export interface DesktopApp {
 
 export const desktopAppPath = (claudeDir: string) => path.join(claudeDir, "isoplan", "runner", "desktop-app.json");
 
-/** The desktop app install recorded, if its program is still there. */
+/** The desktop app install recorded, if it is in use (not switched off) and its program is still there. */
 export async function recordedApp(claudeDir: string): Promise<DesktopApp | null> {
   try {
-    const app = JSON.parse(await fs.readFile(desktopAppPath(claudeDir), "utf8")) as Partial<DesktopApp>;
-    if (typeof app.version !== "string" || typeof app.dir !== "string" || typeof app.launch !== "string") return null;
-    return (await fs.stat(app.launch).catch(() => null))?.isFile() ? (app as DesktopApp) : null;
+    const app = JSON.parse(await fs.readFile(desktopAppPath(claudeDir), "utf8")) as Partial<DesktopApp> & { off?: unknown };
+    if (typeof app.version !== "string" || typeof app.dir !== "string" || typeof app.launch !== "string" || app.off === true) return null;
+    return (await fs.stat(app.launch).catch(() => null))?.isFile() ? { version: app.version, dir: app.dir, launch: app.launch } : null;
+  } catch {
+    return null;
+  }
+}
+
+/** When startRunner last opened the app, or why that app version is failing and until when. */
+export interface AppOpen {
+  version: string;
+  openedAt?: number;
+  failed?: string;
+  until?: number;
+}
+
+export const appOpenPath = (claudeDir: string) => path.join(claudeDir, "isoplan", "runner", "desktop-app-open.json");
+
+/** The desktop app's folder as install recorded it, in use or switched off: what uninstall removes. */
+export async function recordedAppDir(claudeDir: string): Promise<string | null> {
+  try {
+    const { dir } = JSON.parse(await fs.readFile(desktopAppPath(claudeDir), "utf8")) as { dir?: unknown };
+    return typeof dir === "string" ? dir : null;
   } catch {
     return null;
   }
@@ -112,7 +141,8 @@ export type Started = "started" | "running" | "held-off" | "not-installed";
  * Starts the recorded runner unless a live one runs the recorded code. One on older code is
  * replaced. A hold-off keeps it from starting, except a crash loop's hold-off on older code: a new
  * version may have fixed what crashed. With the desktop app recorded it opens the app instead,
- * once no node runner runs, and a live app is running.
+ * once no node runner runs, and a live app is running; an app that is failing (see above) is
+ * passed over for node.
  */
 export async function startRunner({ claudeDir, spawn, isAlive = alive, kill = (pid) => process.kill(pid), now = Date.now, open = openApp }: StartOptions): Promise<Started> {
   let runner: unknown;
@@ -125,17 +155,24 @@ export async function startRunner({ claudeDir, spawn, isAlive = alive, kill = (p
   const code = await runnerCode(runner);
   if (!code) return "not-installed";
   const lockFile = runnerLockPath(claudeDir);
-  const app = await recordedApp(claudeDir);
   const live = await liveRunner(claudeDir, now(), isAlive);
+  if (live && !live.isHoldOff && isAppLock(live.extra)) return "running";
+  const recorded = await recordedApp(claudeDir);
+  const settings = recorded && (await loadSettings<AppStartSettings>(nodeIo(), path.join(path.dirname(path.dirname(runner)), "runner.json"), path.join(claudeDir, "isoplan", "runner.json")));
+  const app = recorded && settings && !(await appFailing(claudeDir, recorded, live, code, now(), settings)) ? recorded : null;
   if (live?.isHoldOff) {
-    if (live.extra.reason !== "gave-up" || live.extra.code === code) return "held-off";
+    if (live.extra.reason !== "gave-up" || (live.extra.code === code && !(recorded && !app && isAppLock(live.extra)))) return "held-off";
     // Taken out only if it is still the same hold-off.
     if ((await readLock(lockFile))?.until === live.until) await fs.rm(lockFile, { force: true });
   } else if (live) {
-    if (isAppLock(live.extra) || (live.extra.code === code && !app)) return "running";
+    if (live.extra.code === code && !app) return "running";
     await stopRunner(claudeDir, { isAlive, kill, now, expect: { pid: live.pid!, code: live.extra.code } });
   }
   if (app) {
+    const opened = await readAppOpen(claudeDir);
+    // Opened a moment ago and still starting: not opened twice.
+    if (opened?.version === app.version && opened.openedAt !== undefined && !opened.failed && now() - opened.openedAt < settings!.appStartSeconds * 1000) return "started";
+    await fs.writeFile(appOpenPath(claudeDir), JSON.stringify({ version: app.version, openedAt: now() } satisfies AppOpen) + "\n");
     open(app, claudeDir);
     return "started";
   }
@@ -145,6 +182,45 @@ export async function startRunner({ claudeDir, spawn, isAlive = alive, kill = (p
   const env = await recordedEnv(claudeDir);
   spawn([runner, "--claude-dir", claudeDir, ...(env ? [] : ["--inherited-env"])], claudeDir, env ?? undefined);
   return "started";
+}
+
+interface AppStartSettings {
+  appStartSeconds: number;
+  appRetryHours: number;
+}
+
+async function readAppOpen(claudeDir: string): Promise<AppOpen | null> {
+  try {
+    return JSON.parse(await fs.readFile(appOpenPath(claudeDir), "utf8")) as AppOpen;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether the recorded app is failing: marked so earlier, and not yet for long enough; or found
+ * failing now, when it is marked and runner.log says why.
+ */
+async function appFailing(claudeDir: string, app: DesktopApp, live: Awaited<ReturnType<typeof liveRunner>>, code: string, now: number, settings: AppStartSettings): Promise<boolean> {
+  const opened = await readAppOpen(claudeDir);
+  if (opened?.version === app.version && opened.failed && (opened.until ?? 0) > now) return true;
+  let why: string | null = null;
+  if (live?.isHoldOff && isAppLock(live.extra) && live.extra.reason === "gave-up" && live.extra.code === code) why = "its runner kept crashing on the app's Bun";
+  else if (!live?.isHoldOff && opened?.version === app.version && !opened.failed && opened.openedAt !== undefined && now - opened.openedAt >= settings.appStartSeconds * 1000) {
+    why = `it didn't start being the runner within ${settings.appStartSeconds} seconds of being opened (was it blocked, or did it crash?)`;
+  }
+  if (!why) return false;
+  const until = now + settings.appRetryHours * 3600000;
+  await fs.writeFile(appOpenPath(claudeDir), JSON.stringify({ version: app.version, failed: why, until } satisfies AppOpen) + "\n");
+  await logLine(claudeDir, `the desktop app ${app.version} isn't used until ${new Date(until).toISOString()}, or until another version is installed: ${why}. The runner runs on node meanwhile.`, now);
+  return true;
+}
+
+// A line in runner.log, which the node runner started next writes to as well.
+async function logLine(claudeDir: string, text: string, now: number): Promise<void> {
+  const file = path.join(claudeDir, "isoplan", "logs", "runner.log");
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.appendFile(file, `${new Date(now).toISOString()} ${text}\n`);
 }
 
 /**

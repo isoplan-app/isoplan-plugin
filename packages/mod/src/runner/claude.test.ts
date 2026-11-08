@@ -3,7 +3,8 @@ import path from "node:path";
 import { expect, test, vi } from "vitest";
 import { tempRoot } from "../data-layer/fixture.js";
 import type { Lead } from "./answerer.js";
-import { atLeast, claudeCommand, findClaude, versionOf } from "./claude-binary.js";
+import { commandEnv } from "../update/update.js";
+import { atLeast, claudeCommand, findClaude, machineNode, versionOf } from "./claude-binary.js";
 import { alive } from "../wake/lock.js";
 import { createClaudeAnswerer, FORK_ENV_DROPPED, forkArgs, forkEnv, forkableId, killPid } from "./claude.js";
 
@@ -190,6 +191,34 @@ test("binary: PATH first, then the installers' places, on Windows and on Mac", a
   expect(await findClaude(mac, "darwin", "/Users/ada", has("/Users/ada/.local/bin/claude", "/opt/homebrew/bin/claude"))).toBe("/Users/ada/.local/bin/claude");
   expect(await findClaude(mac, "darwin", "/Users/ada", has("/opt/homebrew/bin/claude"))).toBe("/opt/homebrew/bin/claude");
   expect(await findClaude(mac, "darwin", "/Users/ada", has())).toBe(null);
+});
+
+test("binary: under Bun (the desktop app's worker), a cli.js and git's askpass run on the machine's node from PATH, not on Bun", () => {
+  const has = (...files: string[]) => (p: string) => files.includes(p);
+  const bun = { execPath: "C:\\Isoplan\\bin\\bun.exe", bun: "1.3.0" };
+  expect(machineNode({ Path: "C:\\Tools;C:\\nodejs" }, "win32", bun, has("C:\\nodejs\\node.exe"))).toBe("C:\\nodejs\\node.exe");
+  expect(machineNode({ PATH: "/usr/bin:/opt/homebrew/bin" }, "darwin", { execPath: "/Applications/Isoplan.app/Contents/MacOS/bun", bun: "1.3.0" }, has("/opt/homebrew/bin/node"))).toBe("/opt/homebrew/bin/node");
+  // No node on PATH: Bun's own. Not under Bun: this process's node.
+  expect(machineNode({ Path: "C:\\Tools" }, "win32", bun, has())).toBe(bun.execPath);
+  expect(machineNode({ Path: "C:\\nodejs" }, "win32", { execPath: "C:\\nodejs\\node.exe" }, has())).toBe("C:\\nodejs\\node.exe");
+
+  // The defaults, as the worker gets them on the app's Bun.
+  const root = tempRoot();
+  const node = path.join(root, process.platform === "win32" ? "node.exe" : "node");
+  fs.writeFileSync(node, "");
+  const savedPath = process.env.PATH;
+  Object.defineProperty(process.versions, "bun", { value: "1.3.0", configurable: true, enumerable: true });
+  try {
+    process.env.PATH = root;
+    expect(claudeCommand("/x/cli.js")).toEqual([node, "/x/cli.js"]);
+    expect(commandEnv({}).GIT_ASKPASS).toBe(node);
+    expect(commandEnv({}).SSH_ASKPASS).toBe(node);
+  } finally {
+    delete (process.versions as Record<string, string | undefined>).bun;
+    process.env.PATH = savedPath;
+  }
+  expect(claudeCommand("/x/cli.js")).toEqual([process.execPath, "/x/cli.js"]);
+  expect(commandEnv({}).GIT_ASKPASS).toBe(process.execPath);
 });
 
 test("claude --version: the version on its own line wins over any other, else the last one in the output", () => {
