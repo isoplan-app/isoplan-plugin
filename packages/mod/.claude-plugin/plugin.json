@@ -1,6 +1,6 @@
 {
   "name": "isoplan",
-  "version": "0.12.1",
+  "version": "0.12.2",
   "description": "Isoplan's Claude Code plugin: streams each session's facts to a team's office server, set in config.json.",
   "author": { "name": "Adam Linscott" }
 }
