@@ -30,7 +30,16 @@
 // picked in the terminal. One answered in the terminal first just ends the wait. Nothing times out:
 // the terminal has the question all along. Each wait is marked in a file in the folder the data
 // layer's `waits` line names, so the data layer offers the question to the floor only while this
-// hook really waits for it: not one asked before the plugin loaded, nor one this hook never saw.
+// hook really waits for it. The floor's answer is given as Claude Code's dialog gives one: the
+// answers, with the owner's notes and the chosen option's preview as annotations; "Chat about this"
+// ends the call with the error result the dialog's own gives.
+//
+// A question asked before the plugin loaded, which this hook never saw, can still be answered from
+// the floor in a session that takes messages (the line says `late`): this module ends the running
+// turn, which closes the dialog, and submits the answers as the owner's own message, as below. Only
+// a build whose $.turn.abort answers as Claude Code 2.1.319's does starts the pipe's end with
+// `--ends-turns`, so only its session offers those questions. A `late` line for a call this module
+// ran is never taken: that call has had its answer, though the transcript may not show it yet.
 //
 // The pipe's end passes the runner's JSON lines on on its stdout (src/lines.ts). Claude Code closes
 // the child's stdin at launch, so what goes the other way, a title, goes through a file the line
@@ -110,7 +119,9 @@ const pairSaid = new Set<string>(); // the offices whose link was put in the tra
 // undefined for one that shows nothing.
 const offices = new Map<string, string | undefined>();
 // The questions waiting for an answer from the floor too, by their call's id: each ends its call.
-const floorWaits = new Map<string, (answers: Record<string, string>) => void>();
+const floorWaits = new Map<string, (answer: OwnerAnswerLine) => void>();
+// The id of each question's call this module has run, waiting or done.
+const questionCalls = new Set<string>();
 let waitsDir: string | null = null; // where the waits are marked, as the data layer said
 let shownStatus: string | undefined; // the status line, without the update note
 let updated = false; // a newer version of the plugin is on disk, loaded at /reload-plugins
@@ -166,20 +177,25 @@ export function register(on: On): void {
 }
 
 // Runs the question's call, so the terminal shows it, and answers it with the floor's answers if
-// they come first: the tool's own result, its questions and their answers, which the engine checks
-// and gives the model as it gives a dialog's. Returning while the call is still running ends it,
-// dialog and all. The hook's own time doesn't count while `next` runs, so a wait of any length stays
-// inside its budget.
+// they come first: the tool's own result, its questions, their answers and any annotations, which the
+// engine checks and gives the model as it gives a dialog's; or, for "Chat about this", a refusal
+// whose text the model reads as the error result the dialog gives. Returning while the call is still
+// running ends it, dialog and all. The hook's own time doesn't count while `next` runs, so a wait of
+// any length stays inside its budget.
 async function askBoth($: Host, e: ToolCallInput, next: (e: ToolCallInput) => Promise<ToolCallResult>): Promise<ToolCallResult> {
   const ran = next(e);
   ran.catch(() => {});
-  let answer!: (answers: Record<string, string>) => void;
-  const floor = new Promise<Record<string, string>>((resolve) => (answer = resolve));
+  let answer!: (answer: OwnerAnswerLine) => void;
+  const floor = new Promise<OwnerAnswerLine>((resolve) => (answer = resolve));
   floorWaits.set(e.tool_use_id, answer);
+  questionCalls.add(e.tool_use_id);
   mark($, e.tool_use_id, true);
   try {
-    const first = await Promise.race([ran.then((r) => ({ r })), floor.then((answers) => ({ answers }))]);
-    return "r" in first ? first.r : { result: { questions: e.questions, answers: first.answers } };
+    const first = await Promise.race([ran.then((r) => ({ r })), floor.then((line) => ({ line }))]);
+    if ("r" in first) return first.r;
+    const { answers, annotations, chat } = first.line;
+    if (chat) return { deny: chatText(e.questions) };
+    return { result: { questions: e.questions, answers, ...(annotations && { annotations }) } };
   } finally {
     floorWaits.delete(e.tool_use_id);
     mark($, e.tool_use_id, false);
@@ -196,13 +212,97 @@ function mark($: Host, question: string, waiting: boolean): void {
     .catch((err) => $.ui.log("isoplan: could not mark a question's wait: " + message(err), { to: "debug" }));
 }
 
-// The floor's answer to a question: it ends the call if the call still waits, and the data layer is
-// told whether it did.
+// The floor's answer to a question: it ends the call if the call still waits, or, for one asked
+// before this module loaded, goes in as the owner's message; the data layer is told whether it did.
 function ownerAnswer($: Host, line: OwnerAnswerLine): void {
+  const say = (taken: Omit<AnswerTaken, "question">) =>
+    void $.fs.write(line.file, JSON.stringify({ question: line.question, ...taken })).catch((err) => $.ui.log("isoplan: could not say whether the floor's answer was taken: " + message(err), { to: "debug" }));
   const answer = floorWaits.get(line.question);
-  answer?.(line.answers);
-  const taken: AnswerTaken = { question: line.question, taken: !!answer };
-  $.fs.write(line.file, JSON.stringify(taken)).catch((err) => $.ui.log("isoplan: could not say whether the floor's answer was taken: " + message(err), { to: "debug" }));
+  if (answer || !line.late || questionCalls.has(line.question)) {
+    answer?.(line);
+    return say({ taken: !!answer });
+  }
+  const late = line.late;
+  // Not behind the floor's messages: one of those waits for this very turn to end. Once it has, a
+  // message already waiting goes in first, as the owner sent them.
+  void (async () => {
+    if ((await $.session.id().catch(() => null)) !== late.session) return say({ taken: false, reason: "ended" });
+    if (!(await endTurn($))) return say({ taken: false, reason: "no-turn" });
+    let submitted: Promise<{ drop?: string }>;
+    try {
+      submitted = $.prompt!.submit!({ text: late.text, asUser: true }); // throws when the host has no submit
+    } catch {
+      return say({ taken: false, reason: "no-submit" });
+    }
+    try {
+      const r = await submitted;
+      if (r && typeof r.drop === "string") {
+        $.ui.log("isoplan: Claude Code didn't let the floor's answer in: " + r.drop, { to: "debug" });
+        return say({ taken: false, reason: "dropped" });
+      }
+      say({ taken: true });
+    } catch (err) {
+      $.ui.log("isoplan: the floor's answer couldn't be submitted: " + message(err), { to: "debug" });
+      say({ taken: false, reason: "dropped" });
+    }
+  })().catch(() => {});
+}
+
+// Ends the main loop's running turn, and with it the dialog of a question asked before this module
+// loaded. That turn started before this module did, so no turn.start told it the turn's id; $.turn.abort
+// refuses an id that isn't the running turn's by naming the one that is, as Claude Code 2.1.319 does:
+// `$.turn.abort: <id> is not the running turn (<running id>); …`, or says `no turn is running` (a
+// resumed session whose question is still open, with no dialog to close). False when the turn
+// couldn't be ended.
+async function endTurn($: Host): Promise<boolean> {
+  let running: string | undefined;
+  try {
+    await $.turn!.abort!({ turnId: NO_TURN }); // throws when the host has no abort
+    return false;
+  } catch (err) {
+    if (/no turn is running/.test(message(err))) return true;
+    running = /is not the running turn \(([^()\s]+)\)/.exec(message(err))?.[1];
+  }
+  if (!running) return false;
+  try {
+    await $.turn!.abort!({ turnId: running });
+    return true;
+  } catch (err) {
+    $.ui.log("isoplan: couldn't end the running turn for the floor's answer: " + message(err), { to: "debug" });
+    return false;
+  }
+}
+
+// A turn id no turn has.
+const NO_TURN = "isoplan-no-turn";
+
+// Whether this Claude Code build can end the running turn for a plugin: its $.turn.abort refuses a
+// turn id no turn has as endTurn reads it. False when it has no abort, or refuses in other words.
+async function endsTurns($: Host): Promise<boolean> {
+  try {
+    await $.turn!.abort!({ turnId: NO_TURN }); // throws when the host has no abort
+    return false;
+  } catch (err) {
+    return /no turn is running|is not the running turn \(/.test(message(err));
+  }
+}
+
+// What the model reads when the owner chooses "Chat about this" in Claude Code 2.1.319's dialog, word
+// for word: the questions, none of them answered. Given as a refusal, the model reads it inside
+// <tool_use_error> tags, which the dialog's own doesn't have: a hook's error result must match the
+// tool's output shape, so a refusal is the nearest a hook can give.
+function chatText(questions: unknown): string {
+  const asked = Array.isArray(questions) ? questions.map((q) => `- "${String((q as { question?: unknown })?.question ?? "")}"\n  (No answer provided)`) : [];
+  return [
+    "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). To tell you how to proceed, the user said:",
+    "The user wants to clarify these questions.",
+    "    This means they may have additional information, context or questions for you.",
+    "    Take their response into account and then reformulate the questions if appropriate.",
+    "    Start by asking them what they would like to clarify.",
+    "",
+    "    Questions asked:",
+    ...asked,
+  ].join("\n");
 }
 
 // The owner's message from the floor: submitted after those before it, if the process still runs
@@ -291,7 +391,7 @@ async function run($: Host): Promise<void> {
   const script = $.plugin.root.replace(/\\/g, "/") + "/dist/pipe.js";
   let failures = 0;
   const since = await $.clock.now();
-  const messages = (await submits($)) ? ["--messages"] : [];
+  const can = [...((await submits($)) ? ["--messages"] : []), ...((await endsTurns($)) ? ["--ends-turns"] : [])];
   for (;;) {
     if (!(await isThere($, script))) {
       updated = true;
@@ -323,7 +423,7 @@ async function run($: Host): Promise<void> {
     let code: number | null = null;
     const startedAt = await $.clock.now();
     try {
-      const child = $.process.spawn({ argv: ["node", script, "--session", session, "--cwd", cwd, "--since", String(since), ...messages], cwd });
+      const child = $.process.spawn({ argv: ["node", script, "--session", session, "--cwd", cwd, "--since", String(since), ...can], cwd });
       let buffer = "";
       for (;;) {
         const piece = await Promise.race([child.next(), switching]);

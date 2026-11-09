@@ -19,6 +19,31 @@
 //   multi-select, Alpha and Beta picked in the dialog: answers {"Which ones?":"Alpha, Beta"}, the
 //     labels in option order joined with ", "; with "Zeta" typed under "Type something" as well,
 //     {"Which ones?":"Alpha, Zeta"}, the words after the labels. The floor sends the same.
+//
+// What Claude Code 2.1.319's dialog does, found with a mock Messages API in place of this script's
+// $.ui.ask, so the model's own reading was seen too (Windows 11); the floor mirrors it:
+//   a plain question, single or multi: its options, then "Type something" (free text; on a
+//     multi-select the labels in option order, then the text, joined with ", "), then "Chat about
+//     this". No notes, and no annotations entry.
+//   a single-select whose options carry previews: options on the left, the focused option's
+//     preview on the right, multi-line kept ("No preview available" for one without), no
+//     descriptions, no "Type something". "n to add notes" ("Add notes on this design…"): a note
+//     goes with a chosen option, or alone, answered "(notes only)" with annotations { notes }.
+//     Choosing an option with a preview puts its preview in annotations, { preview }, notes or not.
+//   a multi-select whose options carry previews: a plain checkbox list with "Type something", no
+//     preview, no notes, annotations {}.
+//   "Chat about this" ends the call as an error result: "The user doesn't want to proceed with this
+//     tool use. … To tell you how to proceed, the user said:\nThe user wants to clarify these
+//     questions. … Questions asked:\n- \"<question>\"\n  (No answer provided)" for each question.
+//   a tool.call hook's { result: { questions, answers, annotations } } closes the dialog, and the
+//     model reads 'The user answered: "Which layout?"="Alpha" selected preview:\n<preview> notes:
+//     <notes>. …'. A hook's { deny } with the chat text gives the model the same text inside
+//     <tool_use_error> tags; an error result from a hook must match the tool's output shape.
+//   for a call no hook wrapped, $.turn.abort({ turnId }) closes the dialog (the model reads "[Tool
+//     call did not complete: the turn was ended to deliver the message that follows. …]") and
+//     $.prompt.submit({ text, asUser: true }) then starts a turn with the text. A module that saw no
+//     turn.start learns the id from abort's refusal of another: "<id> is not the running turn
+//     (<running id>)", or "no turn is running" while idle.
 
 import fs from "node:fs";
 import { createRequire } from "node:module";

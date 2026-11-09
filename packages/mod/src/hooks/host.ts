@@ -47,6 +47,11 @@ export interface Host {
      */
     submit?(input: { text: string; asUser?: true }): Promise<{ drop?: string }>;
   };
+  /** Not in every Claude Code build: call it inside a try, never read it as a value. */
+  turn?: {
+    /** Ends the main loop's running turn, closing any dialog in it; rejects, naming the running turn's id, when `turnId` isn't it. */
+    abort?(input: { turnId: string }): Promise<void>;
+  };
   process: {
     /** Streams a child's output; the loop is the child's life: `return()` or the module's unload ends it. */
     spawn(request: { argv: readonly string[]; cwd?: string }): AsyncGenerator<{ stream: "stdout" | "stderr"; text: string }, { code: number | null; signal: string | null }>;

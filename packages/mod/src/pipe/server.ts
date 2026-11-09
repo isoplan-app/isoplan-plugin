@@ -29,6 +29,7 @@ export interface Hooked {
   cwd: string;
   since: number;
   messages: boolean;
+  endsTurns: boolean;
   root: string;
   version: string;
   /** The variables of the session's own environment it passed on (pipe.ts SESSION_ENV). */
@@ -102,6 +103,7 @@ export async function createPipeServer(o: PipeServerOptions): Promise<PipeServer
       cwd: hello.cwd,
       since: hello.since,
       messages: hello.messages === true,
+      endsTurns: hello.endsTurns === true,
       root: hello.root,
       version: hello.version,
       env: hello.env && typeof hello.env === "object" ? sessionEnv(hello.env) : {},

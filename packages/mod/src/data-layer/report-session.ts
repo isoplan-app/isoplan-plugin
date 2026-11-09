@@ -25,9 +25,11 @@
 // `window` line names; without one there is none. A Claude Code workflow's name,
 // description, phases and agents' labels are secret-checked too, and one that matches goes out as a
 // placeholder (src/data-layer/workflows.ts); its agents' results are reports like any other.
-// For a hooks module that can submit a prompt (`takesMessages`), the session fact says
-// `takesMessages`, and a message its owner sends from the floor goes to that hooks module, which
-// submits it as the session's next turn (src/data-layer/owner-messages.ts).
+// For a hooks module the session fact says `hooks`. For one that can submit a prompt
+// (`takesMessages`), it says `takesMessages` too, and a message its owner sends from the floor goes
+// to that hooks module, which submits it as the session's next turn (src/data-layer/owner-messages.ts);
+// when that hooks module can also end the running turn (`endsTurns`), its open questions it didn't
+// see asked are answerable as the owner's message.
 //
 // Its log lines go to <claude dir>/isoplan/logs/<session>.log (the runner's sessionLog), and without
 // a hooks module the other lines are dropped. Without one it reports only while the session is at work, and the
@@ -183,6 +185,8 @@ export interface ReportSessionOptions {
   closed: Promise<string | void>;
   /** With a hooks module: it can submit a prompt. */
   takesMessages?: boolean;
+  /** With a hooks module: it can end the running turn. */
+  endsTurns?: boolean;
   /** Whether Claude Code lists the plugin as uninstalled or disabled for the session; by default, for the hooks module's copy (or this one's). */
   isOff?: () => Promise<boolean>;
   /** Without a hooks module: the offices that didn't want the session, each until when, from an earlier run. */
@@ -282,6 +286,8 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
   const hooked = o.by === "hooks";
   // Only the session's own hooks module can submit a prompt.
   const takesMessages = hooked && !!o.takesMessages;
+  // A question asked before it loaded is answered by ending the turn, then submitting the answer.
+  const answersLate = takesMessages && !!o.endsTurns;
   const here = path.join(o.appDir, "dist");
   const defaultsPath = path.join(o.appDir, "config.json");
   const { dir: claudeDir, json: claudeJson } = claudePaths(process.env, os.homedir());
@@ -427,7 +433,7 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
   let isPlaceless = false; // without a hooks module, and git couldn't place the session's folder
   let passes = 0;
   let shown: Parameters<ReportHold["apply"]> | null = null; // the last facts and patterns the holds were applied to
-  let waiting: ReadonlySet<string> = new Set(); // the open questions the hooks module marks it waits on
+  let marks: ReadonlyMap<string, boolean> = new Map(); // the open questions the hooks module marked, and whether it still waits on each
   const said = new Set<string>(); // the pattern files' problems, logged once each, since they are read every pass
   const patternLog = (text: string) => {
     if (!said.has(text)) emit({ type: "log", text });
@@ -436,7 +442,7 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
   // What goes to an office's link: the reports its hold keeps held, the questions checked and
   // marked, and the workflows' names, phases and labels checked (workflows.ts).
   const outgoing = (run: OfficeRun, facts: Facts, patterns: Pattern[] | null) =>
-    prepareWorkflows(prepareQuestions(run.hold.apply(facts, patterns), patterns, waiting, patternLog), patterns, patternLog);
+    prepareWorkflows(prepareQuestions(run.hold.apply(facts, patterns), patterns, marks, patternLog, answersLate), patterns, patternLog);
   // The project of each subagent working in a worktree of another repo, from the latest read.
   let checkouts: Record<string, string> = {};
   // Whether a question got an answer, from the latest read, so one that closed says how.
@@ -469,7 +475,7 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
           c.watch(fs
             .mkdir(answersDir, { recursive: true })
             .then(async () => {
-              const relayed = await relayOwnerAnswer(message, { detached: !hooked, facts: () => run.sent, file, emit, take: takeFile });
+              const relayed = await relayOwnerAnswer(message, { detached: !hooked, session: sessionId, facts: () => run.sent, file, emit, take: takeFile });
               run.gate.current()?.send(relayed.message);
               if (!relayed.gaveUp) return;
               // The hooks module's word may still come: a take that does follows as a late reply.
@@ -727,7 +733,7 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
     const given: string | null | undefined = named ?? (read.facts.session.titleFrom === "branch" ? title?.title : null);
     const titled = given ? { ...read.facts, session: { ...read.facts.session, title: given } } : read.facts;
     const sized: Facts = contextWindow ? { ...titled, session: { ...titled.session, contextWindow } } : titled;
-    const facts: Facts = takesMessages ? { ...sized, session: { ...sized.session, takesMessages: true } } : sized;
+    const facts: Facts = hooked ? { ...sized, session: { ...sized.session, hooks: true, ...(takesMessages && { takesMessages: true as const }) } } : sized;
 
     checkouts = read.checkouts ?? {};
     answered = read.answered ?? answered;
@@ -736,7 +742,7 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
       patternLog(`couldn't read the secret patterns, so every report is withheld: ${String((err as Error)?.message ?? err)}`);
       return null;
     });
-    waiting = hooked ? await waitsOf(waitsDir, facts) : new Set();
+    marks = hooked ? await waitsOf(waitsDir, facts) : new Map();
     shown = [facts, patterns];
     // One office's failure never ends the loop for the others.
     for (const run of taking) {
@@ -888,13 +894,13 @@ async function writeLog(file: string, text: string): Promise<void> {
   else await fs.appendFile(file, text);
 }
 
-// The open questions the hooks module marks it waits on, each in <dir>/<call id>.json.
-async function waitsOf(dir: string, facts: Facts): Promise<Set<string>> {
-  const out = new Set<string>();
+// The open questions the hooks module marked, each in <dir>/<call id>.json, and whether it still waits on each.
+async function waitsOf(dir: string, facts: Facts): Promise<Map<string, boolean>> {
+  const out = new Map<string, boolean>();
   for (const q of facts.questions ?? []) {
     if (!/^[A-Za-z0-9_-]{1,200}$/.test(q.id)) continue;
     const mark = await fs.readFile(path.join(dir, `${q.id}.json`), "utf8").then((text) => JSON.parse(text) as Partial<WaitMark>, () => null);
-    if (mark?.question === q.id && mark.waiting === true) out.add(q.id);
+    if (mark?.question === q.id && typeof mark.waiting === "boolean") out.set(q.id, mark.waiting);
   }
   return out;
 }

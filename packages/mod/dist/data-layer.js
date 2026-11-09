@@ -8671,7 +8671,7 @@ async function pipeMain(argv, appDir) {
 	const session = value$1(argv, "--session");
 	const cwd = value$1(argv, "--cwd");
 	if (!session || !cwd) {
-		process.stderr.write("usage: node pipe.js --session <id> --cwd <dir> [--since <ms>] [--messages]\n");
+		process.stderr.write("usage: node pipe.js --session <id> --cwd <dir> [--since <ms>] [--messages] [--ends-turns]\n");
 		return 2;
 	}
 	const { dir: claudeDir } = claudePaths(process.env, os.homedir());
@@ -8712,6 +8712,7 @@ async function pipeMain(argv, appDir) {
 			cwd,
 			since: Number(value$1(argv, "--since")) || Date.now(),
 			messages: argv.includes("--messages"),
+			endsTurns: argv.includes("--ends-turns"),
 			root: appDir,
 			version,
 			env: sessionEnv(process.env)

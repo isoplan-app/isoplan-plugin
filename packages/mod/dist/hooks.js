@@ -56,6 +56,7 @@ const pairings = /* @__PURE__ */ new Map();
 const pairSaid = /* @__PURE__ */ new Set();
 const offices = /* @__PURE__ */ new Map();
 const floorWaits = /* @__PURE__ */ new Map();
+const questionCalls = /* @__PURE__ */ new Set();
 let waitsDir = null;
 let shownStatus;
 let updated = false;
@@ -115,12 +116,17 @@ async function askBoth($, e, next) {
 	let answer;
 	const floor = new Promise((resolve) => answer = resolve);
 	floorWaits.set(e.tool_use_id, answer);
+	questionCalls.add(e.tool_use_id);
 	mark($, e.tool_use_id, true);
 	try {
-		const first = await Promise.race([ran.then((r) => ({ r })), floor.then((answers) => ({ answers }))]);
-		return "r" in first ? first.r : { result: {
+		const first = await Promise.race([ran.then((r) => ({ r })), floor.then((line) => ({ line }))]);
+		if ("r" in first) return first.r;
+		const { answers, annotations, chat } = first.line;
+		if (chat) return { deny: chatText(e.questions) };
+		return { result: {
 			questions: e.questions,
-			answers: first.answers
+			answers,
+			...annotations && { annotations }
 		} };
 	} finally {
 		floorWaits.delete(e.tool_use_id);
@@ -137,13 +143,94 @@ function mark($, question, waiting) {
 	marking = marking.then(() => $.fs.write(`${dir}/${question}.json`, JSON.stringify(wait))).catch((err) => $.ui.log("isoplan: could not mark a question's wait: " + message(err), { to: "debug" }));
 }
 function ownerAnswer($, line) {
-	const answer = floorWaits.get(line.question);
-	answer?.(line.answers);
-	const taken = {
+	const say = (taken) => void $.fs.write(line.file, JSON.stringify({
 		question: line.question,
-		taken: !!answer
-	};
-	$.fs.write(line.file, JSON.stringify(taken)).catch((err) => $.ui.log("isoplan: could not say whether the floor's answer was taken: " + message(err), { to: "debug" }));
+		...taken
+	})).catch((err) => $.ui.log("isoplan: could not say whether the floor's answer was taken: " + message(err), { to: "debug" }));
+	const answer = floorWaits.get(line.question);
+	if (answer || !line.late || questionCalls.has(line.question)) {
+		answer?.(line);
+		return say({ taken: !!answer });
+	}
+	const late = line.late;
+	(async () => {
+		if (await $.session.id().catch(() => null) !== late.session) return say({
+			taken: false,
+			reason: "ended"
+		});
+		if (!await endTurn($)) return say({
+			taken: false,
+			reason: "no-turn"
+		});
+		let submitted;
+		try {
+			submitted = $.prompt.submit({
+				text: late.text,
+				asUser: true
+			});
+		} catch {
+			return say({
+				taken: false,
+				reason: "no-submit"
+			});
+		}
+		try {
+			const r = await submitted;
+			if (r && typeof r.drop === "string") {
+				$.ui.log("isoplan: Claude Code didn't let the floor's answer in: " + r.drop, { to: "debug" });
+				return say({
+					taken: false,
+					reason: "dropped"
+				});
+			}
+			say({ taken: true });
+		} catch (err) {
+			$.ui.log("isoplan: the floor's answer couldn't be submitted: " + message(err), { to: "debug" });
+			say({
+				taken: false,
+				reason: "dropped"
+			});
+		}
+	})().catch(() => {});
+}
+async function endTurn($) {
+	let running;
+	try {
+		await $.turn.abort({ turnId: NO_TURN });
+		return false;
+	} catch (err) {
+		if (/no turn is running/.test(message(err))) return true;
+		running = /is not the running turn \(([^()\s]+)\)/.exec(message(err))?.[1];
+	}
+	if (!running) return false;
+	try {
+		await $.turn.abort({ turnId: running });
+		return true;
+	} catch (err) {
+		$.ui.log("isoplan: couldn't end the running turn for the floor's answer: " + message(err), { to: "debug" });
+		return false;
+	}
+}
+const NO_TURN = "isoplan-no-turn";
+async function endsTurns($) {
+	try {
+		await $.turn.abort({ turnId: NO_TURN });
+		return false;
+	} catch (err) {
+		return /no turn is running|is not the running turn \(/.test(message(err));
+	}
+}
+function chatText(questions) {
+	return [
+		"The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). To tell you how to proceed, the user said:",
+		"The user wants to clarify these questions.",
+		"    This means they may have additional information, context or questions for you.",
+		"    Take their response into account and then reformulate the questions if appropriate.",
+		"    Start by asking them what they would like to clarify.",
+		"",
+		"    Questions asked:",
+		...Array.isArray(questions) ? questions.map((q) => `- "${String(q?.question ?? "")}"\n  (No answer provided)`) : []
+	].join("\n");
 }
 function ownerMessage($, line) {
 	let said = false;
@@ -236,7 +323,7 @@ async function run($) {
 	const script = $.plugin.root.replace(/\\/g, "/") + "/dist/pipe.js";
 	let failures = 0;
 	const since = await $.clock.now();
-	const messages = await submits($) ? ["--messages"] : [];
+	const can = [...await submits($) ? ["--messages"] : [], ...await endsTurns($) ? ["--ends-turns"] : []];
 	for (;;) {
 		if (!await isThere($, script)) {
 			updated = true;
@@ -276,7 +363,7 @@ async function run($) {
 					cwd,
 					"--since",
 					String(since),
-					...messages
+					...can
 				],
 				cwd
 			});

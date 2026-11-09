@@ -701,7 +701,7 @@ function addQuestions(list: QuestionFact[], agent: string, t: TranscriptState, r
       questions.push({
         question: q.question,
         header: typeof q.header === "string" ? q.header : "",
-        options: options.map((o) => ({ label: o.label, description: typeof o.description === "string" ? o.description : "" })),
+        options: options.map((o) => ({ label: o.label, description: typeof o.description === "string" ? o.description : "", ...(typeof o.preview === "string" && o.preview ? { preview: o.preview } : {}) })),
         multiSelect: q.multiSelect === true,
       });
     }

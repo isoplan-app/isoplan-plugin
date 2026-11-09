@@ -10490,7 +10490,8 @@ function addQuestions(list, agent, t, results, mtimeMs) {
 				header: typeof q.header === "string" ? q.header : "",
 				options: options.map((o) => ({
 					label: o.label,
-					description: typeof o.description === "string" ? o.description : ""
+					description: typeof o.description === "string" ? o.description : "",
+					...typeof o.preview === "string" && o.preview ? { preview: o.preview } : {}
 				})),
 				multiSelect: q.multiSelect === true
 			});
@@ -16592,16 +16593,22 @@ const LATE_MS = 6e4;
 const WITHHELD_QUESTION = "Held for its owner to check: the secret check found what may be a secret in this question, so it is answered in the terminal.";
 /**
 * The facts with their questions as they are sent: each one the scan matches, or every one while
-* `patterns` is null, as a placeholder marked `withheld`; each other one `answerable` while `waiting`
-* holds its id, unless the source left part of it out.
+* `patterns` is null, as a placeholder marked `withheld`; each other one `answerable` while its mark
+* in `marks` says the hooks module waits for it, else, with no mark at all, `asMessage` when the
+* session `answersLate`, unless the source left part of it out. A question whose mark says the wait
+* has ended has had its answer, though the transcript may not show it yet.
 */
-function prepareQuestions(facts, patterns, waiting, log) {
+function prepareQuestions(facts, patterns, marks, log, answersLate = false) {
 	if (!facts.questions?.length) return facts;
 	const questions = facts.questions.map((q) => {
 		const matched = scan(q.questions.flatMap((x) => [
 			x.question,
 			x.header,
-			...x.options.flatMap((o) => [o.label, o.description])
+			...x.options.flatMap((o) => [
+				o.label,
+				o.description,
+				o.preview ?? ""
+			])
 		]).join("\n"), patterns);
 		if (matched) {
 			log(`withheld the question ${q.id} of ${q.agent}: ${patterns ? `it matches the secret pattern "${matched}"` : "the secret patterns couldn't be read"}; it is answered in the terminal`);
@@ -16618,9 +16625,14 @@ function prepareQuestions(facts, patterns, waiting, log) {
 				withheld: true
 			};
 		}
-		return waiting.has(q.id) && !q.extra?.incomplete ? {
+		if (q.extra?.incomplete) return q;
+		if (marks.get(q.id) === true) return {
 			...q,
 			answerable: true
+		};
+		return answersLate && !marks.has(q.id) ? {
+			...q,
+			asMessage: true
 		} : q;
 	});
 	return {
@@ -16631,9 +16643,10 @@ function prepareQuestions(facts, patterns, waiting, log) {
 /**
 * A reply only once the hooks module says the answer ended the question's call; a refusal saying why
 * not otherwise. With no word from it in `waitMs`, a question that has closed since gets a `closed`
-* reply, which says only that it has an answer, the floor's or the terminal's.
+* reply, which says only that it has an answer, the floor's or the terminal's; one going in as a
+* message is refused, since the hooks module closed it itself, by ending the turn.
 */
-async function relayOwnerAnswer(request, { detached, facts, file, emit, take, sleep = wait$1, waitMs = TAKEN_WAIT_MS$1 }) {
+async function relayOwnerAnswer(request, { detached, session, facts, file, emit, take, sleep = wait$1, waitMs = TAKEN_WAIT_MS$1 }) {
 	const refuse = (detail, gaveUp = false) => ({
 		message: {
 			type: "refusal",
@@ -16645,21 +16658,32 @@ async function relayOwnerAnswer(request, { detached, facts, file, emit, take, sl
 		gaveUp
 	});
 	const open = () => facts()?.questions?.find((q) => q.id === request.question);
-	if (detached) return refuse("This session is seen only through Isoplan's wake hook, so its question can only be answered in its terminal.");
+	if (detached) return refuse("Isoplan's plugin isn't running in this session: type /reload-plugins in it, or answer the question in its terminal.");
 	const question = open();
 	if (!question) return refuse("The question isn't waiting for an answer any more: it was answered in the terminal, or the agent moved on.");
-	if (!question.answerable) return refuse("Isoplan's plugin isn't waiting for this question in its session, so answer it in its terminal.");
-	emit({
+	if (!question.answerable && !question.asMessage) return refuse("This question was asked before Isoplan's plugin loaded in its session, so answer it in its terminal.");
+	const answers = request.chat ? {} : request.answers;
+	const annotations = request.chat ? void 0 : annotationsOf(question, answers, request.annotations);
+	const line = {
 		type: "owner-answer",
 		question: request.question,
-		answers: request.answers,
+		answers,
+		...annotations && { annotations },
+		...request.chat && { chat: true },
 		file
-	});
+	};
+	emit(question.asMessage ? {
+		...line,
+		late: {
+			session,
+			text: lateText(question, answers, annotations, !!request.chat)
+		}
+	} : line);
 	for (let waited = 0; waited < waitMs; waited += POLL_MS$1) {
 		await sleep(POLL_MS$1);
 		const taken = await takenFrom(take, file, request.question);
 		if (taken === null) continue;
-		if (taken) return {
+		if (taken.taken) return {
 			message: {
 				type: "reply",
 				v: 1,
@@ -16668,8 +16692,9 @@ async function relayOwnerAnswer(request, { detached, facts, file, emit, take, sl
 			},
 			gaveUp: false
 		};
-		return refuse("The question was answered in the terminal first.");
+		return refuse(NOT_TAKEN[taken.reason ?? "answered"]);
 	}
+	if (question.asMessage) return refuse("Claude Code hasn't taken the answer as a message yet: if the agent doesn't get it soon, answer in its terminal.", true);
 	if (!open()) return {
 		message: {
 			type: "reply",
@@ -16690,10 +16715,54 @@ async function lateTake(question, file, take, { sleep = wait$1, ms = LATE_MS } =
 	for (let waited = 0; waited < ms; waited += POLL_MS$1) {
 		await sleep(POLL_MS$1);
 		const taken = await takenFrom(take, file, question);
-		if (taken !== null) return taken;
+		if (taken !== null) return taken.taken;
 	}
 	return null;
 }
+/** Why the floor's answer didn't go in, as the floor is told. */
+const NOT_TAKEN = {
+	answered: "The question was answered in the terminal first.",
+	ended: "This session has ended, or carried on as a new one, so the answer wasn't sent.",
+	"no-turn": "Isoplan's plugin couldn't stop the agent's turn to send the answer, so answer the question in its terminal.",
+	"no-submit": "This session's version of Claude Code can't take messages from Isoplan, so answer the question in its terminal.",
+	dropped: "Claude Code didn't let the answer in as a message, so answer the question in its terminal."
+};
+/**
+* The annotations Claude Code's dialog would give: the owner's notes on each answer, and on a
+* question with one answer, the preview of the option chosen, from the question itself. None when
+* there are neither.
+*/
+function annotationsOf(question, answers, given = {}) {
+	const out = {};
+	for (const q of question.questions) {
+		const notes = given[q.question]?.notes;
+		const preview = q.multiSelect ? void 0 : q.options.find((o) => o.label === answers[q.question])?.preview;
+		if (notes || preview) out[q.question] = {
+			...notes && { notes },
+			...preview && { preview }
+		};
+	}
+	return Object.keys(out).length ? out : void 0;
+}
+/**
+* The owner's message for a question the hooks module never saw: their answers and notes, as a
+* person would put them, saying they answered on the Isoplan floor; or, for "Chat about this", that
+* they want to talk the questions through first.
+*/
+function lateText(question, answers, annotations, chat) {
+	const several = question.questions.length > 1;
+	const asked = several ? "questions" : "question";
+	if (chat) return [`I saw your ${asked} on the Isoplan floor, and I'd like to talk ${several ? "them" : "it"} through before I answer:`, ...question.questions.map((q) => `- "${q.question}"`)].join("\n");
+	const lines = [`I answered your ${asked} on the Isoplan floor:`];
+	for (const q of question.questions) {
+		const answer = answers[q.question];
+		const notes = annotations?.[q.question]?.notes;
+		lines.push(`- "${q.question}": ${answer && answer !== NOTES_ONLY ? answer : notes ? "no option, just a note" : "no answer"}`);
+		if (notes) lines.push(`  My notes: ${notes}`);
+	}
+	return lines.join("\n");
+}
+const NOTES_ONLY = "(notes only)";
 async function takenFrom(take, file, question) {
 	const text = await take(file);
 	if (text === null) return null;
@@ -16701,7 +16770,11 @@ async function takenFrom(take, file, question) {
 	try {
 		taken = JSON.parse(text);
 	} catch {}
-	return taken.question === question ? taken.taken === true : null;
+	if (taken.question !== question) return null;
+	return {
+		taken: taken.taken === true,
+		...taken.reason && taken.reason in NOT_TAKEN && { reason: taken.reason }
+	};
 }
 const wait$1 = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 //#endregion
@@ -16928,6 +17001,7 @@ async function reporting(o, c) {
 	const { sessionId, cwd, closed } = o;
 	const hooked = o.by === "hooks";
 	const takesMessages = hooked && !!o.takesMessages;
+	const answersLate = takesMessages && !!o.endsTurns;
 	const here = path.join(o.appDir, "dist");
 	const defaultsPath = path.join(o.appDir, "config.json");
 	const { dir: claudeDir, json: claudeJson } = claudePaths(process.env, os.homedir());
@@ -17114,7 +17188,7 @@ async function reporting(o, c) {
 	let isPlaceless = false;
 	let passes = 0;
 	let shown = null;
-	let waiting = /* @__PURE__ */ new Set();
+	let marks = /* @__PURE__ */ new Map();
 	const said = /* @__PURE__ */ new Set();
 	const patternLog = (text) => {
 		if (!said.has(text)) emit({
@@ -17123,7 +17197,7 @@ async function reporting(o, c) {
 		});
 		said.add(text);
 	};
-	const outgoing = (run, facts, patterns) => prepareWorkflows(prepareQuestions(run.hold.apply(facts, patterns), patterns, waiting, patternLog), patterns, patternLog);
+	const outgoing = (run, facts, patterns) => prepareWorkflows(prepareQuestions(run.hold.apply(facts, patterns), patterns, marks, patternLog, answersLate), patterns, patternLog);
 	let checkouts = {};
 	let answered = (_id) => false;
 	let contextWindow = null;
@@ -17149,6 +17223,7 @@ async function reporting(o, c) {
 				c.watch(fs.mkdir(answersDir, { recursive: true }).then(async () => {
 					const relayed = await relayOwnerAnswer(message, {
 						detached: !hooked,
+						session: sessionId,
 						facts: () => run.sent,
 						file,
 						emit,
@@ -17511,11 +17586,12 @@ async function reporting(o, c) {
 				contextWindow
 			}
 		} : titled;
-		const facts = takesMessages ? {
+		const facts = hooked ? {
 			...sized,
 			session: {
 				...sized.session,
-				takesMessages: true
+				hooks: true,
+				...takesMessages && { takesMessages: true }
 			}
 		} : sized;
 		checkouts = read.checkouts ?? {};
@@ -17524,7 +17600,7 @@ async function reporting(o, c) {
 			patternLog(`couldn't read the secret patterns, so every report is withheld: ${String(err?.message ?? err)}`);
 			return null;
 		});
-		waiting = hooked ? await waitsOf(waitsDir, facts) : /* @__PURE__ */ new Set();
+		marks = hooked ? await waitsOf(waitsDir, facts) : /* @__PURE__ */ new Map();
 		shown = [facts, patterns];
 		for (const run of taking) try {
 			run.gate.link()?.update(run.sent = outgoing(run, facts, patterns));
@@ -17605,11 +17681,11 @@ async function writeLog$1(file, text) {
 	else await fs.appendFile(file, text);
 }
 async function waitsOf(dir, facts) {
-	const out = /* @__PURE__ */ new Set();
+	const out = /* @__PURE__ */ new Map();
 	for (const q of facts.questions ?? []) {
 		if (!/^[A-Za-z0-9_-]{1,200}$/.test(q.id)) continue;
 		const mark = await fs.readFile(path.join(dir, `${q.id}.json`), "utf8").then((text) => JSON.parse(text), () => null);
-		if (mark?.question === q.id && mark.waiting === true) out.add(q.id);
+		if (mark?.question === q.id && typeof mark.waiting === "boolean") out.set(q.id, mark.waiting);
 	}
 	return out;
 }
@@ -18242,6 +18318,7 @@ async function createPipeServer(o) {
 			cwd: hello.cwd,
 			since: hello.since,
 			messages: hello.messages === true,
+			endsTurns: hello.endsTurns === true,
 			root: hello.root,
 			version: hello.version,
 			env: hello.env && typeof hello.env === "object" ? sessionEnv(hello.env) : {},
@@ -18782,6 +18859,7 @@ async function worker() {
 					since: hooks.since,
 					env: hooks.env,
 					takesMessages: hooks.messages,
+					endsTurns: hooks.endsTurns,
 					emit: (line) => {
 						said.emit(line);
 						hooks.send(line);
