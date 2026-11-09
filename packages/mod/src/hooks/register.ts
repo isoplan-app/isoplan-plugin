@@ -261,14 +261,14 @@ async function submits($: Host): Promise<boolean> {
 }
 
 // Writes the session's context window where the data layer said, once it is known and has changed;
-// a host without $.session.usage, or without a size, writes nothing.
+// a host without $.session.usage, or without a size, writes nothing. Always called, never read:
+// the host refuses to load a hooks module that reads $.session.usage as a value.
 async function sendWindow($: Host): Promise<void> {
   const file = windowFile;
   if (!file) return;
-  if (!$.session.usage) return;
   let size: number;
   try {
-    size = (await $.session.usage()).context.window;
+    size = (await $.session.usage!()).context.window; // throws when the host has no usage
   } catch {
     return;
   }
