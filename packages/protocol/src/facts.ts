@@ -47,6 +47,10 @@ export const SessionFactSchema = z.object({
   // `takesMessages` (protocol 0.8.0 on): the plugin in this session can pass it a message from the
   // floor (an owner-message request); absent, the session takes none, and none is sent.
   takesMessages: z.literal(true).optional(),
+  // `hooks` (protocol 0.11.0 on): Isoplan's hooks module runs inside this session, so it can be
+  // answered from the floor. Absent: only the runner sees the session (from its transcript), and
+  // nothing from the floor reaches it.
+  hooks: z.literal(true).optional(),
   extra: Extra,
 });
 
@@ -182,11 +186,16 @@ export const ReportFactSchema = z.object({
 /**
  * A question an agent asked its owner, open until it is answered, so the floor can show it and the
  * owner can answer it there. One of the named cases of session-derived text leaving a machine: the
- * server keeps it only for the retention period. `id` is the tool call's own id. `answerable`: the
- * session's own plugin is waiting for it, so an answer from the floor reaches it; without it (a
- * session seen only through the wake hook, a question asked before the plugin loaded) the floor
- * shows the question read-only. `withheld`: the secret scan matched its text, or the patterns
- * couldn't be read, so `questions` is only a placeholder; it is answered in the terminal.
+ * server keeps it only for the retention period. `id` is the tool call's own id. An option's
+ * `preview` (protocol 0.11.0 on) is the option's preview as the agent gave it, which Claude Code
+ * shows when the option is focused. `answerable`: the session's own hooks module is waiting for it,
+ * so an answer from the floor answers the dialog itself. `asMessage` (protocol 0.11.0 on): the
+ * question can be answered from the floor even though the hooks module didn't see it asked (it was
+ * asked before the plugin loaded): the plugin stops the agent's turn, which closes the dialog, and
+ * submits the answers as the owner's own message. It never comes with `answerable` or `withheld`.
+ * With neither, the floor shows the question read-only, and it is answered in the terminal.
+ * `withheld`: the secret scan matched its text, or the patterns couldn't be read, so `questions` is
+ * only a placeholder; it is answered in the terminal.
  */
 export const QuestionFactSchema = z.object({
   id: z.string().min(1),
@@ -197,12 +206,13 @@ export const QuestionFactSchema = z.object({
       z.object({
         question: z.string().min(1),
         header: z.string(),
-        options: z.array(z.object({ label: z.string().min(1), description: z.string() })),
+        options: z.array(z.object({ label: z.string().min(1), description: z.string(), preview: z.string().optional() })),
         multiSelect: z.boolean(),
       }),
     )
     .min(1),
   answerable: z.literal(true).optional(),
+  asMessage: z.literal(true).optional(),
   withheld: z.literal(true).optional(),
   extra: Extra,
 });
