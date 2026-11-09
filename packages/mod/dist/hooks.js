@@ -214,7 +214,6 @@ async function submits($) {
 async function sendWindow($) {
 	const file = windowFile;
 	if (!file) return;
-	if (!$.session.usage) return;
 	let size;
 	try {
 		size = (await $.session.usage()).context.window;

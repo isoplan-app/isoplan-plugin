@@ -1,4 +1,5 @@
 import path from "node:path";
+import { readFileSync } from "node:fs";
 import { beforeEach, expect, test, vi } from "vitest";
 import { PROTOCOL_VERSION } from "@isoplan/protocol";
 import type { DataLayerLine } from "../lines.js";
@@ -605,4 +606,13 @@ test("hooks: a message goes in and says so at once on an idle session; it isn't 
   expect(await said({})).toEqual({ taken: false, reason: "no-submit" });
   expect(await said({ submit: async () => ({ drop: "a hook said no" }) })).toEqual({ taken: false, reason: "dropped" });
   expect(await said({ submit: async () => Promise.reject(new Error("busy")) })).toEqual({ taken: false, reason: "dropped" });
+});
+
+// Claude Code refuses to load a hooks module that reads one of $'s events as a value rather than
+// calling it, and then nothing of Isoplan runs in the session: no wait marks, so no question is
+// answerable from the floor. $.plugin.root is a value, not an event.
+test("the hooks module calls each of $'s events and reads none as a value", () => {
+  const code = readFileSync(path.join(import.meta.dirname, "register.ts"), "utf8").split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+  const read = [...code.matchAll(/\$\.\w+!?\.\w+\b(?!!?\()/g)].map((m) => m[0]).filter((m) => m !== "$.plugin.root");
+  expect(read).toEqual([]);
 });
