@@ -39,7 +39,11 @@
 // room through it (src/ask/machine.ts), only for a session whose hooks module is connected. Its
 // address and token are in <claude dir>/isoplan/runner/pipe.json, which the worker writes as it starts.
 // Each office's link, and the links waiting to pair the machine, go to <claude dir>/isoplan/runner/status.json
-// as they change (status.ts), for the desktop app's menu (packages/app).
+// as they change (status.ts), for the desktop app's menu (packages/app), with the email each office's
+// pairing belongs to and, every `trayRefreshSeconds`, the sessions it reports or runs. The menu's Close
+// of a headless one comes down the pipe: the worker ends its process tree, and forgets a driven one so
+// it isn't opened again. A driven session or a take's first turn stops being reported, so its links to
+// the offices close; a fork shares its lead's session, whose report goes on.
 //
 // The worker also drives its person's sessions from the floor (session.ts; its hello says `drive`),
 // for every office through one driver, and records every process it starts for that, and every
@@ -65,7 +69,7 @@ import { createLink } from "../data-layer/link.js";
 import { createPairing, pairingEntry, pairingLockPath, pairingPath, pairingWriteLockPath, readPairing } from "../data-layer/pairing.js";
 import { HOLD_OFF_MS, alive, holdOff, refreshLock, releaseLock, takeLock } from "../wake/lock.js";
 import { openLedger } from "./caps.js";
-import { createClaudeAnswerer, forkableId, forkEnv } from "./claude.js";
+import { createClaudeAnswerer, forkableId, forkEnv, killPid } from "./claude.js";
 import { claudeBinary } from "./claude-binary.js";
 import { createClaudeSetup } from "./claude-setup.js";
 import { anyRoomSince, askableMs, NOT_WANTED_CODE, onEscapes, supervise, UNPAIRED_CODE } from "./lifecycle.js";
@@ -73,7 +77,7 @@ import { loadPrompts } from "./prompts.js";
 import { createRunGit, gitFailed, handoffBranch, handoffNote, HandoffGitError, prepare, pushHandoff, type Prepared } from "../handoff/git.js";
 import { focusHandoff } from "../handoff/focus.js";
 import { findOrca, orcaRunner } from "../handoff/orca.js";
-import { desktopProblem, sessionFolders, takeHandoff, type TakeSettings } from "../handoff/take.js";
+import { CLOSED_FROM_MENU, desktopProblem, sessionFolders, takeHandoff, type TakeSettings } from "../handoff/take.js";
 import { recordTakenOffice } from "../handoff/taken-office.js";
 import { answerOffices } from "./offices.js";
 import { createForkSlots, createRunner, PushFailed, type RunnerSettings } from "./runner.js";
@@ -92,7 +96,7 @@ import { createPairLinks } from "./pair-links.js";
 import { startPlaces, startWhere } from "./start-where.js";
 import { runnerEnvPath } from "./environment.js";
 import { applyClaudeDir, LOCK_REFRESH_MS, RUNNER_FRESH_MS, runnerCode, runnerLockPath } from "./start.js";
-import { createStatus, statusPath } from "./status.js";
+import { closeProcess, createStatus, sessionsSeen, statusPath } from "./status.js";
 
 // The runner's log starts over once it is this big.
 const LOG_CAP_BYTES = 256 * 1024;
@@ -179,7 +183,7 @@ async function worker(): Promise<number> {
   });
   const io = nodeIo();
   const config = () => loadConfig(io, path.join(appDir, "config.json"), path.join(isoplanDir, "config.json"));
-  const settings = () => loadSettings<RunnerSettings & TakeSettings & DriveSettings & { claudeModel: string; repoSearchDepth: number; startAtLogin: boolean }>(io, path.join(appDir, "runner.json"), path.join(isoplanDir, "runner.json"));
+  const settings = () => loadSettings<RunnerSettings & TakeSettings & DriveSettings & { claudeModel: string; repoSearchDepth: number; startAtLogin: boolean; trayRefreshSeconds: number }>(io, path.join(appDir, "runner.json"), path.join(isoplanDir, "runner.json"));
   const first = await config();
   // Plain ws:// to another machine would send the machine's credential unencrypted.
   const offices = officesOf(first);
@@ -219,6 +223,7 @@ async function worker(): Promise<number> {
         emit: emitFor(server),
         allowPlainWs: first.allowPlainWs,
         legacy: !!office.legacy,
+        onEmail: (email) => status.email(server, email),
       });
       const approved = createApproved({ server, file: approvedPath(claudeDir, server), pairing, refreshMs: first.approvedRefreshMinutes * 60000, maxAgeMs: first.approvedMaxAgeMinutes * 60000, log });
       return [server, { pairing, approved }] as const;
@@ -234,11 +239,13 @@ async function worker(): Promise<number> {
   // look, so the hooks modules of a runner started again can say hello before it. A worker that can't
   // serve the pipe still reports every session, without their hooks modules.
   let rehook = (_session: string) => {};
+  let closeFor = async (_close: string) => false;
   const pipe = await createPipeServer({
     claudeDir,
     log,
     onChange: (session) => rehook(session),
     ask: (request) => askFromMachine({ ...request, appDir, scan: scanText }),
+    close: (close) => closeFor(close),
   }).catch((err: Error) => (log(`the runner couldn't open its pipe for the sessions' hooks modules: ${err.message}`), null));
   const reporting = watchSessions<Hooked>({
     claudeDir,
@@ -289,6 +296,11 @@ async function worker(): Promise<number> {
   // worker whose supervisor holds the runner's lock gets here.
   const registry = createRegistry({ file: registryPath(claudeDir), log });
   await registry.restore();
+  // The bare ids of the sessions it started with `claude --bg`, which the registry doesn't hold (no
+  // process of its own runs them), kept in memory only (status.ts sessionsSeen); and of the takes'
+  // first turns closed from the desktop app's menu, each taken out once its failure has read it.
+  const background = new Set<string>();
+  const closedFromMenu = new Set<string>();
   const binary = () => claudeBinary(claudeDir, process.env, process.platform, os.homedir());
   const answerer = createClaudeAnswerer({
     claudeDir,
@@ -457,6 +469,8 @@ async function worker(): Promise<number> {
           orca: takeOrca,
           driven: { problem: (by) => driver!.takeProblem(by), prepare: (take) => driver!.prepareTake(server, take) },
           track: registry.track,
+          background: (id) => background.add(id),
+          closed: (id) => closedFromMenu.delete(id),
           names,
         });
         if (taken.session) await recordTakenOffice(claudeDir, taken.session, server).catch(() => {});
@@ -498,6 +512,8 @@ async function worker(): Promise<number> {
         branchFolder: async (folder, branch) => branchFolder(git, folder, branch, await gitMs()),
         orcaFolder: async (orca, folder, branch) => orcaBranchFolder(orca, git, folder, branch, await gitMs()),
         track: registry.track,
+        background: (id) => background.add(id),
+        closed: (id) => closedFromMenu.delete(id),
       }),
     // An install or sign-in ends with the Claude app's check again, for the next hello.
     setup: (m) => {
@@ -506,6 +522,36 @@ async function worker(): Promise<number> {
     },
   });
   driver = drive;
+
+  // The desktop app's Close of a headless session (status.ts sessionsSeen names it): a driven one by
+  // its session, a fork or a take's first turn by its process, only while the registry records it.
+  closeFor = async (close) => {
+    if (close.startsWith("pid:")) {
+      // A take's first turn that ends now says why to the office (handoff/take.ts).
+      const record = await closeProcess(close, registry.list(), { kill: killPid, alive, waitMs: (await settings()).drivenCloseSeconds * 1000, closing: closedFromMenu });
+      if (!record) return false;
+      log(`closed the ${record.kind} process ${record.pid} of ${record.session} from the desktop app's menu`);
+      if (record.kind === "desktop-read") await reporting.end(record.session.slice(record.session.indexOf(":") + 1), CLOSED_FROM_MENU);
+      return true;
+    }
+    if (!(await drive.end(close))) return false;
+    await reporting.end(close.slice(close.indexOf(":") + 1), CLOSED_FROM_MENU);
+    return true;
+  };
+  // The sessions, for the desktop app's menu.
+  // Until the settings can first be read, it looks again as the app does (LOCK_REFRESH_MS).
+  let listMs = LOCK_REFRESH_MS;
+  const listSessions = async () => {
+    try {
+      status.sessions(sessionsSeen(reporting.sessions(), registry.list(), background));
+      listMs = (await settings()).trayRefreshSeconds * 1000;
+    } catch (err) {
+      log(`couldn't list the sessions for the desktop app's menu: ${String((err as Error)?.message ?? err)}`);
+    } finally {
+      setTimeout(() => void listSessions(), listMs).unref();
+    }
+  };
+  await listSessions();
 
   // The supervisor holds stdin open; it closes when the supervisor has gone.
   const gone = new Promise<void>((resolve) => process.stdin.on("end", resolve).on("error", resolve).resume());
@@ -523,7 +569,12 @@ async function worker(): Promise<number> {
         onMessage: (message) => runner.take(message),
         onDrive: (message) => drive.take(office.server, message),
         // At every hello and every drop, this office's drive-policy no longer holds; nothing driven goes on the new connection until its first one, which `holding` follows.
-        onOpen: () => (status.opened(office.server), drive.linked(office.server)),
+        onOpen: () => {
+          status.opened(office.server);
+          drive.linked(office.server);
+          // The renewal before this hello kept the email the office named, if it did.
+          void readPairing(pairingPath(claudeDir)).then((all) => status.email(office.server, pairingEntry(all, office.server, account.id)?.email));
+        },
         onClose: () => (status.closed(office.server), drive.unlinked(office.server)),
         onNotWanted: () => (status.stopped(office.server, "not-wanted"), said.notWanted()),
         // A revoked or lapsed pairing closes this link: the sessions' links pair the machine again.

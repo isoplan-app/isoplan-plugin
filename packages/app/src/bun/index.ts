@@ -5,6 +5,9 @@
 // Its config folder is $CLAUDE_CONFIG_DIR or ~/.claude, as Claude Code's own: Electrobun's launcher
 // doesn't pass arguments on, so startRunner sets the variable (packages/mod/src/runner/start.ts).
 // It logs to <claude dir>/isoplan/logs/app.log; the worker logs to runner.log as before.
+//
+// Its Sessions submenu lists what the worker writes into status.json; Close on a headless one asks the
+// worker over its pipe (src/pipe), whose address and token it reads with the runner's own code.
 
 import { BrowserView, BrowserWindow, Tray, Utils } from "electrobun/main";
 import fs from "node:fs/promises";
@@ -15,10 +18,12 @@ import { loadSettings } from "../../../mod/src/data-layer/config.js";
 import { nodeIo } from "../../../mod/src/data-layer/io.js";
 import { LOCK_REFRESH_MS } from "../../../mod/src/runner/start.js";
 import { readStatus, statusPath, type RunnerStatus } from "../../../mod/src/runner/status.js";
+import { closeSession } from "../../../mod/src/pipe/pipe.js";
+import { menuCloseWaitMs } from "../../../mod/src/runner/session.js";
 import { alive } from "../../../mod/src/wake/lock.js";
 import type { PairingRPC } from "../shared/pairing-rpc.ts";
 import { startEngine } from "./engine.ts";
-import { currentStatus, pairingView, trayMenu, type MenuInput } from "./menu.ts";
+import { closing, currentStatus, pairingView, trayMenu, type MenuInput } from "./menu.ts";
 import pkg from "../../package.json" with { type: "json" };
 
 const LOG_CAP_BYTES = 256 * 1024;
@@ -43,7 +48,7 @@ if (process.platform === "darwin") Utils.setDockIconVisible(false);
 
 // The tray's settings, as the runner reads its own: its copy's runner.json, then the person's. One
 // that can't be read keeps the last that could.
-type TraySettings = { trayRefreshSeconds: number; officeUnreachableSeconds: number };
+type TraySettings = { trayRefreshSeconds: number; officeUnreachableSeconds: number; drivenCloseSeconds: number };
 let good: TraySettings | null = null;
 async function settings(): Promise<TraySettings> {
   try {
@@ -95,11 +100,29 @@ async function act(action: string): Promise<void> {
   if (action === "pause") engine.pause();
   else if (action === "resume") engine.resume();
   else if (action === "pairing") openPairing();
+  else if (action.startsWith("close:")) {
+    const id = closing(action, (await input()).status);
+    if (id) await close(id);
+  }
   else if (action === "quit") {
     log("quit from the menu: the runner stops");
     await engine.quit();
   }
   await update();
+}
+
+// A headless session the menu offers to close: this machine's runner closes it, as it owns its process.
+async function close(id: string): Promise<void> {
+  const closed = await closeSession(claudeDir, id, menuCloseWaitMs((await settings()).drivenCloseSeconds));
+  log(
+    closed === true
+      ? `closed ${id} from the menu`
+      : closed === false
+        ? `the runner didn't close ${id}: runner.log says why`
+        : closed === "no answer"
+          ? `the runner didn't answer when asked to close ${id}: runner.log may say why`
+          : `couldn't ask the runner to close ${id}: its pipe can't be reached`,
+  );
 }
 
 // Only ever from a person's click on the menu item.

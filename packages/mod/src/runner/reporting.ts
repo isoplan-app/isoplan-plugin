@@ -42,6 +42,9 @@
 // office it reported to or that config.json names now, never of one that didn't want it. The
 // offices that didn't want it are left alone, each until its own hold-off ends. The hold-offs live
 // here, in the runner's memory: a runner started again asks each office afresh.
+//
+// A session closed from the desktop app's menu (`end`) stops being reported at once, so its links to
+// the offices close as a session's that finished do, and is reported again only once its transcript moves.
 
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -108,6 +111,10 @@ export interface Reporting {
   heldOff(sessionId: string): boolean;
   /** The sessions it reports now. */
   reporting(): string[];
+  /** The sessions it reports now, each with its folder. */
+  sessions(): { session: string; cwd: string }[];
+  /** Stops reporting the session, its process ended from this machine (the desktop app's Close): its links to the offices close, and it is reported again only once its transcript moves. */
+  end(sessionId: string, why: string): Promise<void>;
   /** Looks once (it looks by itself every `streamSeconds`). */
   look(): Promise<void>;
   /** The session's hooks module connected, changed or went: it is reported again for the one it has now. */
@@ -121,7 +128,7 @@ interface Seen {
   mtimeMs: number;
   size: number;
   cwd: string | null;
-  running: { stop: (why: string) => void; done: Promise<void>; hooks: unknown } | null;
+  running: { stop: (why: string) => void; done: Promise<void>; hooks: unknown; cwd: string } | null;
   /** The hooks module the last report was for (null for none), once it ended. */
   endedFor: unknown;
   /** Waiting its turn on the first look. */
@@ -201,7 +208,7 @@ export function watchSessions<H extends HookedSession>(o: ReportingOptions<H>): 
         // Stopped for another hooks module (or none): reported again for it at once.
         if (rehooked.delete(id) && !stopped) void lookOnce();
       });
-    s.running = { stop: close, done, hooks };
+    s.running = { stop: close, done, hooks, cwd };
   };
 
   /** Whether a fresh copy of an office's list takes one of the repos a hold-off names (see above). */
@@ -358,6 +365,13 @@ export function watchSessions<H extends HookedSession>(o: ReportingOptions<H>): 
       return !!holdOff && holdOff.until > Date.now();
     },
     reporting: () => [...seen].filter(([, s]) => s.running).map(([id]) => id),
+    sessions: () => [...seen].flatMap(([session, s]) => (s.running ? [{ session, cwd: s.running.cwd }] : [])),
+    async end(id, why) {
+      const running = seen.get(id)?.running;
+      if (!running) return;
+      running.stop(why);
+      await running.done;
+    },
     look: lookOnce,
     rehook: (id) => {
       const s = seen.get(id);

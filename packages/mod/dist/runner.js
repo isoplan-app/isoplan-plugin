@@ -7242,10 +7242,11 @@ const HTML = {
 	"content-type": "text/html; charset=utf-8",
 	connection: "close"
 };
-function createPairing({ file, lock, writeLock, server, account, machine, emit, allowPlainWs = false, legacy = false, post = postJson, now = Date.now, pid = process.pid, isAlive = alive, retryMs = 200 }) {
+function createPairing({ file, lock, writeLock, server, account, machine, emit, allowPlainWs = false, legacy = false, post = postJson, now = Date.now, pid = process.pid, isAlive = alive, retryMs = 200, onEmail }) {
 	let asked = false;
 	let shown = null;
 	let unreadable = false;
+	let renewedHere = false;
 	let callback = null;
 	const entryOf = (all) => pairingEntry(all, server, account.id) ?? { server };
 	const withEntry = (all, entry) => withPairingEntry(all, server, account.id, entry, legacy);
@@ -7257,7 +7258,7 @@ function createPairing({ file, lock, writeLock, server, account, machine, emit, 
 			result
 		};
 	});
-	const drop = ({ credential: _, token: __, tokenExpires: ___, ...rest }) => rest;
+	const drop = ({ credential: _, token: __, tokenExpires: ___, email: ____, ...rest }) => rest;
 	const show = (waiting) => {
 		if (shown === waiting.url) return;
 		shown = waiting.url;
@@ -7272,21 +7273,30 @@ function createPairing({ file, lock, writeLock, server, account, machine, emit, 
 		if (!allowPlainWs && isPlainRemote(server)) throw new Error(`${server} is plain ws:// to another machine, so this machine's credential isn't sent; use wss://, or set "allowPlainWs": true in config.json`);
 	};
 	async function renew(used) {
+		renewedHere = true;
 		const answer = await post(httpUrl(server, "/token"), { credential: used });
 		if (answer.status === 200 && typeof answer.body.token === "string") {
 			const token = answer.body.token;
 			const expires = Date.parse(String(answer.body.expires));
-			return update((e) => e.credential === used ? {
-				entry: {
-					...e,
-					token,
-					tokenExpires: Number.isFinite(expires) ? expires : now()
-				},
-				result: token
-			} : {
-				entry: null,
-				result: void 0
+			const email = typeof answer.body.email === "string" && answer.body.email ? answer.body.email : void 0;
+			const kept = await update((e) => {
+				if (e.credential !== used) return {
+					entry: null,
+					result: void 0
+				};
+				const { email: _, ...rest } = e;
+				return {
+					entry: {
+						...rest,
+						token,
+						tokenExpires: Number.isFinite(expires) ? expires : now(),
+						...email && { email }
+					},
+					result: token
+				};
 			});
+			if (kept) onEmail?.(email);
+			return kept;
 		}
 		if (answer.status === 401 && answer.body.code === "pairing-ended") {
 			emit({
@@ -7294,10 +7304,11 @@ function createPairing({ file, lock, writeLock, server, account, machine, emit, 
 				text: `the office server says this machine's pairing has ended: ${String(answer.body.error ?? "")}`
 			});
 			asked = true;
-			return update((e) => ({
+			if (await update((e) => ({
 				entry: e.credential === used ? drop(e) : null,
-				result: void 0
-			}));
+				result: e.credential === used
+			}))) onEmail?.(void 0);
+			return;
 		}
 		throw new Error(`the office server answered ${answer.status} when renewing this machine's token`);
 	}
@@ -7315,12 +7326,13 @@ function createPairing({ file, lock, writeLock, server, account, machine, emit, 
 	async function keep(credential) {
 		for (let i = 0; i < WRITE_TRIES; i++) try {
 			await update((e) => ({
-				entry: (({ waiting: _, ...rest }) => ({
+				entry: (({ waiting: _, email: __, ...rest }) => ({
 					...rest,
 					credential
 				}))(e),
 				result: void 0
 			}));
+			onEmail?.(void 0);
 			return true;
 		} catch (err) {
 			emit({
@@ -7424,16 +7436,19 @@ function createPairing({ file, lock, writeLock, server, account, machine, emit, 
 	return {
 		async token() {
 			const entry = await mine();
-			if (entry.token && (entry.tokenExpires ?? 0) - 3e5 > now()) {
+			const fresh = !!entry.token && (entry.tokenExpires ?? 0) - 3e5 > now();
+			const forEmail = fresh && !!onEmail && !entry.email && !renewedHere && !!entry.credential;
+			if (fresh && !forEmail) {
 				plainRefused();
 				return entry.token;
 			}
 			if (entry.credential) {
 				plainRefused();
-				const renewed = await renew(entry.credential);
+				const renewed = await renew(entry.credential).catch((err) => forEmail ? void 0 : Promise.reject(err));
 				if (renewed) return renewed;
 				const again = await mine();
 				if (again.token && again.token !== entry.token) return again.token;
+				if (forEmail && again.token) return again.token;
 			}
 			if (!asked && !entry.waiting) return void 0;
 			if (callback) return null;
@@ -7456,23 +7471,23 @@ function createPairing({ file, lock, writeLock, server, account, machine, emit, 
 				return;
 			}
 			if (!sent) return;
-			await update((e) => {
+			if (await update((e) => {
 				if (e.token !== sent) return {
 					entry: null,
-					result: void 0
+					result: false
 				};
 				if (code === "token-expired") return {
 					entry: {
 						...e,
 						tokenExpires: 0
 					},
-					result: void 0
+					result: false
 				};
 				return {
 					entry: code === "pairing-ended" ? drop(e) : null,
-					result: void 0
+					result: code === "pairing-ended"
 				};
-			});
+			})) onEmail?.(void 0);
 		},
 		close: stopAnswering
 	};
@@ -12886,6 +12901,8 @@ async function takeHandoff(message, o) {
 		return done();
 	}
 }
+/** Why a take's first turn ended when the desktop app's Close ended it. */
+const CLOSED_FROM_MENU = "it was closed from this computer's Isoplan menu";
 const capital = (text) => text.charAt(0).toUpperCase() + text.slice(1);
 /**
 * Opens Claude Code in `dir` under `session`, with `prompt` its first message, as `mode` says (see
@@ -12937,7 +12954,7 @@ async function openSession(x, o) {
 		if (read.code !== 0 || said?.is_error === true || said?.session_id !== id) {
 			o.log(`${label}: the first turn of ${id} failed (code ${read.code}): ${read.stderr.trim().slice(-500)}`);
 			const kind = typeof said?.subtype === "string" && /^[a-z_]+$/.test(said.subtype) ? ` (${said.subtype})` : "";
-			const why = read.timedOut ? `it was stopped after ${Math.round(readMs / 6e4)} minutes` : read.code !== 0 ? `claude exited with code ${read.code}` : said?.is_error === true ? `it ended in an error${kind}` : `it didn't say it ran session ${id}`;
+			const why = o.closed?.(id) ? CLOSED_FROM_MENU : read.timedOut ? `it was stopped after ${Math.round(readMs / 6e4)} minutes` : read.code !== 0 ? `claude exited with code ${read.code}` : said?.is_error === true ? `it ended in an error${kind}` : `it didn't say it ran session ${id}`;
 			const removed = await removeTranscript(o.claudeDir, id);
 			const changed = w.changed !== null && await changedSince(o.run, dir, s.gitTimeoutSeconds * 1e3);
 			return failed(`Claude Code couldn't ${w.read} before the Claude app took it over: ${why}; this machine's runner log has more. ${removed ? "Its unfinished session was deleted." : `Its unfinished session ${id} may be left in Claude Code's session list.`} ${w.at} ${dir}.${changed ? w.changed : ""}`);
@@ -12982,6 +12999,7 @@ async function openSession(x, o) {
 		}
 		if (!listed) return failed(`claude --bg returned, but \`claude agents\` doesn't list session ${id} in ${dir}, so it may not have started. Open Claude Code there yourself.`);
 		o.log(`${label}: started background Claude Code session ${id} in ${dir}`);
+		o.background?.(id);
 		return {
 			opened: true,
 			problem: null
@@ -14028,12 +14046,12 @@ function processInfo(pid, platform = process.platform, now = Date.now) {
 		});
 	});
 }
-const uuidOf$1 = (session) => session.slice(session.indexOf(":") + 1);
+const uuidOf$2 = (session) => session.slice(session.indexOf(":") + 1);
 /** Whether `info`, what the OS says of the record's pid, shows the process is the one the record names. */
 function isOurs(record, info) {
 	if (!info || !record.spawned) return false;
 	const spawned = Date.parse(record.spawned);
-	const uuid = uuidOf$1(record.session);
+	const uuid = uuidOf$2(record.session);
 	return Number.isFinite(spawned) && Math.abs(info.startMs - spawned) <= 15e3 && uuid.length >= 8 && info.command.includes(uuid);
 }
 const keyOf = (r) => r.kind === "driven" ? `driven ${r.session}` : `${r.kind} ${r.pid}`;
@@ -14494,7 +14512,7 @@ const DENIED_TO_CLAUDE = "The user denied this permission request from the Isopl
 const TIMED_OUT_TO_CLAUDE = "No answer to this permission request came from the Isoplan floor in time, so it was denied.";
 const UNSUPPORTED_TO_CLAUDE = "Not supported: the Isoplan runner driving this session answers only permission requests.";
 const capOf = (st) => Math.max(1, Math.floor(st.drivenPerProject));
-const uuidOf = (session) => session.slice(session.indexOf(":") + 1);
+const uuidOf$1 = (session) => session.slice(session.indexOf(":") + 1);
 const iso = (ms) => new Date(ms).toISOString();
 /** `text` within `max`, its start kept, and whether it was cut. */
 function cutStart(text, max) {
@@ -14807,7 +14825,7 @@ function createDriver(o) {
 				detail: NO_CLAUDE
 			};
 			const d = s.record.driven;
-			const uuid = uuidOf(s.record.session);
+			const uuid = uuidOf$1(s.record.session);
 			const resume = d.transcript || await transcriptOf(o.claudeDir, s.record.folder, uuid) !== null;
 			const mode = modeFor(s);
 			const argv = [...claudeCommand(bin), ...drivenArgs({
@@ -15409,6 +15427,32 @@ function createDriver(o) {
 			id
 		}));
 	}
+	async function end(s) {
+		if (!current(s)) return false;
+		const child = s.child;
+		if (child) {
+			s.ending = "stopped";
+			killTree(child, platform);
+			await within(s.closed, KILL_WAIT_MS);
+			s.ending = null;
+			if (s.child === child) {
+				o.log(`driven session ${s.record.session}'s process ${child.pid} didn't end when closed from this computer, so it is still held`);
+				return false;
+			}
+			emit(s, () => ({
+				...driven,
+				kind: "released",
+				session: s.record.session,
+				why: "stopped"
+			}));
+		}
+		const server = s.record.driven.office;
+		forget(s);
+		await s.out;
+		if (policies.has(server)) sayHolding(server);
+		o.log(`closed driven session ${s.record.session} from this computer: it won't be opened again`);
+		return true;
+	}
 	async function handBack(s, id) {
 		if (!current(s)) return refuse(s.record.driven.office, id, "not-found");
 		const child = s.child;
@@ -15434,7 +15478,7 @@ function createDriver(o) {
 			kind: "handed-back",
 			id,
 			session,
-			command: `claude --resume ${uuidOf(session)}`,
+			command: `claude --resume ${uuidOf$1(session)}`,
 			folder: s.record.folder
 		}));
 		o.log(`handed driven session ${session} back to its person, in ${s.record.folder}`);
@@ -15465,7 +15509,7 @@ function createDriver(o) {
 			if (!kept) return refuse(server, id, "unavailable", { detail: TURN_GONE });
 			found = kept;
 		} else {
-			const file = await transcriptOf(o.claudeDir, s.record.folder, uuidOf(session));
+			const file = await transcriptOf(o.claudeDir, s.record.folder, uuidOf$1(session));
 			found = file ? await transcriptText(file).catch(() => ({
 				text: "",
 				cut: false
@@ -15619,6 +15663,11 @@ function createDriver(o) {
 			for (const server of offices.keys()) sendTo(server, m);
 		},
 		held: () => [...sessions.values()].filter((s) => s.child || s.opening).length,
+		end(session) {
+			const s = sessions.get(session);
+			if (!s) return Promise.resolve(false);
+			return new Promise((resolve) => queue(s, () => end(s).then(resolve, (err) => (resolve(false), Promise.reject(err)))));
+		},
 		takeProblem: (by) => by?.id === o.account.id ? null : NOT_YOURS_TAKE,
 		async prepareTake(server, take) {
 			const project = (await o.projectOf(take.folder).catch(() => null) ?? take.folder).toLowerCase();
@@ -17472,7 +17521,8 @@ function watchSessions(o) {
 		s.running = {
 			stop: close,
 			done,
-			hooks
+			hooks,
+			cwd
 		};
 	};
 	/** Whether a fresh copy of an office's list takes one of the repos a hold-off names (see above). */
@@ -17637,6 +17687,16 @@ function watchSessions(o) {
 			return !!holdOff && holdOff.until > Date.now();
 		},
 		reporting: () => [...seen].filter(([, s]) => s.running).map(([id]) => id),
+		sessions: () => [...seen].flatMap(([session, s]) => s.running ? [{
+			session,
+			cwd: s.running.cwd
+		}] : []),
+		async end(id, why) {
+			const running = seen.get(id)?.running;
+			if (!running) return;
+			running.stop(why);
+			await running.done;
+		},
 		look: lookOnce,
 		rehook: (id) => {
 			const s = seen.get(id);
@@ -17937,6 +17997,7 @@ function compareVersions(a, b) {
 	return 0;
 }
 const isHello = (m) => m.type === "hello" && typeof m.session === "string" && SESSION.test(m.session) && typeof m.cwd === "string" && !!m.cwd && typeof m.since === "number" && typeof m.root === "string" && typeof m.version === "string";
+const isClose = (m) => m.type === "close" && typeof m.close === "string" && m.close.length <= 300;
 const isAsk = (m) => m.type === "ask" && typeof m.session === "string" && typeof m.cwd === "string" && Array.isArray(m.servers) && m.servers.every((s) => typeof s === "string");
 async function createPipeServer(o) {
 	const platform = o.platform ?? process.platform;
@@ -17997,6 +18058,14 @@ async function createPipeServer(o) {
 		});
 		socket.end();
 	};
+	const close = async (socket, request) => {
+		const closed = o.close ? await o.close(request.close).catch((err) => (o.log(`couldn't close ${request.close}: ${String(err?.message ?? err)}`), false)) : false;
+		writeLine(socket, {
+			type: "closed",
+			closed
+		});
+		socket.end();
+	};
 	const server = net.createServer((socket) => {
 		sockets.add(socket);
 		socket.on("close", () => sockets.delete(socket)).on("error", () => {});
@@ -18016,6 +18085,7 @@ async function createPipeServer(o) {
 			said = true;
 			if (isHello(m)) return register(socket, m);
 			if (isAsk(m)) return void answer(socket, m);
+			if (isClose(m)) return void close(socket, m);
 			socket.destroy();
 		});
 	});
@@ -18171,7 +18241,8 @@ function createStatus({ file, offices, pid = process.pid, now = Date.now }) {
 			open: false,
 			since: now()
 		})),
-		pairs: []
+		pairs: [],
+		sessions: []
 	};
 	let writing = Promise.resolve();
 	const write = () => {
@@ -18211,8 +18282,75 @@ function createStatus({ file, offices, pid = process.pid, now = Date.now }) {
 			}];
 			write();
 		},
+		email: (server, email) => {
+			if (status.offices.find((o) => o.server === server)?.email === email) return;
+			change(server, (o) => {
+				if (email) o.email = email;
+				else delete o.email;
+			});
+		},
+		sessions: (list) => {
+			if (JSON.stringify(list) === JSON.stringify(status.sessions)) return;
+			status.sessions = list;
+			write();
+		},
 		written: () => writing
 	};
+}
+const uuidOf = (session) => session.slice(session.indexOf(":") + 1);
+/**
+* The sessions for the menu: each one reported now (its transcript's id and folder), and each process
+* of the runner's still running (registry.ts). A driven session or a take's first turn is headless,
+* closed by its session's id or its process's; a fork, which shares its lead's id, is listed on its own
+* and closed by its process's. A session the runner started with `claude --bg` (`background`, bare
+* ids) is headless with no close. A session in a terminal or the Claude app has no close.
+* `background` is the worker's memory alone: after the runner restarts, a `claude --bg` session it
+* started before is listed as one in a terminal or the Claude app, and one a person has since attached
+* to from a terminal is still listed as headless.
+*/
+function sessionsSeen(reported, records, background = /* @__PURE__ */ new Set()) {
+	const closeOf = (r) => r.kind === "driven" ? r.session : `pid:${r.pid}`;
+	const nameOf = (r) => r.driven?.name || path.basename(r.folder);
+	const own = new Map(records.filter((r) => r.kind !== "fork" && (r.kind === "driven" || r.pid !== null)).map((r) => [uuidOf(r.session), r]));
+	const listed = /* @__PURE__ */ new Set();
+	const seen = reported.map(({ session, cwd }) => {
+		const r = own.get(session);
+		if (!r) return {
+			name: path.basename(cwd),
+			headless: background.has(session)
+		};
+		listed.add(r);
+		return {
+			name: nameOf(r),
+			headless: true,
+			close: closeOf(r)
+		};
+	});
+	for (const r of records) if (r.pid !== null && !listed.has(r)) seen.push({
+		name: nameOf(r),
+		headless: true,
+		close: closeOf(r),
+		...r.kind === "fork" && { fork: true }
+	});
+	return seen.sort((a, b) => a.name.localeCompare(b.name) || Number(b.headless) - Number(a.headless));
+}
+/**
+* Closes a fork or a take's first turn by the `pid:<pid>` sessionsSeen gave it: ends its process and
+* waits up to `waitMs` for it to go. A take's first turn is put in `closing` (bare id) first, so its
+* failure says it was closed from the menu, and taken out again if its process is still running.
+* Answers the record of the process that ended, or null.
+*/
+async function closeProcess(close, records, o) {
+	const record = records.find((r) => r.kind !== "driven" && r.pid !== null && `pid:${r.pid}` === close);
+	if (!record) return null;
+	const pid = record.pid;
+	const id = uuidOf(record.session);
+	if (record.kind === "desktop-read") o.closing.add(id);
+	o.kill(pid);
+	for (const until = Date.now() + o.waitMs; o.alive(pid) && Date.now() < until;) await new Promise((r) => setTimeout(r, 100));
+	if (!o.alive(pid)) return record;
+	o.closing.delete(id);
+	return null;
 }
 //#endregion
 //#region src/runner/main.ts
@@ -18349,7 +18487,8 @@ async function worker() {
 			machine: os.hostname(),
 			emit: emitFor(server),
 			allowPlainWs: first.allowPlainWs,
-			legacy: !!office.legacy
+			legacy: !!office.legacy,
+			onEmail: (email) => status.email(server, email)
 		});
 		return [server, {
 			pairing,
@@ -18373,6 +18512,7 @@ async function worker() {
 	const isOff = async (folder) => await recordedState(paths, folder).catch(() => "enabled") !== "enabled";
 	const scanText = async (text) => scan(text, await loadPatterns(path.join(appDir, "secret-patterns.json"), path.join(isoplanDir, "secret-patterns.json"), log));
 	let rehook = (_session) => {};
+	let closeFor = async (_close) => false;
 	const pipe = await createPipeServer({
 		claudeDir,
 		log,
@@ -18381,7 +18521,8 @@ async function worker() {
 			...request,
 			appDir,
 			scan: scanText
-		})
+		}),
+		close: (close) => closeFor(close)
 	}).catch((err) => (log(`the runner couldn't open its pipe for the sessions' hooks modules: ${err.message}`), null));
 	const reporting = watchSessions({
 		claudeDir,
@@ -18444,6 +18585,8 @@ async function worker() {
 		log
 	});
 	await registry.restore();
+	const background = /* @__PURE__ */ new Set();
+	const closedFromMenu = /* @__PURE__ */ new Set();
 	const binary = () => claudeBinary(claudeDir, process.env, process.platform, os.homedir());
 	const answerer = createClaudeAnswerer({
 		claudeDir,
@@ -18621,6 +18764,8 @@ async function worker() {
 							prepare: (take) => driver.prepareTake(server, take)
 						},
 						track: registry.track,
+						background: (id) => background.add(id),
+						closed: (id) => closedFromMenu.delete(id),
 						names
 					});
 					if (taken.session) await recordTakenOffice(claudeDir, taken.session, server).catch(() => {});
@@ -18661,7 +18806,9 @@ async function worker() {
 			orca: takeOrca,
 			branchFolder: async (folder, branch) => branchFolder(git, folder, branch, await gitMs()),
 			orcaFolder: async (orca, folder, branch) => orcaBranchFolder(orca, git, folder, branch, await gitMs()),
-			track: registry.track
+			track: registry.track,
+			background: (id) => background.add(id),
+			closed: (id) => closedFromMenu.delete(id)
 		}),
 		setup: (m) => {
 			claude.take(m);
@@ -18669,6 +18816,35 @@ async function worker() {
 		}
 	});
 	driver = drive;
+	closeFor = async (close) => {
+		if (close.startsWith("pid:")) {
+			const record = await closeProcess(close, registry.list(), {
+				kill: killPid,
+				alive,
+				waitMs: (await settings()).drivenCloseSeconds * 1e3,
+				closing: closedFromMenu
+			});
+			if (!record) return false;
+			log(`closed the ${record.kind} process ${record.pid} of ${record.session} from the desktop app's menu`);
+			if (record.kind === "desktop-read") await reporting.end(record.session.slice(record.session.indexOf(":") + 1), CLOSED_FROM_MENU);
+			return true;
+		}
+		if (!await drive.end(close)) return false;
+		await reporting.end(close.slice(close.indexOf(":") + 1), CLOSED_FROM_MENU);
+		return true;
+	};
+	let listMs = LOCK_REFRESH_MS;
+	const listSessions = async () => {
+		try {
+			status.sessions(sessionsSeen(reporting.sessions(), registry.list(), background));
+			listMs = (await settings()).trayRefreshSeconds * 1e3;
+		} catch (err) {
+			log(`couldn't list the sessions for the desktop app's menu: ${String(err?.message ?? err)}`);
+		} finally {
+			setTimeout(() => void listSessions(), listMs).unref();
+		}
+	};
+	await listSessions();
 	const links = answerOffices({
 		offices: answering,
 		name: (office) => office.server,
@@ -18682,7 +18858,11 @@ async function worker() {
 				pairing,
 				onMessage: (message) => runner.take(message),
 				onDrive: (message) => drive.take(office.server, message),
-				onOpen: () => (status.opened(office.server), drive.linked(office.server)),
+				onOpen: () => {
+					status.opened(office.server);
+					drive.linked(office.server);
+					readPairing(pairingPath(claudeDir)).then((all) => status.email(office.server, pairingEntry(all, office.server, account.id)?.email));
+				},
 				onClose: () => (status.closed(office.server), drive.unlinked(office.server)),
 				onNotWanted: () => (status.stopped(office.server, "not-wanted"), said.notWanted()),
 				onPairingEnded: () => (status.stopped(office.server, "unpaired"), said.unpaired()),

@@ -14,7 +14,7 @@ import type { Spawn } from "./claude.js";
 import { createRegistry, registryPath, type ProcessRecord } from "./registry.js";
 import { loadPatterns, scan } from "./scan.js";
 import type { RepoFolders } from "./repo-folders.js";
-import { createDriver, drivenArgs, promptDescription, type DriveOffice, type DriverOptions, type DriveSettings, type StartElsewhere } from "./session.js";
+import { createDriver, drivenArgs, menuCloseWaitMs, promptDescription, type DriveOffice, type DriverOptions, type DriveSettings, type StartElsewhere } from "./session.js";
 
 // Each test starts real (fake) claude processes, which is slow on Windows under load.
 vi.setConfig({ testTimeout: 30000 });
@@ -645,6 +645,34 @@ test("hand back: stdin closes, the process ends by itself, the command and folde
   await t.until(() => t.of("refused").length === 1 && t.of("holding").length === 1);
   expect(t.of("refused")[0]).toMatchObject({ id: "d2", reason: "not-found" });
   expect(t.of("holding")[0]!.sessions).toEqual([]);
+});
+
+test("closed from this computer: the process and its tree end mid-turn, it is released stopped and forgotten, so it isn't opened again, and holding goes without it", async () => {
+  const t = await setUp();
+  t.drive(start("d1", { instruction: "now hang" }));
+  await t.until(() => t.fakeLog().some((l) => l.turn === "now hang"));
+  const [{ pid, grandchild }] = t.fakeLog();
+  expect(await t.driver.end(S1)).toBe(true);
+  await t.until(() => t.of("holding").length === 1);
+  expect(t.sent.slice(-3)).toEqual([
+    { type: "driven", v: 1, kind: "turn-ended", session: S1, turn: "d1", outcome: "stopped" },
+    { type: "driven", v: 1, kind: "released", session: S1, why: "stopped" },
+    { type: "driven", v: 1, kind: "holding", sessions: [] },
+  ]);
+  for (let i = 0; i < 100 && (alive(pid) || alive(grandchild)); i++) await new Promise((r) => setTimeout(r, 50));
+  expect([alive(pid), alive(grandchild)]).toEqual([false, false]);
+  await t.registry.flushed();
+  expect(t.saved().processes).toEqual([]);
+  // Nothing is left to close, or to instruct.
+  expect(await t.driver.end(S1)).toBe(false);
+  t.drive({ id: "d2", kind: "instruct", session: S1, text: "more" });
+  await t.until(() => t.of("refused").length === 1);
+  expect(t.of("refused")[0]).toMatchObject({ id: "d2", reason: "not-found" });
+});
+
+test("closed from the menu: the desktop app waits twice the longer of drivenCloseSeconds and the 10 s a driven session gets to end", () => {
+  expect(menuCloseWaitMs(2)).toBe(20000);
+  expect(menuCloseWaitMs(30)).toBe(60000);
 });
 
 test("hand back: a process that doesn't end within drivenCloseSeconds is ended, its running turn stopped", async () => {

@@ -84,6 +84,8 @@
 //   with --resume (`held reopened`). A process that writes nothing within `drivenStartSeconds` of an
 //   instruction is ended as stuck; one that ends by itself is `released crashed`, its turn `failed`.
 //   A working turn is never cut short: stopping is the person's to do.
+// - Closed from this computer (the desktop app's Close, `end`): ended as a stop ends it, released
+//   `stopped`, then forgotten here, as a hand-back forgets it, and `holding` goes again without it.
 // - At most `drivenPerProject` held sessions per project on the machine (sessions opening and takes
 //   about to open count too); a start or reopen past it is refused `cap-reached` with the limit.
 // - The runner's restart: a session whose process an earlier run left is ended by the registry
@@ -268,6 +270,12 @@ export interface Driver {
   prepareTake(server: string, take: PreparedTake): Promise<string | null>;
   /** The take has ended: with `opens` (its `taken` was handed to the link, and it wasn't dropped or given up) its session opens now; without, its place under the cap is freed. */
   taken(session: string, opens: boolean): void;
+  /**
+   * Ends the session from this machine (the desktop app's Close): its process tree ends, as a stop
+   * ends it, it is released `stopped` and forgotten here, so it isn't opened again, and its office is
+   * sent `holding` again without it. False when there is no such session, or its process didn't end.
+   */
+  end(session: string): Promise<boolean>;
   /** Ends every process at once, as the worker exits. */
   close(): void;
   /** Resolves once every request and message so far has been handled. */
@@ -315,6 +323,13 @@ const STARTS_KEPT = 200;
 const TAKES_KEPT = 20;
 // How long a process that was ended at once gets to say it has gone.
 const KILL_WAIT_MS = 10000;
+
+/**
+ * How long a Close from the desktop app's menu waits for the runner's answer: a fork or a take's first
+ * turn gets drivenCloseSeconds to end, a driven session KILL_WAIT_MS, and then what is reporting it
+ * ends. Twice the longer covers both.
+ */
+export const menuCloseWaitMs = (drivenCloseSeconds: number) => 2 * Math.max(drivenCloseSeconds * 1000, KILL_WAIT_MS);
 
 const NO_CLAUDE = "Claude Code for the terminal isn't installed on this computer, so no session can run here.";
 const NO_FOLDER = "This computer has no folder for this room: open Claude Code once in the room's repo here, then try again.";
@@ -1122,6 +1137,28 @@ export function createDriver(o: DriverOptions): Driver {
     emit(s, () => ({ ...driven, kind: "released", session: s.record.session, why: "stopped", id }));
   }
 
+  async function end(s: Session): Promise<boolean> {
+    if (!current(s)) return false;
+    const child = s.child;
+    if (child) {
+      s.ending = "stopped";
+      killTree(child, platform);
+      await within(s.closed, KILL_WAIT_MS);
+      s.ending = null;
+      if (s.child === child) {
+        o.log(`driven session ${s.record.session}'s process ${child.pid} didn't end when closed from this computer, so it is still held`);
+        return false;
+      }
+      emit(s, () => ({ ...driven, kind: "released", session: s.record.session, why: "stopped" }));
+    }
+    const server = s.record.driven.office;
+    forget(s);
+    await s.out;
+    if (policies.has(server)) sayHolding(server);
+    o.log(`closed driven session ${s.record.session} from this computer: it won't be opened again`);
+    return true;
+  }
+
   async function handBack(s: Session, id: string): Promise<void> {
     if (!current(s)) return refuse(s.record.driven.office, id, "not-found");
     const child = s.child;
@@ -1284,6 +1321,11 @@ export function createDriver(o: DriverOptions): Driver {
       for (const server of offices.keys()) sendTo(server, m);
     },
     held: () => [...sessions.values()].filter((s) => s.child || s.opening).length,
+    end(session) {
+      const s = sessions.get(session);
+      if (!s) return Promise.resolve(false);
+      return new Promise((resolve) => queue(s, () => end(s).then(resolve, (err) => (resolve(false), Promise.reject(err)))));
+    },
     takeProblem: (by) => (by?.id === o.account.id ? null : NOT_YOURS_TAKE),
     async prepareTake(server, take) {
       const project = ((await o.projectOf(take.folder).catch(() => null)) ?? take.folder).toLowerCase();
