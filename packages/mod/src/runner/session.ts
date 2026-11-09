@@ -84,14 +84,14 @@
 //   with --resume (`held reopened`). A process that writes nothing within `drivenStartSeconds` of an
 //   instruction is ended as stuck; one that ends by itself is `released crashed`, its turn `failed`.
 //   A working turn is never cut short: stopping is the person's to do.
-// - `stop` with `remove` (protocol 0.11.0): ended as a stop ends it, answered `released` `removed`,
+// - `stop` with `remove` (protocol 0.12.0): ended as a stop ends it, answered `released` `removed`,
 //   then forgotten here, so it is never opened again, `holding` goes again without it, and its
 //   reporting ends (`removed`), so its agent leaves the floor once the office supports it
 //   (isoplan-app#245; an office before that shows it disconnected).
 // - Closed from this computer (the desktop app's End session and End and remove, `end`): the same as
 //   the floor's `stop` and `stop` with `remove`, with no request to answer. End session keeps the
 //   session, released `stopped`, so the floor's next instruction opens it again.
-// - `interrupt` (protocol 0.11.0) stops the reply in progress and keeps the process: the runner
+// - `interrupt` (protocol 0.12.0) stops the reply in progress and keeps the process: the runner
 //   writes Claude Code's own interrupt, the control request the Agent SDK sends. Probed on Claude Code
 //   2.1.319 (9 Nov 2026, Windows, Haiku, a temp folder, --no-session-persistence, no settings): mid-
 //   turn, `{"type":"control_request","request_id":"<id>","request":{"subtype":"interrupt"}}` is

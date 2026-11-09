@@ -487,7 +487,7 @@ export const DrivenMessageSchema = z.discriminatedUnion("kind", [
   z.object({ ...driven, kind: z.literal("held"), session: DrivenSessionId, room: Room, why: z.enum(["started", "reopened", "restored"]), permissions: DrivePermissionsSchema }),
   // No process holds the session now: `stopped`, `handed-back`, `idle-closed` (nothing happened in it
   // for the runner's idle time) or `crashed`. `id`: the stop or hand-back request it answers, if any.
-  // `removed` (protocol 0.11.0): ended and removed, by a stop with `remove` or from the machine's own
+  // `removed` (protocol 0.12.0): ended and removed, by a stop with `remove` or from the machine's own
   // menu: the runner has forgotten it and never opens it again, so its agent can leave the floor.
   z.object({ ...driven, kind: z.literal("released"), session: DrivenSessionId, why: z.enum(["stopped", "handed-back", "idle-closed", "crashed", "removed"]), id: DriveId.optional() }),
   // The session is back in its person's hands: `command` (`claude --resume <id>`) continues it in a
@@ -840,10 +840,10 @@ export const DriveMessageSchema = z.discriminatedUnion("kind", [
   // The next instruction, `text`; this request's id names the turn it starts.
   z.object({ ...drive, kind: z.literal("instruct"), session: DrivenSessionId, text: Instruction }),
   // End the session's process, mid-turn or not; the next instruction opens it again. With `remove`
-  // (protocol 0.11.0), the runner also forgets it, never to open it again, and answers `released`
-  // `removed`. A runner from before 0.11.0 ignores `remove` and answers `released` `stopped`.
+  // (protocol 0.12.0), the runner also forgets it, never to open it again, and answers `released`
+  // `removed`. A runner from before 0.12.0 ignores `remove` and answers `released` `stopped`.
   z.object({ ...drive, kind: z.literal("stop"), session: DrivenSessionId, remove: z.literal(true).optional() }),
-  // Stop the reply in progress (protocol 0.11.0), keeping the process and the session: the turn ends
+  // Stop the reply in progress (protocol 0.12.0), keeping the process and the session: the turn ends
   // `turn-ended` `stopped`. With no turn running it does nothing, and nothing is sent back.
   z.object({ ...drive, kind: z.literal("interrupt"), session: DrivenSessionId }),
   // Take it back to my terminal: end the process cleanly and answer `handed-back` with the command.

@@ -5682,6 +5682,7 @@ const SessionFactSchema = object({
 	lights: _enum(["on", "off"]),
 	contextWindow: number().int().positive().optional(),
 	takesMessages: literal(true).optional(),
+	hooks: literal(true).optional(),
 	extra: Extra
 });
 const TokenCount = number().int().nonnegative();
@@ -5808,11 +5809,16 @@ const ReportFactSchema = object({
 /**
 * A question an agent asked its owner, open until it is answered, so the floor can show it and the
 * owner can answer it there. One of the named cases of session-derived text leaving a machine: the
-* server keeps it only for the retention period. `id` is the tool call's own id. `answerable`: the
-* session's own plugin is waiting for it, so an answer from the floor reaches it; without it (a
-* session seen only through the wake hook, a question asked before the plugin loaded) the floor
-* shows the question read-only. `withheld`: the secret scan matched its text, or the patterns
-* couldn't be read, so `questions` is only a placeholder; it is answered in the terminal.
+* server keeps it only for the retention period. `id` is the tool call's own id. An option's
+* `preview` (protocol 0.11.0 on) is the option's preview as the agent gave it, which Claude Code
+* shows when the option is focused. `answerable`: the session's own hooks module is waiting for it,
+* so an answer from the floor answers the dialog itself. `asMessage` (protocol 0.11.0 on): the
+* question can be answered from the floor even though the hooks module didn't see it asked (it was
+* asked before the plugin loaded): the plugin stops the agent's turn, which closes the dialog, and
+* submits the answers as the owner's own message. It never comes with `answerable` or `withheld`.
+* With neither, the floor shows the question read-only, and it is answered in the terminal.
+* `withheld`: the secret scan matched its text, or the patterns couldn't be read, so `questions` is
+* only a placeholder; it is answered in the terminal.
 */
 const QuestionFactSchema = object({
 	id: string().min(1),
@@ -5823,11 +5829,13 @@ const QuestionFactSchema = object({
 		header: string(),
 		options: array(object({
 			label: string().min(1),
-			description: string()
+			description: string(),
+			preview: string().optional()
 		})),
 		multiSelect: boolean()
 	})).min(1),
 	answerable: literal(true).optional(),
+	asMessage: literal(true).optional(),
 	withheld: literal(true).optional(),
 	extra: Extra
 });
@@ -6534,7 +6542,11 @@ const RequestMessageSchema = discriminatedUnion("kind", [
 		kind: literal("owner-answer"),
 		session: string().min(1),
 		question: string().min(1),
-		answers: record(string(), string())
+		answers: record(string(), string()),
+		annotations: record(string(), object({
+			notes: string().optional(),
+			preview: string().optional()
+		})).optional()
 	}),
 	object({
 		type: literal("request"),
