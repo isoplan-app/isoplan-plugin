@@ -647,6 +647,29 @@ test("hand back: stdin closes, the process ends by itself, the command and folde
   expect(t.of("holding")[0]!.sessions).toEqual([]);
 });
 
+test("closed from this computer: the process and its tree end mid-turn, it is released stopped and forgotten, so it isn't opened again, and holding goes without it", async () => {
+  const t = await setUp();
+  t.drive(start("d1", { instruction: "now hang" }));
+  await t.until(() => t.fakeLog().some((l) => l.turn === "now hang"));
+  const [{ pid, grandchild }] = t.fakeLog();
+  expect(await t.driver.end(S1)).toBe(true);
+  await t.until(() => t.of("holding").length === 1);
+  expect(t.sent.slice(-3)).toEqual([
+    { type: "driven", v: 1, kind: "turn-ended", session: S1, turn: "d1", outcome: "stopped" },
+    { type: "driven", v: 1, kind: "released", session: S1, why: "stopped" },
+    { type: "driven", v: 1, kind: "holding", sessions: [] },
+  ]);
+  for (let i = 0; i < 100 && (alive(pid) || alive(grandchild)); i++) await new Promise((r) => setTimeout(r, 50));
+  expect([alive(pid), alive(grandchild)]).toEqual([false, false]);
+  await t.registry.flushed();
+  expect(t.saved().processes).toEqual([]);
+  // Nothing is left to close, or to instruct.
+  expect(await t.driver.end(S1)).toBe(false);
+  t.drive({ id: "d2", kind: "instruct", session: S1, text: "more" });
+  await t.until(() => t.of("refused").length === 1);
+  expect(t.of("refused")[0]).toMatchObject({ id: "d2", reason: "not-found" });
+});
+
 test("hand back: a process that doesn't end within drivenCloseSeconds is ended, its running turn stopped", async () => {
   const t = await setUp({ linger: true, settings: { drivenCloseSeconds: 0.3 } });
   t.drive(start("d1", { instruction: "hang" }));

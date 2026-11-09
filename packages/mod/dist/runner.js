@@ -7257,7 +7257,7 @@ function createPairing({ file, lock, writeLock, server, account, machine, emit, 
 			result
 		};
 	});
-	const drop = ({ credential: _, token: __, tokenExpires: ___, ...rest }) => rest;
+	const drop = ({ credential: _, token: __, tokenExpires: ___, email: ____, ...rest }) => rest;
 	const show = (waiting) => {
 		if (shown === waiting.url) return;
 		shown = waiting.url;
@@ -7276,16 +7276,22 @@ function createPairing({ file, lock, writeLock, server, account, machine, emit, 
 		if (answer.status === 200 && typeof answer.body.token === "string") {
 			const token = answer.body.token;
 			const expires = Date.parse(String(answer.body.expires));
-			return update((e) => e.credential === used ? {
-				entry: {
-					...e,
-					token,
-					tokenExpires: Number.isFinite(expires) ? expires : now()
-				},
-				result: token
-			} : {
-				entry: null,
-				result: void 0
+			const email = typeof answer.body.email === "string" && answer.body.email ? answer.body.email : void 0;
+			return update((e) => {
+				if (e.credential !== used) return {
+					entry: null,
+					result: void 0
+				};
+				const { email: _, ...rest } = e;
+				return {
+					entry: {
+						...rest,
+						token,
+						tokenExpires: Number.isFinite(expires) ? expires : now(),
+						...email && { email }
+					},
+					result: token
+				};
 			});
 		}
 		if (answer.status === 401 && answer.body.code === "pairing-ended") {
@@ -7315,7 +7321,7 @@ function createPairing({ file, lock, writeLock, server, account, machine, emit, 
 	async function keep(credential) {
 		for (let i = 0; i < WRITE_TRIES; i++) try {
 			await update((e) => ({
-				entry: (({ waiting: _, ...rest }) => ({
+				entry: (({ waiting: _, email: __, ...rest }) => ({
 					...rest,
 					credential
 				}))(e),
@@ -14028,12 +14034,12 @@ function processInfo(pid, platform = process.platform, now = Date.now) {
 		});
 	});
 }
-const uuidOf$1 = (session) => session.slice(session.indexOf(":") + 1);
+const uuidOf$2 = (session) => session.slice(session.indexOf(":") + 1);
 /** Whether `info`, what the OS says of the record's pid, shows the process is the one the record names. */
 function isOurs(record, info) {
 	if (!info || !record.spawned) return false;
 	const spawned = Date.parse(record.spawned);
-	const uuid = uuidOf$1(record.session);
+	const uuid = uuidOf$2(record.session);
 	return Number.isFinite(spawned) && Math.abs(info.startMs - spawned) <= 15e3 && uuid.length >= 8 && info.command.includes(uuid);
 }
 const keyOf = (r) => r.kind === "driven" ? `driven ${r.session}` : `${r.kind} ${r.pid}`;
@@ -14494,7 +14500,7 @@ const DENIED_TO_CLAUDE = "The user denied this permission request from the Isopl
 const TIMED_OUT_TO_CLAUDE = "No answer to this permission request came from the Isoplan floor in time, so it was denied.";
 const UNSUPPORTED_TO_CLAUDE = "Not supported: the Isoplan runner driving this session answers only permission requests.";
 const capOf = (st) => Math.max(1, Math.floor(st.drivenPerProject));
-const uuidOf = (session) => session.slice(session.indexOf(":") + 1);
+const uuidOf$1 = (session) => session.slice(session.indexOf(":") + 1);
 const iso = (ms) => new Date(ms).toISOString();
 /** `text` within `max`, its start kept, and whether it was cut. */
 function cutStart(text, max) {
@@ -14807,7 +14813,7 @@ function createDriver(o) {
 				detail: NO_CLAUDE
 			};
 			const d = s.record.driven;
-			const uuid = uuidOf(s.record.session);
+			const uuid = uuidOf$1(s.record.session);
 			const resume = d.transcript || await transcriptOf(o.claudeDir, s.record.folder, uuid) !== null;
 			const mode = modeFor(s);
 			const argv = [...claudeCommand(bin), ...drivenArgs({
@@ -15409,6 +15415,32 @@ function createDriver(o) {
 			id
 		}));
 	}
+	async function end(s) {
+		if (!current(s)) return false;
+		const child = s.child;
+		if (child) {
+			s.ending = "stopped";
+			killTree(child, platform);
+			await within(s.closed, KILL_WAIT_MS);
+			s.ending = null;
+			if (s.child === child) {
+				o.log(`driven session ${s.record.session}'s process ${child.pid} didn't end when closed from this computer, so it is still held`);
+				return false;
+			}
+			emit(s, () => ({
+				...driven,
+				kind: "released",
+				session: s.record.session,
+				why: "stopped"
+			}));
+		}
+		const server = s.record.driven.office;
+		forget(s);
+		await s.out;
+		if (policies.has(server)) sayHolding(server);
+		o.log(`closed driven session ${s.record.session} from this computer: it won't be opened again`);
+		return true;
+	}
 	async function handBack(s, id) {
 		if (!current(s)) return refuse(s.record.driven.office, id, "not-found");
 		const child = s.child;
@@ -15434,7 +15466,7 @@ function createDriver(o) {
 			kind: "handed-back",
 			id,
 			session,
-			command: `claude --resume ${uuidOf(session)}`,
+			command: `claude --resume ${uuidOf$1(session)}`,
 			folder: s.record.folder
 		}));
 		o.log(`handed driven session ${session} back to its person, in ${s.record.folder}`);
@@ -15465,7 +15497,7 @@ function createDriver(o) {
 			if (!kept) return refuse(server, id, "unavailable", { detail: TURN_GONE });
 			found = kept;
 		} else {
-			const file = await transcriptOf(o.claudeDir, s.record.folder, uuidOf(session));
+			const file = await transcriptOf(o.claudeDir, s.record.folder, uuidOf$1(session));
 			found = file ? await transcriptText(file).catch(() => ({
 				text: "",
 				cut: false
@@ -15619,6 +15651,11 @@ function createDriver(o) {
 			for (const server of offices.keys()) sendTo(server, m);
 		},
 		held: () => [...sessions.values()].filter((s) => s.child || s.opening).length,
+		end(session) {
+			const s = sessions.get(session);
+			if (!s) return Promise.resolve(false);
+			return new Promise((resolve) => queue(s, () => end(s).then(resolve, (err) => (resolve(false), Promise.reject(err)))));
+		},
 		takeProblem: (by) => by?.id === o.account.id ? null : NOT_YOURS_TAKE,
 		async prepareTake(server, take) {
 			const project = (await o.projectOf(take.folder).catch(() => null) ?? take.folder).toLowerCase();
@@ -17472,7 +17509,8 @@ function watchSessions(o) {
 		s.running = {
 			stop: close,
 			done,
-			hooks
+			hooks,
+			cwd
 		};
 	};
 	/** Whether a fresh copy of an office's list takes one of the repos a hold-off names (see above). */
@@ -17637,6 +17675,16 @@ function watchSessions(o) {
 			return !!holdOff && holdOff.until > Date.now();
 		},
 		reporting: () => [...seen].filter(([, s]) => s.running).map(([id]) => id),
+		sessions: () => [...seen].flatMap(([session, s]) => s.running ? [{
+			session,
+			cwd: s.running.cwd
+		}] : []),
+		async end(id, why) {
+			const running = seen.get(id)?.running;
+			if (!running) return;
+			running.stop(why);
+			await running.done;
+		},
 		look: lookOnce,
 		rehook: (id) => {
 			const s = seen.get(id);
@@ -17937,6 +17985,7 @@ function compareVersions(a, b) {
 	return 0;
 }
 const isHello = (m) => m.type === "hello" && typeof m.session === "string" && SESSION.test(m.session) && typeof m.cwd === "string" && !!m.cwd && typeof m.since === "number" && typeof m.root === "string" && typeof m.version === "string";
+const isClose = (m) => m.type === "close" && typeof m.close === "string" && m.close.length <= 300;
 const isAsk = (m) => m.type === "ask" && typeof m.session === "string" && typeof m.cwd === "string" && Array.isArray(m.servers) && m.servers.every((s) => typeof s === "string");
 async function createPipeServer(o) {
 	const platform = o.platform ?? process.platform;
@@ -17997,6 +18046,14 @@ async function createPipeServer(o) {
 		});
 		socket.end();
 	};
+	const close = async (socket, request) => {
+		const closed = o.close ? await o.close(request.close).catch((err) => (o.log(`couldn't close ${request.close}: ${String(err?.message ?? err)}`), false)) : false;
+		writeLine(socket, {
+			type: "closed",
+			closed
+		});
+		socket.end();
+	};
 	const server = net.createServer((socket) => {
 		sockets.add(socket);
 		socket.on("close", () => sockets.delete(socket)).on("error", () => {});
@@ -18016,6 +18073,7 @@ async function createPipeServer(o) {
 			said = true;
 			if (isHello(m)) return register(socket, m);
 			if (isAsk(m)) return void answer(socket, m);
+			if (isClose(m)) return void close(socket, m);
 			socket.destroy();
 		});
 	});
@@ -18171,7 +18229,8 @@ function createStatus({ file, offices, pid = process.pid, now = Date.now }) {
 			open: false,
 			since: now()
 		})),
-		pairs: []
+		pairs: [],
+		sessions: []
 	};
 	let writing = Promise.resolve();
 	const write = () => {
@@ -18211,8 +18270,52 @@ function createStatus({ file, offices, pid = process.pid, now = Date.now }) {
 			}];
 			write();
 		},
+		email: (server, email) => {
+			if (status.offices.find((o) => o.server === server)?.email === email) return;
+			change(server, (o) => {
+				if (email) o.email = email;
+				else delete o.email;
+			});
+		},
+		sessions: (list) => {
+			if (JSON.stringify(list) === JSON.stringify(status.sessions)) return;
+			status.sessions = list;
+			write();
+		},
 		written: () => writing
 	};
+}
+const uuidOf = (session) => session.slice(session.indexOf(":") + 1);
+/**
+* The sessions for the menu: each one reported now (its transcript's id and folder), and each process
+* of the runner's still running (registry.ts). A driven session or a take's first turn is headless,
+* closed by its session's id or its process's; a fork, which shares its lead's id, is listed on its own
+* and closed by its process's. A session in a terminal or the Claude app has no close.
+*/
+function sessionsSeen(reported, records) {
+	const closeOf = (r) => r.kind === "driven" ? r.session : `pid:${r.pid}`;
+	const nameOf = (r) => r.driven?.name || path.basename(r.folder);
+	const own = new Map(records.filter((r) => r.kind !== "fork" && (r.kind === "driven" || r.pid !== null)).map((r) => [uuidOf(r.session), r]));
+	const listed = /* @__PURE__ */ new Set();
+	const seen = reported.map(({ session, cwd }) => {
+		const r = own.get(session);
+		if (!r) return {
+			name: path.basename(cwd),
+			headless: false
+		};
+		listed.add(r);
+		return {
+			name: nameOf(r),
+			headless: true,
+			close: closeOf(r)
+		};
+	});
+	for (const r of records) if (r.pid !== null && !listed.has(r)) seen.push({
+		name: nameOf(r),
+		headless: true,
+		close: closeOf(r)
+	});
+	return seen.sort((a, b) => a.name.localeCompare(b.name) || Number(b.headless) - Number(a.headless));
 }
 //#endregion
 //#region src/runner/main.ts
@@ -18373,6 +18476,7 @@ async function worker() {
 	const isOff = async (folder) => await recordedState(paths, folder).catch(() => "enabled") !== "enabled";
 	const scanText = async (text) => scan(text, await loadPatterns(path.join(appDir, "secret-patterns.json"), path.join(isoplanDir, "secret-patterns.json"), log));
 	let rehook = (_session) => {};
+	let closeFor = async (_close) => false;
 	const pipe = await createPipeServer({
 		claudeDir,
 		log,
@@ -18381,7 +18485,8 @@ async function worker() {
 			...request,
 			appDir,
 			scan: scanText
-		})
+		}),
+		close: (close) => closeFor(close)
 	}).catch((err) => (log(`the runner couldn't open its pipe for the sessions' hooks modules: ${err.message}`), null));
 	const reporting = watchSessions({
 		claudeDir,
@@ -18669,6 +18774,27 @@ async function worker() {
 		}
 	});
 	driver = drive;
+	const CLOSED = "it was closed from this computer's Isoplan menu";
+	closeFor = async (close) => {
+		if (close.startsWith("pid:")) {
+			const record = registry.list().find((r) => r.kind !== "driven" && r.pid !== null && `pid:${r.pid}` === close);
+			if (!record) return false;
+			killPid(record.pid);
+			for (const until = Date.now() + (await settings()).drivenCloseSeconds * 1e3; alive(record.pid) && Date.now() < until;) await new Promise((r) => setTimeout(r, 100));
+			if (alive(record.pid)) return false;
+			log(`closed the ${record.kind} process ${record.pid} of ${record.session} from the desktop app's menu`);
+			if (record.kind === "desktop-read") await reporting.end(record.session.slice(record.session.indexOf(":") + 1), CLOSED);
+			return true;
+		}
+		if (!await drive.end(close)) return false;
+		await reporting.end(close.slice(close.indexOf(":") + 1), CLOSED);
+		return true;
+	};
+	const listSessions = async () => {
+		status.sessions(sessionsSeen(reporting.sessions(), registry.list()));
+		setTimeout(() => void listSessions().catch(() => {}), (await settings()).trayRefreshSeconds * 1e3).unref();
+	};
+	await listSessions();
 	const links = answerOffices({
 		offices: answering,
 		name: (office) => office.server,
@@ -18682,7 +18808,11 @@ async function worker() {
 				pairing,
 				onMessage: (message) => runner.take(message),
 				onDrive: (message) => drive.take(office.server, message),
-				onOpen: () => (status.opened(office.server), drive.linked(office.server)),
+				onOpen: () => {
+					status.opened(office.server);
+					drive.linked(office.server);
+					readPairing(pairingPath(claudeDir)).then((all) => status.email(office.server, pairingEntry(all, office.server, account.id)?.email));
+				},
 				onClose: () => (status.closed(office.server), drive.unlinked(office.server)),
 				onNotWanted: () => (status.stopped(office.server, "not-wanted"), said.notWanted()),
 				onPairingEnded: () => (status.stopped(office.server, "unpaired"), said.unpaired()),

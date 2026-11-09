@@ -1,7 +1,7 @@
 import path from "node:path";
 import { expect, test } from "vitest";
 import { tempRoot } from "../data-layer/fixture.js";
-import { createStatus, linkState, readStatus, type OfficeSeen } from "./status.js";
+import { createStatus, linkState, readStatus, sessionsSeen, type OfficeSeen } from "./status.js";
 
 const A = "wss://a.example/data-layer";
 const B = "wss://b.example/data-layer";
@@ -11,7 +11,7 @@ test("status: the worker writes each office's link as it opens, closes and is st
   let clock = 1000;
   const status = createStatus({ file, offices: [{ server: A, label: "a" }, { server: B, label: "b" }], pid: 7, now: () => clock });
   await status.written();
-  expect(await readStatus(file)).toEqual({ pid: 7, offices: [{ server: A, label: "a", open: false, since: 1000 }, { server: B, label: "b", open: false, since: 1000 }], pairs: [] });
+  expect(await readStatus(file)).toEqual({ pid: 7, offices: [{ server: A, label: "a", open: false, since: 1000 }, { server: B, label: "b", open: false, since: 1000 }], pairs: [], sessions: [] });
 
   status.pair({ type: "pair", server: B, label: "b", url: "https://b.example/pair/1", expires: "2030-01-01T00:00:00Z" });
   clock = 2000;
@@ -49,4 +49,42 @@ test("status: a link down is reconnecting, then unreachable; one waiting to be p
   // An expired link to pair no longer counts.
   expect(linkState(down, pair, 100_000, 60_000)).toBe("unreachable");
   expect(linkState({ ...down, stopped: "unpaired" }, [], 10, 60_000)).toBe("not-answering");
+});
+
+test("status: each office's entry names the email of its pairing's person once known, and the sessions go in as they change", async () => {
+  const file = path.join(tempRoot(), "runner", "status.json");
+  const status = createStatus({ file, offices: [{ server: A, label: "a" }, { server: B, label: "b" }], pid: 7, now: () => 1000 });
+  status.email(A, "ada@example.com");
+  status.email(B, undefined);
+  status.sessions([{ name: "app", headless: true, close: "claude-code:1" }]);
+  await status.written();
+  const seen = await readStatus(file);
+  expect(seen?.offices.map((o) => o.email)).toEqual(["ada@example.com", undefined]);
+  expect(seen?.sessions).toEqual([{ name: "app", headless: true, close: "claude-code:1" }]);
+  status.email(A, undefined);
+  await status.written();
+  expect((await readStatus(file))?.offices[0]).not.toHaveProperty("email");
+});
+
+test("status: a driven session or a take's first turn is headless and closed by its session or process; a fork is listed on its own; a session in a terminal has no close", () => {
+  const reported = [
+    { session: "u-driven", cwd: "C:/w/app" },
+    { session: "u-terminal", cwd: "C:/w/site" },
+    { session: "u-lead", cwd: "C:/w/api" },
+  ];
+  const records = [
+    { kind: "driven" as const, pid: 11, session: "claude-code:u-driven", folder: "C:/w/app", driven: { name: "Fix login" } },
+    // Its process ended: not listed unless reported.
+    { kind: "driven" as const, pid: null, session: "claude-code:u-idle", folder: "C:/w/old" },
+    // A fork shares its lead's id, so the lead (in a terminal) isn't taken for headless.
+    { kind: "fork" as const, pid: 12, session: "claude-code:u-lead", folder: "C:/w/api" },
+    { kind: "desktop-read" as const, pid: 13, session: "claude-code:u-take", folder: "C:/w/take" },
+  ];
+  expect(sessionsSeen(reported, records)).toEqual([
+    { name: "api", headless: true, close: "pid:12" },
+    { name: "api", headless: false },
+    { name: "Fix login", headless: true, close: "claude-code:u-driven" },
+    { name: "site", headless: false },
+    { name: "take", headless: true, close: "pid:13" },
+  ]);
 });

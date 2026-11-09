@@ -7192,7 +7192,7 @@ function machineIdOf(file, writeLock, pid = process.pid, isAlive = alive) {
 */
 function keepCredential({ file, writeLock, server, account, legacy = false, pid = process.pid, isAlive = alive }, credential) {
 	return locked(file, writeLock, pid, isAlive, (all) => {
-		const { token: _, tokenExpires: __, waiting: ___, ...rest } = pairingEntry(all, server, account) ?? { server };
+		const { token: _, tokenExpires: __, waiting: ___, email: ____, ...rest } = pairingEntry(all, server, account) ?? { server };
 		return {
 			write: withPairingEntry(all, server, account, {
 				...rest,

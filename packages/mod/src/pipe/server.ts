@@ -12,6 +12,8 @@
 // token, and only for a session whose hooks module is registered now, as that hooks module's
 // session: in its folder, whatever folder the ask names. The token is the worker's alone, not the
 // session's, so it is the user's own processes that can ask, and only for a session that is open.
+// A close (the desktop app's menu) is answered only with the token too: whether the runner closed
+// the headless session it names.
 //
 // `onChange` is called with a session's id whenever its registered connection changes or goes, so
 // the runner reports it again with the hooks module it has now (src/runner/reporting.ts).
@@ -19,7 +21,7 @@
 import { timingSafeEqual } from "node:crypto";
 import net, { type Socket } from "node:net";
 import type { DataLayerLine } from "../lines.js";
-import { newToken, pipeAddress, preparePipe, proofOf, readLines, sessionEnv, writeLine, writePipeInfo, type PipeAsk, type PipeHello, type PipeHi } from "./pipe.js";
+import { newToken, pipeAddress, preparePipe, proofOf, readLines, sessionEnv, writeLine, writePipeInfo, type PipeAsk, type PipeClose, type PipeHello, type PipeHi } from "./pipe.js";
 
 /** A session's registered hooks module, as the runner reports for it. */
 export interface Hooked {
@@ -44,6 +46,8 @@ export interface PipeServerOptions {
   address?: string;
   /** Answers an ask from a session whose hooks module is registered: what the agent is told. */
   ask(request: PipeAsk): Promise<string>;
+  /** Closes the runner's headless session that status.json names by `close`: whether its process has ended. */
+  close?(close: string): Promise<boolean>;
   onChange(session: string): void;
   log(text: string): void;
 }
@@ -75,6 +79,8 @@ function compareVersions(a: string, b: string): number {
 
 const isHello = (m: Partial<PipeHello>): m is PipeHello =>
   m.type === "hello" && typeof m.session === "string" && SESSION.test(m.session) && typeof m.cwd === "string" && !!m.cwd && typeof m.since === "number" && typeof m.root === "string" && typeof m.version === "string";
+
+const isClose = (m: Partial<PipeClose>): m is PipeClose => m.type === "close" && typeof m.close === "string" && m.close.length <= 300;
 
 const isAsk = (m: Partial<PipeAsk>): m is PipeAsk => m.type === "ask" && typeof m.session === "string" && typeof m.cwd === "string" && Array.isArray(m.servers) && m.servers.every((s) => typeof s === "string");
 
@@ -129,6 +135,12 @@ export async function createPipeServer(o: PipeServerOptions): Promise<PipeServer
     socket.end();
   };
 
+  const close = async (socket: Socket, request: PipeClose) => {
+    const closed = o.close ? await o.close(request.close).catch((err: unknown) => (o.log(`couldn't close ${request.close}: ${String((err as Error)?.message ?? err)}`), false)) : false;
+    writeLine(socket, { type: "closed", closed });
+    socket.end();
+  };
+
   const server = net.createServer((socket) => {
     sockets.add(socket);
     socket.on("close", () => sockets.delete(socket)).on("error", () => {});
@@ -146,6 +158,7 @@ export async function createPipeServer(o: PipeServerOptions): Promise<PipeServer
       said = true;
       if (isHello(m)) return register(socket, m);
       if (isAsk(m)) return void answer(socket, m);
+      if (isClose(m)) return void close(socket, m);
       socket.destroy();
     });
   });

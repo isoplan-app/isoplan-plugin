@@ -27,7 +27,7 @@ let clock = Date.parse("2026-10-20T09:00:00Z");
  */
 function office() {
   const calls: string[] = [];
-  const state = { asks: [] as { callback: string; challenge: string; machine: { name: string; id: string } }[], ended: false, tokens: 0, issued: null as string | null };
+  const state = { asks: [] as { callback: string; challenge: string; machine: { name: string; id: string } }[], ended: false, tokens: 0, issued: null as string | null, email: null as string | null };
   const post: Post = async (url, body) => {
     const route = new URL(url).pathname.replace("/data-layer", "");
     calls.push(route);
@@ -45,7 +45,7 @@ function office() {
     expect(route).toBe("/token");
     if (state.ended || b.credential !== CREDENTIAL) return { status: 401, body: { code: "pairing-ended", error: "revoked" } };
     state.tokens++;
-    return { status: 200, body: { token: token(state.tokens), expires: new Date(clock + 60 * 60000).toISOString() } };
+    return { status: 200, body: { token: token(state.tokens), expires: new Date(clock + 60 * 60000).toISOString(), ...(state.email && { email: state.email }) } };
   };
   const approve = async (code = "auth-1") => {
     state.issued = code;
@@ -192,6 +192,24 @@ test("token-expired renews it; a refusal of an older token leaves the newer one 
   await pairing.refused("token-expired", token(1));
   await pairing.refused("pairing-ended", token(1));
   expect((await readPairing(file)).accounts[ADA.id]?.token).toBe(token(2));
+});
+
+test("a renewal keeps the email the office names for the pairing's person; an office that names none leaves none, and a new pairing drops it", async () => {
+  const { pairing, file, approve, state } = setUp();
+  await pairing.refused("not-paired", undefined);
+  await pairing.token();
+  await approve();
+  expect(await pairing.token()).toBe(token(1));
+  expect((await readPairing(file)).accounts[ADA.id]?.email).toBeUndefined();
+  state.email = "ada@example.com";
+  await pairing.refused("token-expired", token(1));
+  await pairing.token();
+  expect((await readPairing(file)).accounts[ADA.id]?.email).toBe("ada@example.com");
+  // Its pairing ended, the email goes with the credential.
+  state.ended = true;
+  await pairing.refused("token-expired", token(2));
+  await pairing.token();
+  expect((await readPairing(file)).accounts[ADA.id]).not.toHaveProperty("email");
 });
 
 test("each Claude account has its own entry; another server's counts as none and leaves the others alone", async () => {

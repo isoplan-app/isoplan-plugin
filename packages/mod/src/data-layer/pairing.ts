@@ -17,6 +17,8 @@
 //    saying whether it worked.
 // 4. The credential is swapped for an access token (POST <server>/token) that lasts about an hour,
 //    sent in each hello, and renewed before it runs out or when the server says `token-expired`.
+//    The renewal's answer names the email of the person the credential is paired to (`email`), kept
+//    in the entry for the desktop app's menu; it goes to no office.
 //
 // The credential is dropped only when the server says the pairing has ended (`pairing-ended`, from
 // a hello or a renewal). A `not-paired` refusal of a hello that carried a token means the server
@@ -67,6 +69,8 @@ export interface PairingEntry {
   token?: string;
   /** Milliseconds since the epoch. */
   tokenExpires?: number;
+  /** The email of the person the credential is paired to, as the server's last renewal said it; none from a server older than that. Never sent to any office. */
+  email?: string;
   /** The link waiting to be clicked, which the process holding the lock answers. */
   waiting?: { url: string; expires: number };
 }
@@ -235,7 +239,7 @@ export function keepCredential(
   credential: string,
 ): Promise<void> {
   return locked(file, writeLock, pid, isAlive, (all) => {
-    const { token: _, tokenExpires: __, waiting: ___, ...rest } = pairingEntry(all, server, account) ?? { server };
+    const { token: _, tokenExpires: __, waiting: ___, email: ____, ...rest } = pairingEntry(all, server, account) ?? { server };
     return { write: withPairingEntry(all, server, account, { ...rest, credential }, legacy), result: undefined };
   });
 }
@@ -291,7 +295,7 @@ export function createPairing({
       const { entry, result } = decide(entryOf(all));
       return { write: entry ? withEntry(all, entry) : null, result };
     });
-  const drop = ({ credential: _, token: __, tokenExpires: ___, ...rest }: PairingEntry): PairingEntry => rest;
+  const drop = ({ credential: _, token: __, tokenExpires: ___, email: ____, ...rest }: PairingEntry): PairingEntry => rest;
   const show = (waiting: { url: string; expires: number }) => {
     if (shown === waiting.url) return;
     shown = waiting.url;
@@ -306,8 +310,13 @@ export function createPairing({
     if (answer.status === 200 && typeof answer.body.token === "string") {
       const token = answer.body.token;
       const expires = Date.parse(String(answer.body.expires));
+      const email = typeof answer.body.email === "string" && answer.body.email ? answer.body.email : undefined;
       // Kept only while the file still holds the credential it was renewed with.
-      return update((e) => (e.credential === used ? { entry: { ...e, token, tokenExpires: Number.isFinite(expires) ? expires : now() }, result: token } : { entry: null, result: undefined }));
+      return update((e) => {
+        if (e.credential !== used) return { entry: null, result: undefined };
+        const { email: _, ...rest } = e;
+        return { entry: { ...rest, token, tokenExpires: Number.isFinite(expires) ? expires : now(), ...(email && { email }) }, result: token };
+      });
     }
     if (answer.status === 401 && answer.body.code === "pairing-ended") {
       emit({ type: "log", text: `the office server says this machine's pairing has ended: ${String(answer.body.error ?? "")}` });
@@ -331,7 +340,7 @@ export function createPairing({
   async function keep(credential: string): Promise<boolean> {
     for (let i = 0; i < WRITE_TRIES; i++) {
       try {
-        await update((e) => ({ entry: (({ waiting: _, ...rest }) => ({ ...rest, credential }))(e), result: undefined }));
+        await update((e) => ({ entry: (({ waiting: _, email: __, ...rest }) => ({ ...rest, credential }))(e), result: undefined }));
         return true;
       } catch (err) {
         emit({ type: "log", text: `couldn't write this machine's credential (try ${i + 1}): ${String((err as Error)?.message ?? err)}` });

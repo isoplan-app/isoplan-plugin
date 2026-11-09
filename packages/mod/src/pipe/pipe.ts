@@ -15,7 +15,8 @@
 //
 // Each side writes one JSON object per line. A hooks module's end (client.ts, `dist/pipe.js`) says
 // hello for its session and is sent that session's lines (src/lines.ts); the ask_room script
-// (src/ask/main.ts) asks once and is sent the answer.
+// (src/ask/main.ts) asks once and is sent the answer; the desktop app (packages/app) asks the runner
+// to close one of its own headless sessions (`close`, closeSession) and is told whether it did.
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import fs from "node:fs/promises";
@@ -53,6 +54,20 @@ export interface PipeAsk {
   key?: string;
   question?: string;
   ack?: string;
+}
+
+/** What the desktop app sends: close the runner's headless session that status.json names by `close`. */
+export interface PipeClose {
+  type: "close";
+  v: 1;
+  token: string;
+  close: string;
+}
+
+/** The runner's one answer to a close: whether the session's process has ended. */
+export interface PipeClosed {
+  type: "closed";
+  closed: boolean;
 }
 
 /** A client's first line: a nonce for the runner to prove it knows the token with. */
@@ -157,6 +172,27 @@ export function openPipe(info: PipeInfo, onLine: (value: unknown) => void): Prom
       resolve(socket);
     });
   });
+}
+
+/**
+ * Asks the worker whose pipe pipe.json names to close its headless session `close` (status.ts): true
+ * once its process has ended, false when the worker didn't close it, null when the pipe can't be
+ * reached or went before it answered.
+ */
+export async function closeSession(claudeDir: string, close: string, readInfo: (claudeDir: string) => Promise<PipeInfo | null> = readPipeInfo): Promise<boolean | null> {
+  const info = await readInfo(claudeDir);
+  if (!info) return null;
+  let answer: boolean | null = null;
+  const socket = await openPipe(info, (value) => {
+    const said = value as Partial<PipeClosed> | null;
+    if (said?.type === "closed" && typeof said.closed === "boolean") answer = said.closed;
+  });
+  if (!socket) return null;
+  await new Promise<void>((resolve) => {
+    socket.on("close", () => resolve());
+    writeLine(socket, { type: "close", v: 1, token: info.token, close } satisfies PipeClose);
+  });
+  return answer;
 }
 
 /** Calls `onLine` with each whole line that comes in on `socket`, parsed; a line that isn't JSON is passed over. */

@@ -11,7 +11,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import type { DataLayerLine } from "../lines.js";
 import { modDir, tempRoot } from "../data-layer/fixture.js";
 import { relay } from "./client.js";
-import { openPipe, pipeAddress, pipeInfoPath, preparePipe, proofOf, readLines, readPipeInfo, writeLine, writePipeInfo } from "./pipe.js";
+import { closeSession, openPipe, pipeAddress, pipeInfoPath, preparePipe, proofOf, readLines, readPipeInfo, writeLine, writePipeInfo } from "./pipe.js";
 import { createPipeServer, keeps, type PipeServer } from "./server.js";
 
 vi.setConfig({ testTimeout: 20000 });
@@ -265,4 +265,18 @@ test("pipe: the ask_room script asks through the runner only for a session whose
   expect(asked.at(-1)).toMatchObject({ cwd: "C:/w/repo" });
   await server.close();
   expect(await askScript(claudeDir, "Why?")).toBe("The room can't be asked right now: this session can't reach Isoplan's runner on this machine. Carry on without the answer.");
+});
+
+test("pipe: the desktop app's close reaches the runner only with the token, and is told whether the session closed; with no runner it is told nothing", async () => {
+  const claudeDir = path.join(tempRoot(), "claude");
+  const asked: string[] = [];
+  const server = await createPipeServer({ claudeDir, log: () => {}, onChange: () => {}, ask: async () => "", close: async (id) => (asked.push(id), id === "claude-code:1") });
+  closing.push(() => server.close());
+  expect(await closeSession(claudeDir, "claude-code:1")).toBe(true);
+  expect(await closeSession(claudeDir, "pid:9")).toBe(false);
+  const wrong = rawClient(server.address, { type: "close", v: 1, token: "0".repeat(64), close: "claude-code:2" });
+  await wrong.closed;
+  expect(wrong.got).toEqual([]);
+  expect(asked).toEqual(["claude-code:1", "pid:9"]);
+  expect(await closeSession(path.join(tempRoot(), "none"), "claude-code:1")).toBeNull();
 });
