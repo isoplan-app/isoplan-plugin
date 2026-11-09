@@ -573,6 +573,8 @@ test("an owner-answer request keeps the owner's notes and the chosen option's pr
   const request = { ...valid["request owner-answer"], annotations: { "Which one?": { notes: "Keep it short.", preview: "A" }, "And this?": {} } };
   expect(parseOfficeServerMessage(request)).toEqual({ ok: true, message: request });
   expect(parseOfficeServerMessage({ ...request, annotations: { "Which one?": { notes: 1 } } })).toMatchObject({ ok: false, kind: "invalid" });
+  expect(parseOfficeServerMessage({ ...valid["request owner-answer"], answers: {}, chat: true })).toMatchObject({ ok: true });
+  expect(parseOfficeServerMessage({ ...valid["request owner-answer"], chat: false })).toMatchObject({ ok: false, kind: "invalid" });
 });
 
 test("an edit, a read or a command in another repo carries that repo, and whether it is away from home", () => {
