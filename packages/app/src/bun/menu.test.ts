@@ -85,4 +85,11 @@ test("menu: sessions: only a headless one can be closed, and only a Close the st
   expect(closing("close:claude-code:gone", status)).toBeNull();
   expect(closing("close:", { ...status, sessions: [{ name: "site", headless: false }] })).toBeNull();
   expect(closing("pause", status)).toBeNull();
+  // A fork is told apart from its lead, and a claude --bg session the runner started is headless with no Close.
+  const forked = [{ name: "api", headless: true, close: "pid:12", fork: true }, { name: "api", headless: false }, { name: "bg", headless: true }];
+  expect(sessionItems(input({ status: { ...status, sessions: forked } }))).toEqual([
+    { type: "normal", label: "api (headless, a fork)", submenu: [{ type: "normal", label: "Close", action: "close:pid:12" }] },
+    { type: "normal", label: "api (in a terminal or the Claude app)", enabled: false },
+    { type: "normal", label: "bg (headless)", enabled: false },
+  ]);
 });

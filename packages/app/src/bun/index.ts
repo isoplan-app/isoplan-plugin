@@ -47,7 +47,7 @@ if (process.platform === "darwin") Utils.setDockIconVisible(false);
 
 // The tray's settings, as the runner reads its own: its copy's runner.json, then the person's. One
 // that can't be read keeps the last that could.
-type TraySettings = { trayRefreshSeconds: number; officeUnreachableSeconds: number };
+type TraySettings = { trayRefreshSeconds: number; officeUnreachableSeconds: number; drivenCloseSeconds: number };
 let good: TraySettings | null = null;
 async function settings(): Promise<TraySettings> {
   try {
@@ -111,9 +111,18 @@ async function act(action: string): Promise<void> {
 }
 
 // A headless session the menu offers to close: this machine's runner closes it, as it owns its process.
+// The runner gives a process drivenCloseSeconds to end, then ends what is reporting it: twice that covers both.
 async function close(id: string): Promise<void> {
-  const closed = await closeSession(claudeDir, id);
-  log(closed ? `closed ${id} from the menu` : closed === false ? `the runner didn't close ${id}: runner.log says why` : `couldn't ask the runner to close ${id}: its pipe can't be reached`);
+  const closed = await closeSession(claudeDir, id, (await settings()).drivenCloseSeconds * 2000);
+  log(
+    closed === true
+      ? `closed ${id} from the menu`
+      : closed === false
+        ? `the runner didn't close ${id}: runner.log says why`
+        : closed === "no answer"
+          ? `the runner didn't answer when asked to close ${id}: runner.log may say why`
+          : `couldn't ask the runner to close ${id}: its pipe can't be reached`,
+  );
 }
 
 // Only ever from a person's click on the menu item.

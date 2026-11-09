@@ -64,7 +64,7 @@ export interface PipeClose {
   close: string;
 }
 
-/** The runner's one answer to a close: whether the session's process has ended. */
+/** The runner's one answer to a close: true when it closed the session (its process ended, or it had none running), false when it didn't. */
 export interface PipeClosed {
   type: "closed";
   closed: boolean;
@@ -176,20 +176,21 @@ export function openPipe(info: PipeInfo, onLine: (value: unknown) => void): Prom
 
 /**
  * Asks the worker whose pipe pipe.json names to close its headless session `close` (status.ts): true
- * once its process has ended, false when the worker didn't close it, null when the pipe can't be
- * reached or went before it answered.
+ * once it closed it, false when the worker didn't, null when the pipe can't be reached, and "no answer"
+ * when the worker went, or didn't answer within `waitMs`, after it was asked.
  */
-export async function closeSession(claudeDir: string, close: string, readInfo: (claudeDir: string) => Promise<PipeInfo | null> = readPipeInfo): Promise<boolean | null> {
+export async function closeSession(claudeDir: string, close: string, waitMs: number, readInfo: (claudeDir: string) => Promise<PipeInfo | null> = readPipeInfo): Promise<boolean | null | "no answer"> {
   const info = await readInfo(claudeDir);
   if (!info) return null;
-  let answer: boolean | null = null;
+  let answer: boolean | "no answer" = "no answer";
   const socket = await openPipe(info, (value) => {
     const said = value as Partial<PipeClosed> | null;
     if (said?.type === "closed" && typeof said.closed === "boolean") answer = said.closed;
   });
   if (!socket) return null;
   await new Promise<void>((resolve) => {
-    socket.on("close", () => resolve());
+    const timer = setTimeout(() => (socket.destroy(), resolve()), waitMs);
+    socket.on("close", () => (clearTimeout(timer), resolve()));
     writeLine(socket, { type: "close", v: 1, token: info.token, close } satisfies PipeClose);
   });
   return answer;

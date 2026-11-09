@@ -173,6 +173,10 @@ export interface TakeOptions {
   driven?: { problem(by: { id: string } | undefined): string | null; prepare(take: PreparedTake): Promise<string | null> };
   /** Records the take into the Claude app's first turn in the process registry while it runs. */
   track?: Track;
+  /** Told the bare id of each session it started with `claude --bg`, once Claude Code lists it. */
+  background?: (session: string) => void;
+  /** Whether the session's first turn for the Claude app was closed from this computer's Isoplan menu (by its bare id). */
+  closed?: (session: string) => boolean;
   /** GitHub repos' current names, so a clone that names the handoff's repo by an old name is found too. */
   names?: RemoteNames | null;
 }
@@ -826,7 +830,10 @@ export interface OpenSession {
   words: OpenWords;
 }
 
-export type OpenOptions = Pick<TakeOptions, "run" | "claudeDir" | "claudeJson" | "platform" | "env" | "log" | "open" | "start" | "agents" | "confirmMs" | "dropped" | "track">;
+export type OpenOptions = Pick<TakeOptions, "run" | "claudeDir" | "claudeJson" | "platform" | "env" | "log" | "open" | "start" | "agents" | "confirmMs" | "dropped" | "track" | "background" | "closed">;
+
+/** Why a take's first turn ended when the desktop app's Close ended it. */
+export const CLOSED_FROM_MENU = "it was closed from this computer's Isoplan menu";
 
 const capital = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 
@@ -869,7 +876,7 @@ export async function openSession(x: OpenSession, o: OpenOptions): Promise<{ ope
       // Fixed words only: what claude printed is the model's, and stays in the local log.
       o.log(`${label}: the first turn of ${id} failed (code ${read.code}): ${read.stderr.trim().slice(-500)}`);
       const kind = typeof said?.subtype === "string" && /^[a-z_]+$/.test(said.subtype) ? ` (${said.subtype})` : "";
-      const why = read.timedOut ? `it was stopped after ${Math.round(readMs / 60000)} minutes` : read.code !== 0 ? `claude exited with code ${read.code}` : said?.is_error === true ? `it ended in an error${kind}` : `it didn't say it ran session ${id}`;
+      const why = o.closed?.(id) ? CLOSED_FROM_MENU : read.timedOut ? `it was stopped after ${Math.round(readMs / 60000)} minutes` : read.code !== 0 ? `claude exited with code ${read.code}` : said?.is_error === true ? `it ended in an error${kind}` : `it didn't say it ran session ${id}`;
       const removed = await removeTranscript(o.claudeDir, id);
       const changed = w.changed !== null && (await changedSince(o.run, dir, s.gitTimeoutSeconds * 1000));
       return failed(
@@ -904,6 +911,7 @@ export async function openSession(x: OpenSession, o: OpenOptions): Promise<{ ope
     }
     if (!listed) return failed(`claude --bg returned, but \`claude agents\` doesn't list session ${id} in ${dir}, so it may not have started. Open Claude Code there yourself.`);
     o.log(`${label}: started background Claude Code session ${id} in ${dir}`);
+    o.background?.(id);
     return { opened: true, problem: null };
   }
   const l = launch(o.platform, { folder, dir, argv, title: name, configDir: o.env.CLAUDE_CONFIG_DIR ?? null });

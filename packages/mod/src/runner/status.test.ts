@@ -66,11 +66,12 @@ test("status: each office's entry names the email of its pairing's person once k
   expect((await readStatus(file))?.offices[0]).not.toHaveProperty("email");
 });
 
-test("status: a driven session or a take's first turn is headless and closed by its session or process; a fork is listed on its own; a session in a terminal has no close", () => {
+test("status: a driven session or a take's first turn is headless and closed by its session or process; a fork is listed on its own, as a fork; a claude --bg session is headless with no close; a session in a terminal has no close", () => {
   const reported = [
     { session: "u-driven", cwd: "C:/w/app" },
     { session: "u-terminal", cwd: "C:/w/site" },
     { session: "u-lead", cwd: "C:/w/api" },
+    { session: "u-bg", cwd: "C:/w/bg" },
   ];
   const records = [
     { kind: "driven" as const, pid: 11, session: "claude-code:u-driven", folder: "C:/w/app", driven: { name: "Fix login" } },
@@ -80,9 +81,10 @@ test("status: a driven session or a take's first turn is headless and closed by 
     { kind: "fork" as const, pid: 12, session: "claude-code:u-lead", folder: "C:/w/api" },
     { kind: "desktop-read" as const, pid: 13, session: "claude-code:u-take", folder: "C:/w/take" },
   ];
-  expect(sessionsSeen(reported, records)).toEqual([
-    { name: "api", headless: true, close: "pid:12" },
+  expect(sessionsSeen(reported, records, new Set(["u-bg"]))).toEqual([
+    { name: "api", headless: true, close: "pid:12", fork: true },
     { name: "api", headless: false },
+    { name: "bg", headless: true },
     { name: "Fix login", headless: true, close: "claude-code:u-driven" },
     { name: "site", headless: false },
     { name: "take", headless: true, close: "pid:13" },

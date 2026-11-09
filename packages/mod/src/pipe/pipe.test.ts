@@ -272,11 +272,18 @@ test("pipe: the desktop app's close reaches the runner only with the token, and 
   const asked: string[] = [];
   const server = await createPipeServer({ claudeDir, log: () => {}, onChange: () => {}, ask: async () => "", close: async (id) => (asked.push(id), id === "claude-code:1") });
   closing.push(() => server.close());
-  expect(await closeSession(claudeDir, "claude-code:1")).toBe(true);
-  expect(await closeSession(claudeDir, "pid:9")).toBe(false);
+  expect(await closeSession(claudeDir, "claude-code:1", 5000)).toBe(true);
+  expect(await closeSession(claudeDir, "pid:9", 5000)).toBe(false);
   const wrong = rawClient(server.address, { type: "close", v: 1, token: "0".repeat(64), close: "claude-code:2" });
   await wrong.closed;
   expect(wrong.got).toEqual([]);
   expect(asked).toEqual(["claude-code:1", "pid:9"]);
-  expect(await closeSession(path.join(tempRoot(), "none"), "claude-code:1")).toBeNull();
+  expect(await closeSession(path.join(tempRoot(), "none"), "claude-code:1", 5000)).toBeNull();
+});
+
+test("pipe: a close the runner takes but never answers ends after the wait, as no answer", async () => {
+  const claudeDir = path.join(tempRoot(), "claude");
+  const server = await createPipeServer({ claudeDir, log: () => {}, onChange: () => {}, ask: async () => "", close: () => new Promise<boolean>(() => {}) });
+  closing.push(() => server.close());
+  expect(await closeSession(claudeDir, "claude-code:1", 300)).toBe("no answer");
 });

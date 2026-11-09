@@ -61,11 +61,12 @@ export function sessionItems({ engine, status }: MenuInput): MenuItem[] {
   if (!status) return line("Starting…");
   if (!status.sessions) return line("Not listed: Isoplan's runner needs updating");
   if (!status.sessions.length) return line("No session on this computer");
-  return status.sessions.map((s) =>
-    s.headless && s.close
-      ? { type: "normal", label: `${s.name} (headless)`, submenu: [{ type: "normal", label: "Close", action: closeAction(s.close) }] }
-      : { type: "normal", label: `${s.name} (${s.headless ? "headless" : "in a terminal or the Claude app"})`, enabled: false },
-  );
+  return status.sessions.map((s) => {
+    const where = s.fork ? "headless, a fork" : s.headless ? "headless" : "in a terminal or the Claude app";
+    return s.headless && s.close
+      ? { type: "normal", label: `${s.name} (${where})`, submenu: [{ type: "normal", label: "Close", action: closeAction(s.close) }] }
+      : { type: "normal", label: `${s.name} (${where})`, enabled: false };
+  });
 }
 
 /** The session a Close action names, if the status lists it as one that can be closed now. */

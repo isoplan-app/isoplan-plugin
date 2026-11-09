@@ -7,7 +7,7 @@ The machine's runner as a desktop app (ADR 0007, 8 Nov update): an [Electrobun](
 - `src/bun/index.ts`: the tray and the pairing window. `src/pairing/`: the window (Vue).
 - The plugin installs it (`packages/mod/src/install/app.ts`). `packages/mod/app-release.json` names the app version the plugin wants. Without one for the computer, the runner runs on node as before.
 
-Its settings are in `packages/mod/runner.json`, and a person can override them in `~/.claude/isoplan/runner.json`: `desktopApp` (false keeps the runner on node), `appDownloadSeconds`, `appRetryHours`, `appStartSeconds`, `officeUnreachableSeconds`, `trayRefreshSeconds`. It logs to `~/.claude/isoplan/logs/app.log`.
+Its settings are in `packages/mod/runner.json`, and a person can override them in `~/.claude/isoplan/runner.json`: `desktopApp` (false keeps the runner on node), `appDownloadSeconds`, `appRetryHours`, `appStartSeconds`, `officeUnreachableSeconds`, `trayRefreshSeconds`, and `drivenCloseSeconds`, which a Close from the menu waits twice for. It logs to `~/.claude/isoplan/logs/app.log`.
 
 If the app doesn't become the runner within `appStartSeconds` of being opened (blocked by Defender, SmartScreen or Gatekeeper, say), or its runner keeps crashing on its Bun, the plugin runs the runner on node instead and says why in `~/.claude/isoplan/logs/runner.log`. It doesn't open that app version again for `appRetryHours`, or until another version is installed.
 

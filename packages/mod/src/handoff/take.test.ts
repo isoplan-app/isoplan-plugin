@@ -91,9 +91,10 @@ test("taking from the floor: a worktree beside the clone on the handoff's branch
   expect(t.started).toEqual([]);
 });
 
-test("headless: the same worktree and setup, the worktree alone trusted, then claude --bg with no window, confirmed by claude agents", async () => {
+test("headless: the same worktree and setup, the worktree alone trusted, then claude --bg with no window, confirmed by claude agents, and its session told to the runner", async () => {
   const t = await handedOver("h2", { command: "node -e \"require('fs').writeFileSync('setup-ran.txt', 'yes')\"" });
-  const taken = await takeHandoff({ handoff: t.handoff, mode: "headless", session: SESSION }, t.options);
+  const background: string[] = [];
+  const taken = await takeHandoff({ handoff: t.handoff, mode: "headless", session: SESSION }, { ...t.options, background: (id) => void background.push(id) });
   expect(taken).toMatchObject({ session: `claude-code:${SESSION}`, failures: [] });
   expect(t.opened).toEqual([]);
   const dir = `${t.receiver.clone}-handoff-h2`;
@@ -103,6 +104,7 @@ test("headless: the same worktree and setup, the worktree alone trusted, then cl
   expect(h!.argv[1]).toMatch(/^Isoplan handoff h2: you are taking this work over\. Read its brief in /);
   expect(h!.argv.slice(2, 7)).toEqual(["--bg", "--session-id", SESSION, "--name", "Isoplan handoff h2"]);
   expect(h!.argv.at(-2)).toBe("--add-dir");
+  expect(background).toEqual([SESSION]);
   const config = JSON.parse(fs.readFileSync(t.claudeJson, "utf8"));
   expect(config).toEqual({ userID: "u", projects: { "/elsewhere": { hasTrustDialogAccepted: false, allowedTools: ["Read"] }, [trustKey(dir, "win32")]: { hasTrustDialogAccepted: true } } });
 });
@@ -297,6 +299,12 @@ test("into the Claude app, a first turn that fails isn't opened in the app: its 
   expect(failure!.output).not.toMatch(/Credit balance|secret model words/);
   expect(fs.existsSync(path.join(t.claudeDir, "projects", "fake", `${SESSION}.jsonl`))).toBe(false);
   expect(printing.claude.calls().some((c) => c.args.includes("--desktop"))).toBe(false);
+});
+
+test("into the Claude app, a first turn ended by the desktop app's Close tells the office that, not claude's exit code", async () => {
+  const t = await handedOver("h2g");
+  const closed = await takeHandoff({ handoff: t.handoff, mode: "desktop", session: SESSION }, { ...intoDesktop(t, { printFails: "killed" }).options, closed: (id) => id === SESSION });
+  expect(closed.failures[0]!.output).toMatch(/^Claude Code couldn't read the handoff before the Claude app took it over: it was closed from this computer's Isoplan menu; /);
 });
 
 test("into the Claude app, an app that won't open leaves the session taken, and the failure says how to open it", async () => {

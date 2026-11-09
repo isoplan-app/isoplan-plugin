@@ -41,8 +41,9 @@
 // Each office's link, and the links waiting to pair the machine, go to <claude dir>/isoplan/runner/status.json
 // as they change (status.ts), for the desktop app's menu (packages/app), with the email each office's
 // pairing belongs to and, every `trayRefreshSeconds`, the sessions it reports or runs. The menu's Close
-// of a headless one comes down the pipe: the worker ends its process tree, forgets a driven one so it
-// isn't opened again, and stops reporting it, so its links to the offices close.
+// of a headless one comes down the pipe: the worker ends its process tree, and forgets a driven one so
+// it isn't opened again. A driven session or a take's first turn stops being reported, so its links to
+// the offices close; a fork shares its lead's session, whose report goes on.
 //
 // The worker also drives its person's sessions from the floor (session.ts; its hello says `drive`),
 // for every office through one driver, and records every process it starts for that, and every
@@ -76,7 +77,7 @@ import { loadPrompts } from "./prompts.js";
 import { createRunGit, gitFailed, handoffBranch, handoffNote, HandoffGitError, prepare, pushHandoff, type Prepared } from "../handoff/git.js";
 import { focusHandoff } from "../handoff/focus.js";
 import { findOrca, orcaRunner } from "../handoff/orca.js";
-import { desktopProblem, sessionFolders, takeHandoff, type TakeSettings } from "../handoff/take.js";
+import { CLOSED_FROM_MENU, desktopProblem, sessionFolders, takeHandoff, type TakeSettings } from "../handoff/take.js";
 import { recordTakenOffice } from "../handoff/taken-office.js";
 import { answerOffices } from "./offices.js";
 import { createForkSlots, createRunner, PushFailed, type RunnerSettings } from "./runner.js";
@@ -222,6 +223,7 @@ async function worker(): Promise<number> {
         emit: emitFor(server),
         allowPlainWs: first.allowPlainWs,
         legacy: !!office.legacy,
+        onEmail: (email) => status.email(server, email),
       });
       const approved = createApproved({ server, file: approvedPath(claudeDir, server), pairing, refreshMs: first.approvedRefreshMinutes * 60000, maxAgeMs: first.approvedMaxAgeMinutes * 60000, log });
       return [server, { pairing, approved }] as const;
@@ -294,6 +296,10 @@ async function worker(): Promise<number> {
   // worker whose supervisor holds the runner's lock gets here.
   const registry = createRegistry({ file: registryPath(claudeDir), log });
   await registry.restore();
+  // The bare ids of the sessions it started with `claude --bg`, which the registry doesn't hold (no
+  // process of its own runs them), and of the takes' first turns closed from the desktop app's menu.
+  const background = new Set<string>();
+  const closedFromMenu = new Set<string>();
   const binary = () => claudeBinary(claudeDir, process.env, process.platform, os.homedir());
   const answerer = createClaudeAnswerer({
     claudeDir,
@@ -462,6 +468,8 @@ async function worker(): Promise<number> {
           orca: takeOrca,
           driven: { problem: (by) => driver!.takeProblem(by), prepare: (take) => driver!.prepareTake(server, take) },
           track: registry.track,
+          background: (id) => background.add(id),
+          closed: (id) => closedFromMenu.has(id),
           names,
         });
         if (taken.session) await recordTakenOffice(claudeDir, taken.session, server).catch(() => {});
@@ -503,6 +511,8 @@ async function worker(): Promise<number> {
         branchFolder: async (folder, branch) => branchFolder(git, folder, branch, await gitMs()),
         orcaFolder: async (orca, folder, branch) => orcaBranchFolder(orca, git, folder, branch, await gitMs()),
         track: registry.track,
+        background: (id) => background.add(id),
+        closed: (id) => closedFromMenu.has(id),
       }),
     // An install or sign-in ends with the Claude app's check again, for the next hello.
     setup: (m) => {
@@ -514,27 +524,35 @@ async function worker(): Promise<number> {
 
   // The desktop app's Close of a headless session (status.ts sessionsSeen names it): a driven one by
   // its session, a fork or a take's first turn by its process, only while the registry records it.
-  const CLOSED = "it was closed from this computer's Isoplan menu";
   closeFor = async (close) => {
     if (close.startsWith("pid:")) {
       const record = registry.list().find((r) => r.kind !== "driven" && r.pid !== null && `pid:${r.pid}` === close);
       if (!record) return false;
+      // A take's first turn that ends now says why to the office (handoff/take.ts).
+      if (record.kind === "desktop-read") closedFromMenu.add(record.session.slice(record.session.indexOf(":") + 1));
       killPid(record.pid!);
       for (const until = Date.now() + (await settings()).drivenCloseSeconds * 1000; alive(record.pid!) && Date.now() < until; ) await new Promise((r) => setTimeout(r, 100));
       if (alive(record.pid!)) return false;
       log(`closed the ${record.kind} process ${record.pid} of ${record.session} from the desktop app's menu`);
-      if (record.kind === "desktop-read") await reporting.end(record.session.slice(record.session.indexOf(":") + 1), CLOSED);
+      if (record.kind === "desktop-read") await reporting.end(record.session.slice(record.session.indexOf(":") + 1), CLOSED_FROM_MENU);
       return true;
     }
     if (!(await drive.end(close))) return false;
-    await reporting.end(close.slice(close.indexOf(":") + 1), CLOSED);
+    await reporting.end(close.slice(close.indexOf(":") + 1), CLOSED_FROM_MENU);
     return true;
   };
   // The sessions, for the desktop app's menu.
+  // Until the settings can first be read, it looks again as the app does (LOCK_REFRESH_MS).
+  let listMs = LOCK_REFRESH_MS;
   const listSessions = async () => {
-    status.sessions(sessionsSeen(reporting.sessions(), registry.list()));
-    const timer = setTimeout(() => void listSessions().catch(() => {}), (await settings()).trayRefreshSeconds * 1000);
-    timer.unref();
+    try {
+      status.sessions(sessionsSeen(reporting.sessions(), registry.list(), background));
+      listMs = (await settings()).trayRefreshSeconds * 1000;
+    } catch (err) {
+      log(`couldn't list the sessions for the desktop app's menu: ${String((err as Error)?.message ?? err)}`);
+    } finally {
+      setTimeout(() => void listSessions(), listMs).unref();
+    }
   };
   await listSessions();
 

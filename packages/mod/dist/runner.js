@@ -7242,10 +7242,11 @@ const HTML = {
 	"content-type": "text/html; charset=utf-8",
 	connection: "close"
 };
-function createPairing({ file, lock, writeLock, server, account, machine, emit, allowPlainWs = false, legacy = false, post = postJson, now = Date.now, pid = process.pid, isAlive = alive, retryMs = 200 }) {
+function createPairing({ file, lock, writeLock, server, account, machine, emit, allowPlainWs = false, legacy = false, post = postJson, now = Date.now, pid = process.pid, isAlive = alive, retryMs = 200, onEmail }) {
 	let asked = false;
 	let shown = null;
 	let unreadable = false;
+	let renewedHere = false;
 	let callback = null;
 	const entryOf = (all) => pairingEntry(all, server, account.id) ?? { server };
 	const withEntry = (all, entry) => withPairingEntry(all, server, account.id, entry, legacy);
@@ -7272,12 +7273,13 @@ function createPairing({ file, lock, writeLock, server, account, machine, emit, 
 		if (!allowPlainWs && isPlainRemote(server)) throw new Error(`${server} is plain ws:// to another machine, so this machine's credential isn't sent; use wss://, or set "allowPlainWs": true in config.json`);
 	};
 	async function renew(used) {
+		renewedHere = true;
 		const answer = await post(httpUrl(server, "/token"), { credential: used });
 		if (answer.status === 200 && typeof answer.body.token === "string") {
 			const token = answer.body.token;
 			const expires = Date.parse(String(answer.body.expires));
 			const email = typeof answer.body.email === "string" && answer.body.email ? answer.body.email : void 0;
-			return update((e) => {
+			const kept = await update((e) => {
 				if (e.credential !== used) return {
 					entry: null,
 					result: void 0
@@ -7293,6 +7295,8 @@ function createPairing({ file, lock, writeLock, server, account, machine, emit, 
 					result: token
 				};
 			});
+			if (kept) onEmail?.(email);
+			return kept;
 		}
 		if (answer.status === 401 && answer.body.code === "pairing-ended") {
 			emit({
@@ -7300,10 +7304,11 @@ function createPairing({ file, lock, writeLock, server, account, machine, emit, 
 				text: `the office server says this machine's pairing has ended: ${String(answer.body.error ?? "")}`
 			});
 			asked = true;
-			return update((e) => ({
+			if (await update((e) => ({
 				entry: e.credential === used ? drop(e) : null,
-				result: void 0
-			}));
+				result: e.credential === used
+			}))) onEmail?.(void 0);
+			return;
 		}
 		throw new Error(`the office server answered ${answer.status} when renewing this machine's token`);
 	}
@@ -7327,6 +7332,7 @@ function createPairing({ file, lock, writeLock, server, account, machine, emit, 
 				}))(e),
 				result: void 0
 			}));
+			onEmail?.(void 0);
 			return true;
 		} catch (err) {
 			emit({
@@ -7430,16 +7436,19 @@ function createPairing({ file, lock, writeLock, server, account, machine, emit, 
 	return {
 		async token() {
 			const entry = await mine();
-			if (entry.token && (entry.tokenExpires ?? 0) - 3e5 > now()) {
+			const fresh = !!entry.token && (entry.tokenExpires ?? 0) - 3e5 > now();
+			const forEmail = fresh && !!onEmail && !entry.email && !renewedHere && !!entry.credential;
+			if (fresh && !forEmail) {
 				plainRefused();
 				return entry.token;
 			}
 			if (entry.credential) {
 				plainRefused();
-				const renewed = await renew(entry.credential);
+				const renewed = await renew(entry.credential).catch((err) => forEmail ? void 0 : Promise.reject(err));
 				if (renewed) return renewed;
 				const again = await mine();
 				if (again.token && again.token !== entry.token) return again.token;
+				if (forEmail && again.token) return again.token;
 			}
 			if (!asked && !entry.waiting) return void 0;
 			if (callback) return null;
@@ -7462,23 +7471,23 @@ function createPairing({ file, lock, writeLock, server, account, machine, emit, 
 				return;
 			}
 			if (!sent) return;
-			await update((e) => {
+			if (await update((e) => {
 				if (e.token !== sent) return {
 					entry: null,
-					result: void 0
+					result: false
 				};
 				if (code === "token-expired") return {
 					entry: {
 						...e,
 						tokenExpires: 0
 					},
-					result: void 0
+					result: false
 				};
 				return {
 					entry: code === "pairing-ended" ? drop(e) : null,
-					result: void 0
+					result: code === "pairing-ended"
 				};
-			});
+			})) onEmail?.(void 0);
 		},
 		close: stopAnswering
 	};
@@ -12892,6 +12901,8 @@ async function takeHandoff(message, o) {
 		return done();
 	}
 }
+/** Why a take's first turn ended when the desktop app's Close ended it. */
+const CLOSED_FROM_MENU = "it was closed from this computer's Isoplan menu";
 const capital = (text) => text.charAt(0).toUpperCase() + text.slice(1);
 /**
 * Opens Claude Code in `dir` under `session`, with `prompt` its first message, as `mode` says (see
@@ -12943,7 +12954,7 @@ async function openSession(x, o) {
 		if (read.code !== 0 || said?.is_error === true || said?.session_id !== id) {
 			o.log(`${label}: the first turn of ${id} failed (code ${read.code}): ${read.stderr.trim().slice(-500)}`);
 			const kind = typeof said?.subtype === "string" && /^[a-z_]+$/.test(said.subtype) ? ` (${said.subtype})` : "";
-			const why = read.timedOut ? `it was stopped after ${Math.round(readMs / 6e4)} minutes` : read.code !== 0 ? `claude exited with code ${read.code}` : said?.is_error === true ? `it ended in an error${kind}` : `it didn't say it ran session ${id}`;
+			const why = o.closed?.(id) ? CLOSED_FROM_MENU : read.timedOut ? `it was stopped after ${Math.round(readMs / 6e4)} minutes` : read.code !== 0 ? `claude exited with code ${read.code}` : said?.is_error === true ? `it ended in an error${kind}` : `it didn't say it ran session ${id}`;
 			const removed = await removeTranscript(o.claudeDir, id);
 			const changed = w.changed !== null && await changedSince(o.run, dir, s.gitTimeoutSeconds * 1e3);
 			return failed(`Claude Code couldn't ${w.read} before the Claude app took it over: ${why}; this machine's runner log has more. ${removed ? "Its unfinished session was deleted." : `Its unfinished session ${id} may be left in Claude Code's session list.`} ${w.at} ${dir}.${changed ? w.changed : ""}`);
@@ -12988,6 +12999,7 @@ async function openSession(x, o) {
 		}
 		if (!listed) return failed(`claude --bg returned, but \`claude agents\` doesn't list session ${id} in ${dir}, so it may not have started. Open Claude Code there yourself.`);
 		o.log(`${label}: started background Claude Code session ${id} in ${dir}`);
+		o.background?.(id);
 		return {
 			opened: true,
 			problem: null
@@ -18290,9 +18302,10 @@ const uuidOf = (session) => session.slice(session.indexOf(":") + 1);
 * The sessions for the menu: each one reported now (its transcript's id and folder), and each process
 * of the runner's still running (registry.ts). A driven session or a take's first turn is headless,
 * closed by its session's id or its process's; a fork, which shares its lead's id, is listed on its own
-* and closed by its process's. A session in a terminal or the Claude app has no close.
+* and closed by its process's. A session the runner started with `claude --bg` (`background`, bare
+* ids) is headless with no close. A session in a terminal or the Claude app has no close.
 */
-function sessionsSeen(reported, records) {
+function sessionsSeen(reported, records, background = /* @__PURE__ */ new Set()) {
 	const closeOf = (r) => r.kind === "driven" ? r.session : `pid:${r.pid}`;
 	const nameOf = (r) => r.driven?.name || path.basename(r.folder);
 	const own = new Map(records.filter((r) => r.kind !== "fork" && (r.kind === "driven" || r.pid !== null)).map((r) => [uuidOf(r.session), r]));
@@ -18301,7 +18314,7 @@ function sessionsSeen(reported, records) {
 		const r = own.get(session);
 		if (!r) return {
 			name: path.basename(cwd),
-			headless: false
+			headless: background.has(session)
 		};
 		listed.add(r);
 		return {
@@ -18313,7 +18326,8 @@ function sessionsSeen(reported, records) {
 	for (const r of records) if (r.pid !== null && !listed.has(r)) seen.push({
 		name: nameOf(r),
 		headless: true,
-		close: closeOf(r)
+		close: closeOf(r),
+		...r.kind === "fork" && { fork: true }
 	});
 	return seen.sort((a, b) => a.name.localeCompare(b.name) || Number(b.headless) - Number(a.headless));
 }
@@ -18452,7 +18466,8 @@ async function worker() {
 			machine: os.hostname(),
 			emit: emitFor(server),
 			allowPlainWs: first.allowPlainWs,
-			legacy: !!office.legacy
+			legacy: !!office.legacy,
+			onEmail: (email) => status.email(server, email)
 		});
 		return [server, {
 			pairing,
@@ -18549,6 +18564,8 @@ async function worker() {
 		log
 	});
 	await registry.restore();
+	const background = /* @__PURE__ */ new Set();
+	const closedFromMenu = /* @__PURE__ */ new Set();
 	const binary = () => claudeBinary(claudeDir, process.env, process.platform, os.homedir());
 	const answerer = createClaudeAnswerer({
 		claudeDir,
@@ -18726,6 +18743,8 @@ async function worker() {
 							prepare: (take) => driver.prepareTake(server, take)
 						},
 						track: registry.track,
+						background: (id) => background.add(id),
+						closed: (id) => closedFromMenu.has(id),
 						names
 					});
 					if (taken.session) await recordTakenOffice(claudeDir, taken.session, server).catch(() => {});
@@ -18766,7 +18785,9 @@ async function worker() {
 			orca: takeOrca,
 			branchFolder: async (folder, branch) => branchFolder(git, folder, branch, await gitMs()),
 			orcaFolder: async (orca, folder, branch) => orcaBranchFolder(orca, git, folder, branch, await gitMs()),
-			track: registry.track
+			track: registry.track,
+			background: (id) => background.add(id),
+			closed: (id) => closedFromMenu.has(id)
 		}),
 		setup: (m) => {
 			claude.take(m);
@@ -18774,25 +18795,32 @@ async function worker() {
 		}
 	});
 	driver = drive;
-	const CLOSED = "it was closed from this computer's Isoplan menu";
 	closeFor = async (close) => {
 		if (close.startsWith("pid:")) {
 			const record = registry.list().find((r) => r.kind !== "driven" && r.pid !== null && `pid:${r.pid}` === close);
 			if (!record) return false;
+			if (record.kind === "desktop-read") closedFromMenu.add(record.session.slice(record.session.indexOf(":") + 1));
 			killPid(record.pid);
 			for (const until = Date.now() + (await settings()).drivenCloseSeconds * 1e3; alive(record.pid) && Date.now() < until;) await new Promise((r) => setTimeout(r, 100));
 			if (alive(record.pid)) return false;
 			log(`closed the ${record.kind} process ${record.pid} of ${record.session} from the desktop app's menu`);
-			if (record.kind === "desktop-read") await reporting.end(record.session.slice(record.session.indexOf(":") + 1), CLOSED);
+			if (record.kind === "desktop-read") await reporting.end(record.session.slice(record.session.indexOf(":") + 1), CLOSED_FROM_MENU);
 			return true;
 		}
 		if (!await drive.end(close)) return false;
-		await reporting.end(close.slice(close.indexOf(":") + 1), CLOSED);
+		await reporting.end(close.slice(close.indexOf(":") + 1), CLOSED_FROM_MENU);
 		return true;
 	};
+	let listMs = LOCK_REFRESH_MS;
 	const listSessions = async () => {
-		status.sessions(sessionsSeen(reporting.sessions(), registry.list()));
-		setTimeout(() => void listSessions().catch(() => {}), (await settings()).trayRefreshSeconds * 1e3).unref();
+		try {
+			status.sessions(sessionsSeen(reporting.sessions(), registry.list(), background));
+			listMs = (await settings()).trayRefreshSeconds * 1e3;
+		} catch (err) {
+			log(`couldn't list the sessions for the desktop app's menu: ${String(err?.message ?? err)}`);
+		} finally {
+			setTimeout(() => void listSessions(), listMs).unref();
+		}
 	};
 	await listSessions();
 	const links = answerOffices({

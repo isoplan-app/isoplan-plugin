@@ -18,7 +18,9 @@
 // 4. The credential is swapped for an access token (POST <server>/token) that lasts about an hour,
 //    sent in each hello, and renewed before it runs out or when the server says `token-expired`.
 //    The renewal's answer names the email of the person the credential is paired to (`email`), kept
-//    in the entry for the desktop app's menu; it goes to no office.
+//    in the entry for the desktop app's menu; it goes to no office. A process that wants it (the
+//    runner, `onEmail`) renews a token kept without one once, so a token renewed by an earlier version
+//    names it too; it is told each time a renewal keeps an email or the email goes.
 //
 // The credential is dropped only when the server says the pairing has ended (`pairing-ended`, from
 // a hello or a renewal). A `not-paired` refusal of a hello that carried a token means the server
@@ -130,6 +132,8 @@ export interface PairingOptions {
   isAlive?: (pid: number) => boolean;
   /** How long the callback waits between tries at writing the credential. */
   retryMs?: number;
+  /** Told the email of the pairing's person each time a renewal keeps one, or none when it goes; given, a token kept without one is renewed once in this process for it. */
+  onEmail?: (email: string | undefined) => void;
 }
 
 export type Refusal = "not-paired" | "pairing-ended" | "token-expired";
@@ -281,10 +285,12 @@ export function createPairing({
   pid = process.pid,
   isAlive = alive,
   retryMs = 200,
+  onEmail,
 }: PairingOptions): Pairing {
   let asked = false; // the server wants this machine paired
   let shown: string | null = null; // the link last shown
   let unreadable = false; // said once: the server couldn't read the token sent
+  let renewedHere = false; // this process has asked for a token, so for the email too
   let callback: { server: http.Server; timers: ReturnType<typeof setTimeout>[] } | null = null; // the one this process answers
 
   const entryOf = (all: PairingFile): PairingEntry => pairingEntry(all, server, account.id) ?? { server };
@@ -306,22 +312,26 @@ export function createPairing({
   };
 
   async function renew(used: string): Promise<string | undefined> {
+    renewedHere = true;
     const answer = await post(httpUrl(server, "/token"), { credential: used });
     if (answer.status === 200 && typeof answer.body.token === "string") {
       const token = answer.body.token;
       const expires = Date.parse(String(answer.body.expires));
       const email = typeof answer.body.email === "string" && answer.body.email ? answer.body.email : undefined;
       // Kept only while the file still holds the credential it was renewed with.
-      return update((e) => {
+      const kept = await update((e) => {
         if (e.credential !== used) return { entry: null, result: undefined };
         const { email: _, ...rest } = e;
         return { entry: { ...rest, token, tokenExpires: Number.isFinite(expires) ? expires : now(), ...(email && { email }) }, result: token };
       });
+      if (kept) onEmail?.(email);
+      return kept;
     }
     if (answer.status === 401 && answer.body.code === "pairing-ended") {
       emit({ type: "log", text: `the office server says this machine's pairing has ended: ${String(answer.body.error ?? "")}` });
       asked = true;
-      return update((e) => ({ entry: e.credential === used ? drop(e) : null, result: undefined }));
+      if (await update((e) => ({ entry: e.credential === used ? drop(e) : null, result: e.credential === used }))) onEmail?.(undefined);
+      return undefined;
     }
     throw new Error(`the office server answered ${answer.status} when renewing this machine's token`);
   }
@@ -341,6 +351,7 @@ export function createPairing({
     for (let i = 0; i < WRITE_TRIES; i++) {
       try {
         await update((e) => ({ entry: (({ waiting: _, email: __, ...rest }) => ({ ...rest, credential }))(e), result: undefined }));
+        onEmail?.(undefined);
         return true;
       } catch (err) {
         emit({ type: "log", text: `couldn't write this machine's credential (try ${i + 1}): ${String((err as Error)?.message ?? err)}` });
@@ -423,16 +434,21 @@ export function createPairing({
   return {
     async token() {
       const entry = await mine();
-      if (entry.token && (entry.tokenExpires ?? 0) - RENEW_EARLY_MS > now()) {
+      const fresh = !!entry.token && (entry.tokenExpires ?? 0) - RENEW_EARLY_MS > now();
+      // A token kept without the email (renewed by an earlier version, say) is renewed once here for it.
+      const forEmail = fresh && !!onEmail && !entry.email && !renewedHere && !!entry.credential;
+      if (fresh && !forEmail) {
         plainRefused();
         return entry.token;
       }
       if (entry.credential) {
         plainRefused();
-        const renewed = await renew(entry.credential);
+        // Renewed only for the email, a renewal that fails leaves the token it had.
+        const renewed = await renew(entry.credential).catch((err: unknown) => (forEmail ? undefined : Promise.reject(err)));
         if (renewed) return renewed;
         const again = await mine();
         if (again.token && again.token !== entry.token) return again.token;
+        if (forEmail && again.token) return again.token;
       }
       if (!asked && !entry.waiting) return undefined;
       if (callback) return null;
@@ -453,11 +469,12 @@ export function createPairing({
         return;
       }
       if (!sent) return;
-      await update((e) => {
-        if (e.token !== sent) return { entry: null, result: undefined };
-        if (code === "token-expired") return { entry: { ...e, tokenExpires: 0 }, result: undefined };
-        return { entry: code === "pairing-ended" ? drop(e) : null, result: undefined };
+      const dropped = await update((e) => {
+        if (e.token !== sent) return { entry: null, result: false };
+        if (code === "token-expired") return { entry: { ...e, tokenExpires: 0 }, result: false };
+        return { entry: code === "pairing-ended" ? drop(e) : null, result: code === "pairing-ended" };
       });
+      if (dropped) onEmail?.(undefined);
     },
     close: stopAnswering,
   };
