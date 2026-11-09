@@ -6419,7 +6419,8 @@ discriminatedUnion("type", [
 				"stopped",
 				"handed-back",
 				"idle-closed",
-				"crashed"
+				"crashed",
+				"removed"
 			]),
 			id: DriveId.optional()
 		}),
@@ -6738,6 +6739,12 @@ discriminatedUnion("type", [
 		object({
 			...drive,
 			kind: literal("stop"),
+			session: DrivenSessionId,
+			remove: literal(true).optional()
+		}),
+		object({
+			...drive,
+			kind: literal("interrupt"),
 			session: DrivenSessionId
 		}),
 		object({

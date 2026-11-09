@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { expect, test } from "vitest";
 import { tempRoot } from "../data-layer/fixture.js";
-import { createRegistry, infoCommand, isOurs, parsePsInfo, parseRegistry, parseWindowsInfo, processInfo, registryPath, SPAWN_MATCH_MS, type ProcessRecord } from "./registry.js";
+import { createRegistry, drivenName, infoCommand, isOurs, parsePsInfo, parseRegistry, parseWindowsInfo, processInfo, registryPath, SPAWN_MATCH_MS, type ProcessRecord } from "./registry.js";
 
 const UUID = "11111111-1111-4111-8111-111111111111";
 const AT = "2026-11-06T10:00:00.000Z";
@@ -121,4 +121,15 @@ test("identity: on this machine, a running process's start time and command line
   } finally {
     child.kill();
   }
+});
+
+test("drivenName: the name the runner wrote from a driven session's first instruction, for its data layer; a take's name, or none, gives null", async () => {
+  const file = registryPath(path.join(tempRoot(), ".claude"));
+  expect(await drivenName(file, driven.session)).toBeNull();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const take = { ...driven, session: "claude-code:take", driven: { ...driven.driven!, name: "Isoplan handoff h1" } };
+  fs.writeFileSync(file, JSON.stringify({ version: 1, processes: [{ ...driven, driven: { ...driven.driven!, name: "Fix the login page", named: true } }, take] }));
+  expect(await drivenName(file, driven.session)).toBe("Fix the login page");
+  expect(await drivenName(file, "claude-code:take")).toBeNull();
+  expect(await drivenName(file, "claude-code:other")).toBeNull();
 });

@@ -85,6 +85,7 @@ import { errorText, loadPatterns, scan } from "./scan.js";
 import { createRegistry, registryPath } from "./registry.js";
 import { branchFolder, createCheckouts, createRemoteBranches, orcaBranchFolder } from "./checkouts.js";
 import { repoFolders } from "./repo-folders.js";
+import { createNamer, type NamingSettings } from "./naming.js";
 import { createDriver, type DriveOffice, type Driver, type DriveSettings } from "./session.js";
 import { watchSessions } from "./reporting.js";
 import { managedDir, pluginDirsOf, pluginsDir } from "../install/state.js";
@@ -106,6 +107,8 @@ const CHECK_MS = 60000;
 const DESKTOP_CHECK_MS = 3600000;
 // Prepares kept for their pushes; past this the oldest goes.
 const MAX_PREPARED = 20;
+// Why a driven session's reporting ended when it was ended and removed.
+const REMOVED = "it was ended and removed";
 
 const self = fileURLToPath(import.meta.url);
 const here = path.dirname(self);
@@ -183,7 +186,7 @@ async function worker(): Promise<number> {
   });
   const io = nodeIo();
   const config = () => loadConfig(io, path.join(appDir, "config.json"), path.join(isoplanDir, "config.json"));
-  const settings = () => loadSettings<RunnerSettings & TakeSettings & DriveSettings & { claudeModel: string; repoSearchDepth: number; startAtLogin: boolean; trayRefreshSeconds: number }>(io, path.join(appDir, "runner.json"), path.join(isoplanDir, "runner.json"));
+  const settings = () => loadSettings<RunnerSettings & TakeSettings & DriveSettings & NamingSettings & { claudeModel: string; repoSearchDepth: number; startAtLogin: boolean; trayRefreshSeconds: number }>(io, path.join(appDir, "runner.json"), path.join(isoplanDir, "runner.json"));
   const first = await config();
   // Plain ws:// to another machine would send the machine's credential unencrypted.
   const offices = officesOf(first);
@@ -239,13 +242,13 @@ async function worker(): Promise<number> {
   // look, so the hooks modules of a runner started again can say hello before it. A worker that can't
   // serve the pipe still reports every session, without their hooks modules.
   let rehook = (_session: string) => {};
-  let closeFor = async (_close: string) => false;
+  let closeFor = async (_close: string, _remove: boolean) => false;
   const pipe = await createPipeServer({
     claudeDir,
     log,
     onChange: (session) => rehook(session),
     ask: (request) => askFromMachine({ ...request, appDir, scan: scanText }),
-    close: (close) => closeFor(close),
+    close: (close, remove) => closeFor(close, remove),
   }).catch((err: Error) => (log(`the runner couldn't open its pipe for the sessions' hooks modules: ${err.message}`), null));
   const reporting = watchSessions<Hooked>({
     claudeDir,
@@ -309,10 +312,13 @@ async function worker(): Promise<number> {
     config,
     track: registry.track,
   });
+  // A session started from the floor is named from its first instruction (naming.ts).
+  const namer = createNamer({ binary, settings, system: () => fs.readFile(path.join(appDir, "prompts", "naming.md"), "utf8"), log });
   let driver: Driver | null = null;
-  // However the worker ends, its forks and driven sessions end with it.
+  // However the worker ends, its forks, naming calls and driven sessions end with it.
   process.on("exit", () => {
     answerer.close();
+    namer.close();
     driver?.close();
   });
   const git = createRunGit();
@@ -496,6 +502,9 @@ async function worker(): Promise<number> {
     settings,
     scan: scanText,
     log,
+    namer,
+    // Its agent leaves the floor: reported again only once its transcript moves, which it won't.
+    removed: (session) => reporting.end(session.slice(session.indexOf(":") + 1), REMOVED),
     projectOf: async (folder) => (await homeIo.projectOf(await homeIo.resolve(folder), folder)).id,
     // A start that opens outside the floor (#85), as a take opens its session.
     elsewhere: (start, bin) =>
@@ -525,7 +534,8 @@ async function worker(): Promise<number> {
 
   // The desktop app's Close of a headless session (status.ts sessionsSeen names it): a driven one by
   // its session, a fork or a take's first turn by its process, only while the registry records it.
-  closeFor = async (close) => {
+  // A driven one is ended as the floor's stop ends it, and with `remove` removed as well (#129).
+  closeFor = async (close, remove) => {
     if (close.startsWith("pid:")) {
       // A take's first turn that ends now says why to the office (handoff/take.ts).
       const record = await closeProcess(close, registry.list(), { kill: killPid, alive, waitMs: (await settings()).drivenCloseSeconds * 1000, closing: closedFromMenu });
@@ -534,9 +544,7 @@ async function worker(): Promise<number> {
       if (record.kind === "desktop-read") await reporting.end(record.session.slice(record.session.indexOf(":") + 1), CLOSED_FROM_MENU);
       return true;
     }
-    if (!(await drive.end(close))) return false;
-    await reporting.end(close.slice(close.indexOf(":") + 1), CLOSED_FROM_MENU);
-    return true;
+    return drive.end(close, remove);
   };
   // The sessions, for the desktop app's menu.
   // Until the settings can first be read, it looks again as the app does (LOCK_REFRESH_MS).

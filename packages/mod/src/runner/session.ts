@@ -84,8 +84,25 @@
 //   with --resume (`held reopened`). A process that writes nothing within `drivenStartSeconds` of an
 //   instruction is ended as stuck; one that ends by itself is `released crashed`, its turn `failed`.
 //   A working turn is never cut short: stopping is the person's to do.
-// - Closed from this computer (the desktop app's Close, `end`): ended as a stop ends it, released
-//   `stopped`, then forgotten here, as a hand-back forgets it, and `holding` goes again without it.
+// - `stop` with `remove` (protocol 0.11.0): ended as a stop ends it, answered `released` `removed`,
+//   then forgotten here, so it is never opened again, `holding` goes again without it, and its
+//   reporting ends (`removed`), so its agent can leave the floor.
+// - Closed from this computer (the desktop app's End session and End and remove, `end`): the same as
+//   the floor's `stop` and `stop` with `remove`, with no request to answer. End session keeps the
+//   session, released `stopped`, so the floor's next instruction opens it again.
+// - `interrupt` (protocol 0.11.0) stops the reply in progress and keeps the process: the runner
+//   writes Claude Code's own interrupt, the control request the Agent SDK sends. Probed on Claude Code
+//   2.1.319 (9 Nov 2026, Windows, Haiku, a temp folder, --no-session-persistence, no settings): mid-
+//   turn, `{"type":"control_request","request_id":"<id>","request":{"subtype":"interrupt"}}` is
+//   answered at once with a `control_response` `success` naming that id, then the turn ends with a
+//   `result`, `subtype` "error_during_execution", `is_error` true; the same process takes the next
+//   instruction as usual. The turn ends `turn-ended` `stopped`, with no error said. With no turn
+//   running Claude Code answers `success` and nothing else happens; the runner sends it nothing then,
+//   and the floor nothing back.
+// - A session started from the floor gets a short name from its first instruction (naming.ts), off
+//   its turn: Claude Code writes no title for a headless session. The name passes the secret scan,
+//   then is kept in the registry as the session's `name`, `named`, which the desktop app's menu shows
+//   and its data layer gives the floor as the session's title. A take keeps the name it opened with.
 // - At most `drivenPerProject` held sessions per project on the machine (sessions opening and takes
 //   about to open count too); a start or reopen past it is refused `cap-reached` with the limit.
 // - The runner's restart: a session whose process an earlier run left is ended by the registry
@@ -244,6 +261,10 @@ export interface DriverOptions {
   projectOf: (folder: string) => Promise<string | null>;
   /** Opens a start outside the floor (start-where.ts): `opened`, and what still needs the person, or why it didn't open. */
   elsewhere?: (start: StartElsewhere, bin: string) => Promise<{ opened: boolean; problem: string | null }>;
+  /** Writes a short name for a session from its first instruction (naming.ts); without one, sessions keep their folder's name. */
+  namer?: { name(instruction: string): Promise<string | null> };
+  /** The session was ended and removed: its reporting ends, so its agent can leave the floor. */
+  removed?: (session: string) => Promise<void>;
   /** Installs Claude Code, or signs it in, for a request whose `by` is the runner's own person (claude-setup.ts). */
   setup?: (m: Extract<DriveMessage, { kind: "install-claude" | "sign-in-claude" }>) => void;
   spawn?: Spawn;
@@ -271,11 +292,13 @@ export interface Driver {
   /** The take has ended: with `opens` (its `taken` was handed to the link, and it wasn't dropped or given up) its session opens now; without, its place under the cap is freed. */
   taken(session: string, opens: boolean): void;
   /**
-   * Ends the session from this machine (the desktop app's Close): its process tree ends, as a stop
-   * ends it, it is released `stopped` and forgotten here, so it isn't opened again, and its office is
-   * sent `holding` again without it. False when there is no such session, or its process didn't end.
+   * Ends the session from this machine (the desktop app's End session, or End and remove with
+   * `remove`): its process tree ends, as a stop ends it. Kept, it is released `stopped`, and the next
+   * instruction opens it again; removed, it is released `removed`, forgotten here, so it isn't opened
+   * again, its office is sent `holding` again without it, and its reporting ends. False when there is
+   * no such session, or its process didn't end.
    */
-  end(session: string): Promise<boolean>;
+  end(session: string, remove?: boolean): Promise<boolean>;
   /** Ends every process at once, as the worker exits. */
   close(): void;
   /** Resolves once every request and message so far has been handled. */
@@ -400,6 +423,10 @@ interface Session {
   outputs: Map<string, { text: string; cut: boolean }>;
   /** Why the runner is ending the process, while it does. */
   ending: Ending | null;
+  /** The turn an interrupt was sent for, until it ends. */
+  interrupting: string | null;
+  /** Whether a name was asked for in this run. */
+  naming: boolean;
   /** What to say when the process ends by itself, when known before it does. */
   failure: string | null;
   /** From before the runner's restart: it opens again as `restored`. */
@@ -581,7 +608,7 @@ export function createDriver(o: DriverOptions): Driver {
   let closed = false;
 
   function newSession(record: ProcessRecord & { driven: DrivenFields }, fromBefore: boolean): Session {
-    return { record, child: null, opening: false, closed: Promise.resolve(), turn: null, output: "", cut: false, outputs: new Map(), ending: null, failure: null, fromBefore, stderr: "", idle: null, idleToken: 0, starting: null, prompts: new Map(), work: Promise.resolve(), out: Promise.resolve() };
+    return { record, child: null, opening: false, closed: Promise.resolve(), turn: null, output: "", cut: false, outputs: new Map(), ending: null, interrupting: null, naming: false, failure: null, fromBefore, stderr: "", idle: null, idleToken: 0, starting: null, prompts: new Map(), work: Promise.resolve(), out: Promise.resolve() };
   }
 
   const bypassAllowed = (server: string, project: string) => policies.get(server)?.has(project) === true;
@@ -896,6 +923,15 @@ export function createDriver(o: DriverOptions): Driver {
     s.turn = null;
     keepTurn(s, turn);
     const failed = e.is_error === true || e.subtype !== "success";
+    // Claude Code ends an interrupted turn as an error (see the probe above): it was stopped, not failed.
+    const interrupted = s.interrupting === turn && failed;
+    s.interrupting = null;
+    if (interrupted) {
+      emit(s, () => ({ ...driven, kind: "turn-ended", session: s.record.session, turn, outcome: "stopped" }));
+      save(s, { state: "idle", driven: { ...s.record.driven, transcript: true } });
+      armIdle(s);
+      return;
+    }
     const missing = Array.isArray(e.errors) && e.errors.some((x) => typeof x === "string" && x.includes("No conversation found"));
     const session = s.record.session;
     if (missing) s.failure = MISSING;
@@ -929,6 +965,7 @@ export function createDriver(o: DriverOptions): Driver {
     endPrompts(s);
     const turn = s.turn;
     s.turn = null;
+    s.interrupting = null;
     if (turn) keepTurn(s, turn);
     const session = s.record.session;
     const why = s.ending;
@@ -976,6 +1013,7 @@ export function createDriver(o: DriverOptions): Driver {
     if (!child) return;
     clearIdle(s);
     s.turn = turn;
+    s.interrupting = null;
     s.output = "";
     s.cut = false;
     s.failure = null;
@@ -1057,7 +1095,10 @@ export function createDriver(o: DriverOptions): Driver {
       emit(s, () => ({ ...driven, kind: "held", session: s.record.session, room, why: "started", permissions }));
       // A drive-policy that came after the check above.
       sayPromptsOn(s);
-      if (m.instruction) await beginTurn(s, m.id, m.instruction);
+      if (m.instruction) {
+        await beginTurn(s, m.id, m.instruction);
+        nameLater(s, m.instruction);
+      }
     });
   }
 
@@ -1096,6 +1137,36 @@ export function createDriver(o: DriverOptions): Driver {
       sayPromptsOn(s);
     }
     await beginTurn(s, id, text);
+    nameLater(s, text);
+  }
+
+  // A session with no name gets one from its first instruction, once, off its turn; a take keeps its own.
+  function nameLater(s: Session, instruction: string): void {
+    if (!o.namer || s.naming || s.record.driven.name) return;
+    s.naming = true;
+    const namer = o.namer;
+    const session = s.record.session;
+    void count(
+      (async () => {
+        const name = await namer.name(instruction);
+        if (!name) return;
+        const matched = await o.scan(name);
+        if (matched) return o.log(`the name written for driven session ${session} wasn't used: it matches the secret pattern "${matched}"`);
+        if (!current(s)) return;
+        save(s, { driven: { ...s.record.driven, name, named: true } });
+        o.log(`named driven session ${session}`);
+      })().catch((err: Error) => o.log(`naming driven session ${session} failed: ${err?.stack ?? String(err)}`)),
+    );
+  }
+
+  // Stops the reply in progress, keeping the process: its turn ends `stopped` once Claude Code says it has. Idle, nothing.
+  function interrupt(s: Session): void {
+    const child = s.child;
+    const turn = s.turn;
+    if (!child || !turn || s.interrupting === turn || child.stdin.writableEnded) return;
+    s.interrupting = turn;
+    child.stdin.write(JSON.stringify({ type: "control_request", request_id: `i-${randomUUID()}`, request: { subtype: "interrupt" } }) + "\n");
+    o.log(`interrupted instruction ${turn} in driven session ${s.record.session}`);
   }
 
   // A session asked to skip permission prompts that opened with them on says why.
@@ -1120,42 +1191,49 @@ export function createDriver(o: DriverOptions): Driver {
     emit(s, () => ({ ...driven, kind: "released", session: s.record.session, why: "stopped" }));
   }
 
-  async function stop(s: Session, id: string): Promise<void> {
-    if (!current(s)) return refuse(s.record.driven.office, id, "not-found");
+  // Ends the session's process tree at once, if it has one: false when it is still running after KILL_WAIT_MS.
+  async function endProcess(s: Session, how: string): Promise<boolean> {
     const child = s.child;
-    if (child) {
-      s.ending = "stopped";
-      killTree(child, platform);
-      await within(s.closed, KILL_WAIT_MS);
-      s.ending = null;
-      // Still running: the session stays held, so nothing says it was let go.
-      if (s.child === child) {
-        o.log(`driven session ${s.record.session}'s process ${child.pid} didn't end when stopped, so it is still held`);
-        return refuse(s.record.driven.office, id, "unavailable", { detail: NOT_CLOSED });
-      }
-    }
-    emit(s, () => ({ ...driven, kind: "released", session: s.record.session, why: "stopped", id }));
+    if (!child) return true;
+    s.ending = "stopped";
+    killTree(child, platform);
+    await within(s.closed, KILL_WAIT_MS);
+    s.ending = null;
+    if (s.child !== child) return true;
+    // Still running: the session stays held, so nothing says it was let go.
+    o.log(`driven session ${s.record.session}'s process ${child.pid} didn't end when ${how}, so it is still held`);
+    return false;
   }
 
-  async function end(s: Session): Promise<boolean> {
-    if (!current(s)) return false;
-    const child = s.child;
-    if (child) {
-      s.ending = "stopped";
-      killTree(child, platform);
-      await within(s.closed, KILL_WAIT_MS);
-      s.ending = null;
-      if (s.child === child) {
-        o.log(`driven session ${s.record.session}'s process ${child.pid} didn't end when closed from this computer, so it is still held`);
-        return false;
-      }
-      emit(s, () => ({ ...driven, kind: "released", session: s.record.session, why: "stopped" }));
-    }
+  // Released `removed` and forgotten, so it is never opened again; holding goes without it, and its reporting ends.
+  async function remove(s: Session, id?: string): Promise<void> {
+    const session = s.record.session;
     const server = s.record.driven.office;
+    emit(s, () => ({ ...driven, kind: "released", session, why: "removed", ...(id ? { id } : {}) }));
     forget(s);
     await s.out;
     if (policies.has(server)) sayHolding(server);
-    o.log(`closed driven session ${s.record.session} from this computer: it won't be opened again`);
+    await o.removed?.(session).catch((err: Error) => o.log(`couldn't stop reporting ${session}: ${err?.message ?? String(err)}`));
+    o.log(`ended and removed driven session ${session}: it won't be opened again`);
+  }
+
+  async function stop(s: Session, id: string, removing: boolean): Promise<void> {
+    if (!current(s)) return refuse(s.record.driven.office, id, "not-found");
+    if (!(await endProcess(s, "stopped"))) return refuse(s.record.driven.office, id, "unavailable", { detail: NOT_CLOSED });
+    if (removing) return remove(s, id);
+    emit(s, () => ({ ...driven, kind: "released", session: s.record.session, why: "stopped", id }));
+  }
+
+  async function end(s: Session, removing: boolean): Promise<boolean> {
+    if (!current(s)) return false;
+    const had = !!s.child;
+    if (!(await endProcess(s, "closed from this computer"))) return false;
+    if (removing) {
+      await remove(s);
+      return true;
+    }
+    if (had) emit(s, () => ({ ...driven, kind: "released", session: s.record.session, why: "stopped" }));
+    o.log(`ended driven session ${s.record.session} from this computer: the next instruction opens it again`);
     return true;
   }
 
@@ -1304,7 +1382,8 @@ export function createDriver(o: DriverOptions): Driver {
       if (!s || s.record.driven.office !== server) return refuse(server, m.id, "not-found");
       if (s.record.driven.owner !== m.by.id) return refuse(server, m.id, "not-owner");
       if (m.kind === "instruct") queue(s, () => instruct(s, m.id, m.text));
-      else if (m.kind === "stop") queue(s, () => stop(s, m.id));
+      else if (m.kind === "stop") queue(s, () => stop(s, m.id, m.remove === true));
+      else if (m.kind === "interrupt") interrupt(s);
       else if (m.kind === "hand-back") queue(s, () => handBack(s, m.id));
       else if (m.kind === "output") void output(s, m.id, m.turn).catch((err: Error) => o.log(`output ${m.id} failed: ${err.message}`));
       else if (m.kind === "release") release(s, m.id, m.withheld);
@@ -1321,10 +1400,10 @@ export function createDriver(o: DriverOptions): Driver {
       for (const server of offices.keys()) sendTo(server, m);
     },
     held: () => [...sessions.values()].filter((s) => s.child || s.opening).length,
-    end(session) {
+    end(session, removing = false) {
       const s = sessions.get(session);
       if (!s) return Promise.resolve(false);
-      return new Promise((resolve) => queue(s, () => end(s).then(resolve, (err) => (resolve(false), Promise.reject(err)))));
+      return new Promise((resolve) => queue(s, () => end(s, removing).then(resolve, (err) => (resolve(false), Promise.reject(err)))));
     },
     takeProblem: (by) => (by?.id === o.account.id ? null : NOT_YOURS_TAKE),
     async prepareTake(server, take) {
