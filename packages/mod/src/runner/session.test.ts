@@ -35,6 +35,8 @@ const SETTINGS: DriveSettings = { drivenIdleMinutes: 30, drivenPerProject: 4, dr
 // found it with --permission-prompts host --permission-prompt-tool stdio, waits for its answer on
 // stdin (logged as `answered`), and runs it or not; with "cancel" Claude Code cancels the prompt itself.
 // "ask after" raises one only once its turn has ended, and "elicit" a request that isn't a prompt.
+// Claude Code's interrupt is answered as the probe in session.ts found it: `success`, then, with a
+// "hang" turn running, that turn's end as an error; idle, nothing more.
 const FAKE = `
 import fs from "node:fs";
 import path from "node:path";
@@ -54,6 +56,7 @@ const finish = (reply) => {
 };
 const pending = new Map();
 let asked = 0;
+let hanging = false;
 let buf = "";
 process.stdin.setEncoding("utf8").on("data", (d) => {
   buf += d;
@@ -61,6 +64,13 @@ process.stdin.setEncoding("utf8").on("data", (d) => {
   while ((i = buf.indexOf("\\n")) >= 0) {
     const line = JSON.parse(buf.slice(0, i));
     buf = buf.slice(i + 1);
+    if (line.type === "control_request" && line.request.subtype === "interrupt") {
+      log({ interrupt: hanging });
+      out({ type: "control_response", response: { subtype: "success", request_id: line.request_id, response: { still_queued: [] } } });
+      if (hanging) out({ type: "result", subtype: "error_during_execution", is_error: true, num_turns: 2, session_id: id, errors: ["[ede_diagnostic] result_type=user"] });
+      hanging = false;
+      continue;
+    }
     if (line.type === "control_response") {
       log({ answered: line.response });
       const go = pending.get(line.response.request_id);
@@ -87,7 +97,7 @@ process.stdin.setEncoding("utf8").on("data", (d) => {
       out({ type: "result", subtype: "success", is_error: false, num_turns: 0, result: said, local_command: text.slice(1), session_id: id });
       continue;
     }
-    if (text.includes("hang")) continue;
+    if (text.includes("hang")) { hanging = true; continue; }
     if (text.includes("crash")) { setTimeout(() => process.exit(3), 20); continue; }
     const secretName = "mcp__keys-" + process.env.FAKE_KEY;
     if (text.includes("elicit")) {
@@ -163,7 +173,7 @@ type Of<K extends Kind> = Extract<DrivenMessage, { kind: K }>;
 
 // `policy`: the drive-policy the office's server sends first on the connection, as a server that
 // drives sessions does; null for none yet. What it sends with it (holding) isn't kept in `sent`.
-async function setUp({ settings = {}, linger = false, records = [] as ProcessRecord[], spawn, policy: first = [] as string[] | null, setup, elsewhere }: { settings?: Partial<DriveSettings>; linger?: boolean; records?: ProcessRecord[]; spawn?: Spawn; policy?: string[] | null; setup?: DriverOptions["setup"]; elsewhere?: DriverOptions["elsewhere"] } = {}) {
+async function setUp({ settings = {}, linger = false, records = [] as ProcessRecord[], spawn, policy: first = [] as string[] | null, setup, elsewhere, namer }: { settings?: Partial<DriveSettings>; linger?: boolean; records?: ProcessRecord[]; spawn?: Spawn; policy?: string[] | null; setup?: DriverOptions["setup"]; elsewhere?: DriverOptions["elsewhere"]; namer?: DriverOptions["namer"] } = {}) {
   const root = tempRoot();
   const claudeDir = path.join(root, ".claude");
   const state = path.join(root, "state");
@@ -195,6 +205,8 @@ async function setUp({ settings = {}, linger = false, records = [] as ProcessRec
   const link = { up: true };
   const ids = [...UUIDS];
   const current = { ...SETTINGS, ...settings };
+  // The sessions whose reporting was ended as they were removed.
+  const removed: string[] = [];
   const driver = createDriver({
     claudeDir,
     account: { id: ADA.id },
@@ -224,6 +236,8 @@ async function setUp({ settings = {}, linger = false, records = [] as ProcessRec
     ...(spawn ? { spawn } : {}),
     ...(setup ? { setup } : {}),
     ...(elsewhere ? { elsewhere } : {}),
+    ...(namer ? { namer } : {}),
+    removed: async (session) => void removed.push(session),
   });
   const fakeLog = () => (fs.existsSync(path.join(state, "log.jsonl")) ? fs.readFileSync(path.join(state, "log.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l)) : []);
   // Every process the fake started ends with the test.
@@ -246,7 +260,7 @@ async function setUp({ settings = {}, linger = false, records = [] as ProcessRec
   driver.linked(SERVER);
   if (first) policy(first);
   sent.splice(0);
-  return { root, claudeDir, state, bin, folder, file, driver, registry, sent, folders, all, listing, dropped, link, logs, current, drive, policy, until, of, fakeLog, saved };
+  return { root, claudeDir, state, bin, folder, file, driver, registry, sent, folders, all, listing, dropped, link, logs, current, removed, drive, policy, until, of, fakeLog, saved };
 }
 
 const start = (id: string, extra: Record<string, unknown> = {}) => ({ id, kind: "start", room: "room-1", project: PROJECT, roomSessions: ["claude-code:gone", "claude-code:room-1"], permissions: "auto", ...extra });
@@ -647,27 +661,112 @@ test("hand back: stdin closes, the process ends by itself, the command and folde
   expect(t.of("holding")[0]!.sessions).toEqual([]);
 });
 
-test("closed from this computer: the process and its tree end mid-turn, it is released stopped and forgotten, so it isn't opened again, and holding goes without it", async () => {
+test("interrupt: mid-turn the reply stops, the turn ends stopped with no error, and the same process takes the next instruction; idle it does nothing; someone else's is not-owner", async () => {
+  const t = await setUp();
+  t.drive(start("d1", { instruction: "first" }));
+  await t.until(() => t.of("turn-ended").length === 1);
+  // Idle: nothing goes to Claude Code, and nothing comes back.
+  const before = t.sent.length;
+  t.drive({ id: "x1", kind: "interrupt", session: S1 });
+  await t.driver.settled();
+  expect(t.sent.length).toBe(before);
+  expect(t.fakeLog().some((l) => "interrupt" in l)).toBe(false);
+  t.drive({ id: "d2", kind: "instruct", session: S1, text: "now hang" });
+  await t.until(() => t.fakeLog().some((l) => l.turn === "now hang"));
+  t.driver.take(SERVER, { type: "drive", v: PROTOCOL_VERSION, by: { id: "claude:sam", name: "Sam" }, kind: "interrupt", id: "x2", session: S1 });
+  await t.until(() => t.of("refused").length === 1);
+  expect(t.of("refused")[0]).toMatchObject({ id: "x2", reason: "not-owner" });
+  t.drive({ id: "x3", kind: "interrupt", session: S1 });
+  await t.until(() => t.of("turn-ended").length === 2);
+  expect(t.of("turn-ended")[1]).toEqual({ type: "driven", v: 1, kind: "turn-ended", session: S1, turn: "d2", outcome: "stopped" });
+  expect(t.of("error")).toEqual([]);
+  expect(t.of("released")).toEqual([]);
+  t.drive({ id: "d3", kind: "instruct", session: S1, text: "again" });
+  await t.until(() => t.of("turn-ended").length === 3);
+  expect(t.of("turn-ended")[2]).toMatchObject({ turn: "d3", outcome: "done" });
+  expect(t.fakeLog().filter((l) => l.argv)).toHaveLength(1);
+  expect(t.fakeLog().filter((l) => "interrupt" in l)).toEqual([{ interrupt: true }]);
+});
+
+test("stop with remove: the process and its tree end mid-turn, it is released removed and forgotten, holding goes without it, its reporting ends, and it isn't opened again", async () => {
+  const t = await setUp();
+  t.drive(start("d1", { instruction: "now hang" }));
+  await t.until(() => t.fakeLog().some((l) => l.turn === "now hang"));
+  const [{ pid, grandchild }] = t.fakeLog();
+  t.drive({ id: "d2", kind: "stop", session: S1, remove: true });
+  await t.until(() => t.of("holding").length === 1);
+  expect(t.sent.slice(-3)).toEqual([
+    { type: "driven", v: 1, kind: "turn-ended", session: S1, turn: "d1", outcome: "stopped" },
+    { type: "driven", v: 1, kind: "released", session: S1, why: "removed", id: "d2" },
+    { type: "driven", v: 1, kind: "holding", sessions: [] },
+  ]);
+  expect(t.removed).toEqual([S1]);
+  for (let i = 0; i < 100 && (alive(pid) || alive(grandchild)); i++) await new Promise((r) => setTimeout(r, 50));
+  expect([alive(pid), alive(grandchild)]).toEqual([false, false]);
+  await t.registry.flushed();
+  expect(t.saved().processes).toEqual([]);
+  t.drive({ id: "d3", kind: "instruct", session: S1, text: "more" });
+  await t.until(() => t.of("refused").length === 1);
+  expect(t.of("refused")[0]).toMatchObject({ id: "d3", reason: "not-found" });
+});
+
+test("closed from this computer: End session ends the process mid-turn and is released stopped, kept for the next instruction to open again; End and remove is released removed and forgotten", async () => {
   const t = await setUp();
   t.drive(start("d1", { instruction: "now hang" }));
   await t.until(() => t.fakeLog().some((l) => l.turn === "now hang"));
   const [{ pid, grandchild }] = t.fakeLog();
   expect(await t.driver.end(S1)).toBe(true);
-  await t.until(() => t.of("holding").length === 1);
-  expect(t.sent.slice(-3)).toEqual([
+  await t.until(() => t.of("released").length === 1);
+  expect(t.sent.slice(-2)).toEqual([
     { type: "driven", v: 1, kind: "turn-ended", session: S1, turn: "d1", outcome: "stopped" },
     { type: "driven", v: 1, kind: "released", session: S1, why: "stopped" },
-    { type: "driven", v: 1, kind: "holding", sessions: [] },
   ]);
   for (let i = 0; i < 100 && (alive(pid) || alive(grandchild)); i++) await new Promise((r) => setTimeout(r, 50));
   expect([alive(pid), alive(grandchild)]).toEqual([false, false]);
+  expect(t.removed).toEqual([]);
+  await t.registry.flushed();
+  expect(t.saved().processes).toMatchObject([{ session: S1, pid: null, state: "closed" }]);
+  // Kept: the floor's next instruction opens it again.
+  t.drive({ id: "d2", kind: "instruct", session: S1, text: "more" });
+  await t.until(() => t.of("turn-ended").length === 2);
+  expect(t.of("held").at(-1)).toMatchObject({ why: "reopened" });
+  expect(t.fakeLog().filter((l) => l.argv).at(-1).argv).toContain("--resume");
+  expect(await t.driver.end(S1, true)).toBe(true);
+  await t.until(() => t.of("holding").length === 1);
+  expect(t.sent.slice(-2)).toEqual([
+    { type: "driven", v: 1, kind: "released", session: S1, why: "removed" },
+    { type: "driven", v: 1, kind: "holding", sessions: [] },
+  ]);
+  expect(t.removed).toEqual([S1]);
   await t.registry.flushed();
   expect(t.saved().processes).toEqual([]);
   // Nothing is left to close, or to instruct.
   expect(await t.driver.end(S1)).toBe(false);
-  t.drive({ id: "d2", kind: "instruct", session: S1, text: "more" });
+  t.drive({ id: "d3", kind: "instruct", session: S1, text: "more" });
   await t.until(() => t.of("refused").length === 1);
-  expect(t.of("refused")[0]).toMatchObject({ id: "d2", reason: "not-found" });
+  expect(t.of("refused")[0]).toMatchObject({ id: "d3", reason: "not-found" });
+});
+
+test("name: a session started from the floor is named once from its first instruction, after its turn began, and the registry keeps it as named; a name that may hold a secret isn't kept", async () => {
+  const asked: { text: string; began: boolean }[] = [];
+  let t!: Awaited<ReturnType<typeof setUp>>;
+  const names = ["Fix the login page", `Key ${AWS_KEY}`];
+  t = await setUp({ namer: { name: async (text) => (asked.push({ text, began: t.registry.list().some((r) => r.state === "working") }), names.shift() ?? null) } });
+  t.drive(start("d1", { instruction: "first" }));
+  await t.until(() => t.of("turn-ended").length === 1);
+  t.drive({ id: "d2", kind: "instruct", session: S1, text: "second" });
+  await t.until(() => t.of("turn-ended").length === 2);
+  await t.registry.flushed();
+  expect(asked).toEqual([{ text: "first", began: true }]);
+  expect(t.saved().processes[0]!.driven).toMatchObject({ name: "Fix the login page", named: true });
+  // A second session, whose name matches a secret pattern, keeps none.
+  t.drive({ id: "d3", kind: "start", folder: undefined, room: "room-1", project: PROJECT, roomSessions: ["claude-code:room-1"], permissions: "auto", instruction: "other" });
+  await t.until(() => t.of("turn-ended").length === 3);
+  await t.registry.flushed();
+  const other = t.saved().processes.find((r) => r.session === `claude-code:${UUIDS[1]}`)!;
+  expect(other.driven!.name).toBeUndefined();
+  expect(t.logs.some((l) => l.includes("wasn't used: it matches the secret pattern"))).toBe(true);
+  expect(JSON.stringify(t.sent)).not.toContain(AWS_KEY);
 });
 
 test("closed from the menu: the desktop app waits twice the longer of drivenCloseSeconds and the 10 s a driven session gets to end", () => {

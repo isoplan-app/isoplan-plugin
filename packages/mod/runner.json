@@ -1,5 +1,7 @@
 {
   "claudeModel": "opus",
+  "namingModel": "haiku",
+  "namingTimeoutSeconds": 60,
   "answersPerRoomPerHour": 10,
   "answersPerMachinePerDay": 40,
   "tokenBudgetPerMachinePerDay": 5000000,

@@ -463,7 +463,7 @@ export const DrivenMessageSchema = z.discriminatedUnion("kind", [
   // The agent's own reply to the turn's instruction, what it said as the turn ended.
   z.object({ ...driven, kind: z.literal("reply"), session: DrivenSessionId, turn: DriveId, text: z.string().min(1).max(MAX_REPLY_LENGTH), cut: Cut, withheld: Withheld }),
   // The turn is over: `done`; `failed`, when Claude Code said it failed or its process ended mid-turn;
-  // or `stopped`, when the session was stopped or handed back mid-turn.
+  // or `stopped`, when the session was stopped or handed back mid-turn, or the reply interrupted.
   z.object({ ...driven, kind: z.literal("turn-ended"), session: DrivenSessionId, turn: DriveId, outcome: z.enum(["done", "failed", "stopped"]) }),
   // A start with a `mode` other than `driven` opened its session there (protocol 0.10.0): `session`,
   // in a room of its own, `room:<session>`. The runner doesn't hold it: it is reported as any session
@@ -487,7 +487,9 @@ export const DrivenMessageSchema = z.discriminatedUnion("kind", [
   z.object({ ...driven, kind: z.literal("held"), session: DrivenSessionId, room: Room, why: z.enum(["started", "reopened", "restored"]), permissions: DrivePermissionsSchema }),
   // No process holds the session now: `stopped`, `handed-back`, `idle-closed` (nothing happened in it
   // for the runner's idle time) or `crashed`. `id`: the stop or hand-back request it answers, if any.
-  z.object({ ...driven, kind: z.literal("released"), session: DrivenSessionId, why: z.enum(["stopped", "handed-back", "idle-closed", "crashed"]), id: DriveId.optional() }),
+  // `removed` (protocol 0.12.0): ended and removed, by a stop with `remove` or from the machine's own
+  // menu: the runner has forgotten it and never opens it again, so its agent can leave the floor.
+  z.object({ ...driven, kind: z.literal("released"), session: DrivenSessionId, why: z.enum(["stopped", "handed-back", "idle-closed", "crashed", "removed"]), id: DriveId.optional() }),
   // The session is back in its person's hands: `command` (`claude --resume <id>`) continues it in a
   // terminal opened in `folder`, a path on the runner's machine.
   z.object({ ...driven, kind: z.literal("handed-back"), id: DriveId, session: DrivenSessionId, command: z.string().min(1).max(MAX_COMMAND_LENGTH), folder: Folder }),
@@ -837,8 +839,13 @@ export const DriveMessageSchema = z.discriminatedUnion("kind", [
     }),
   // The next instruction, `text`; this request's id names the turn it starts.
   z.object({ ...drive, kind: z.literal("instruct"), session: DrivenSessionId, text: Instruction }),
-  // End the session's process, mid-turn or not.
-  z.object({ ...drive, kind: z.literal("stop"), session: DrivenSessionId }),
+  // End the session's process, mid-turn or not; the next instruction opens it again. With `remove`
+  // (protocol 0.12.0), the runner also forgets it, never to open it again, and answers `released`
+  // `removed`. A runner from before 0.12.0 ignores `remove` and answers `released` `stopped`.
+  z.object({ ...drive, kind: z.literal("stop"), session: DrivenSessionId, remove: z.literal(true).optional() }),
+  // Stop the reply in progress (protocol 0.12.0), keeping the process and the session: the turn ends
+  // `turn-ended` `stopped`. With no turn running it does nothing, and nothing is sent back.
+  z.object({ ...drive, kind: z.literal("interrupt"), session: DrivenSessionId }),
   // Take it back to my terminal: end the process cleanly and answer `handed-back` with the command.
   z.object({ ...drive, kind: z.literal("hand-back"), session: DrivenSessionId }),
   // Send the full output of `turn`, or of the whole session without one.

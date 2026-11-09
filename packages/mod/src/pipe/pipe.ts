@@ -16,7 +16,8 @@
 // Each side writes one JSON object per line. A hooks module's end (client.ts, `dist/pipe.js`) says
 // hello for its session and is sent that session's lines (src/lines.ts); the ask_room script
 // (src/ask/main.ts) asks once and is sent the answer; the desktop app (packages/app) asks the runner
-// to close one of its own headless sessions (`close`, closeSession) and is told whether it did.
+// to close one of its own headless sessions (`close`, closeSession), and with `remove` to remove it
+// too (#129), and is told whether it did. A runner from before `remove` ignores it and only closes.
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import fs from "node:fs/promises";
@@ -62,6 +63,8 @@ export interface PipeClose {
   v: 1;
   token: string;
   close: string;
+  /** End and remove: the runner forgets the session, so it is never opened again. */
+  remove?: true;
 }
 
 /** The runner's one answer to a close: true when it closed the session (its process ended, or it had none running), false when it didn't. */
@@ -179,7 +182,7 @@ export function openPipe(info: PipeInfo, onLine: (value: unknown) => void): Prom
  * once it closed it, false when the worker didn't, null when the pipe can't be reached, and "no answer"
  * when the worker went, or didn't answer within `waitMs`, after it was asked.
  */
-export async function closeSession(claudeDir: string, close: string, waitMs: number, readInfo: (claudeDir: string) => Promise<PipeInfo | null> = readPipeInfo): Promise<boolean | null | "no answer"> {
+export async function closeSession(claudeDir: string, close: string, waitMs: number, remove = false, readInfo: (claudeDir: string) => Promise<PipeInfo | null> = readPipeInfo): Promise<boolean | null | "no answer"> {
   const info = await readInfo(claudeDir);
   if (!info) return null;
   let answer: boolean | "no answer" = "no answer";
@@ -191,7 +194,7 @@ export async function closeSession(claudeDir: string, close: string, waitMs: num
   await new Promise<void>((resolve) => {
     const timer = setTimeout(() => (socket.destroy(), resolve()), waitMs);
     socket.on("close", () => (clearTimeout(timer), resolve()));
-    writeLine(socket, { type: "close", v: 1, token: info.token, close } satisfies PipeClose);
+    writeLine(socket, { type: "close", v: 1, token: info.token, close, ...(remove ? { remove: true as const } : {}) } satisfies PipeClose);
   });
   return answer;
 }

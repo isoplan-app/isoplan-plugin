@@ -5684,6 +5684,7 @@ const SessionFactSchema = object({
 	lights: _enum(["on", "off"]),
 	contextWindow: number().int().positive().optional(),
 	takesMessages: literal$1(true).optional(),
+	hooks: literal$1(true).optional(),
 	extra: Extra
 });
 const TokenCount = number().int().nonnegative();
@@ -5810,11 +5811,16 @@ const ReportFactSchema = object({
 /**
 * A question an agent asked its owner, open until it is answered, so the floor can show it and the
 * owner can answer it there. One of the named cases of session-derived text leaving a machine: the
-* server keeps it only for the retention period. `id` is the tool call's own id. `answerable`: the
-* session's own plugin is waiting for it, so an answer from the floor reaches it; without it (a
-* session seen only through the wake hook, a question asked before the plugin loaded) the floor
-* shows the question read-only. `withheld`: the secret scan matched its text, or the patterns
-* couldn't be read, so `questions` is only a placeholder; it is answered in the terminal.
+* server keeps it only for the retention period. `id` is the tool call's own id. An option's
+* `preview` (protocol 0.11.0 on) is the option's preview as the agent gave it, which Claude Code
+* shows when the option is focused. `answerable`: the session's own hooks module is waiting for it,
+* so an answer from the floor answers the dialog itself. `asMessage` (protocol 0.11.0 on): the
+* question can be answered from the floor even though the hooks module didn't see it asked (it was
+* asked before the plugin loaded): the plugin stops the agent's turn, which closes the dialog, and
+* submits the answers as the owner's own message. It never comes with `answerable` or `withheld`.
+* With neither, the floor shows the question read-only, and it is answered in the terminal.
+* `withheld`: the secret scan matched its text, or the patterns couldn't be read, so `questions` is
+* only a placeholder; it is answered in the terminal.
 */
 const QuestionFactSchema = object({
 	id: string().min(1),
@@ -5825,11 +5831,13 @@ const QuestionFactSchema = object({
 		header: string(),
 		options: array(object({
 			label: string().min(1),
-			description: string()
+			description: string(),
+			preview: string().optional()
 		})),
 		multiSelect: boolean()
 	})).min(1),
 	answerable: literal$1(true).optional(),
+	asMessage: literal$1(true).optional(),
 	withheld: literal$1(true).optional(),
 	extra: Extra
 });
@@ -6436,7 +6444,8 @@ const DrivenMessageSchema = discriminatedUnion("kind", [
 			"stopped",
 			"handed-back",
 			"idle-closed",
-			"crashed"
+			"crashed",
+			"removed"
 		]),
 		id: DriveId.optional()
 	}),
@@ -6564,7 +6573,12 @@ const RequestMessageSchema = discriminatedUnion("kind", [
 		kind: literal$1("owner-answer"),
 		session: string().min(1),
 		question: string().min(1),
-		answers: record(string(), string())
+		answers: record(string(), string()),
+		annotations: record(string(), object({
+			notes: string().optional(),
+			preview: string().optional()
+		})).optional(),
+		chat: literal$1(true).optional()
 	}),
 	object({
 		type: literal$1("request"),
@@ -6770,6 +6784,12 @@ const OfficeServerMessageSchema = discriminatedUnion("type", [
 		object({
 			...drive$1,
 			kind: literal$1("stop"),
+			session: DrivenSessionId,
+			remove: literal$1(true).optional()
+		}),
+		object({
+			...drive$1,
+			kind: literal$1("interrupt"),
 			session: DrivenSessionId
 		}),
 		object({
@@ -14069,6 +14089,11 @@ function parseRegistry(text) {
 		return null;
 	}
 }
+/** The name the runner wrote for the driven session `session` (`claude-code:<uuid>`) from its first instruction, as the registry at `file` keeps it; null with none. */
+async function drivenName(file, session) {
+	const d = parseRegistry(await fs.readFile(file, "utf8").catch(() => ""))?.find((r) => r.kind === "driven" && r.session === session)?.driven;
+	return d?.named === true && typeof d.name === "string" && d.name ? d.name : null;
+}
 function createRegistry({ file, log, pid = process.pid, isAlive = alive, info = (p) => processInfo(p), kill = (p) => killPid(p), now = Date.now }) {
 	const records = /* @__PURE__ */ new Map();
 	let writing = Promise.resolve();
@@ -14448,6 +14473,153 @@ ${branch}`, "a branch", repo.project)) repo.branches.push(branch);
 	return [...byRepo.values()];
 }
 //#endregion
+//#region src/data-layer/titles.ts
+const ASK_EVERY_MS = 6e5;
+const MAX_FILES = 15;
+const MAX_TASKS = 10;
+const MAX_TITLE = 60;
+const TITLE_SYSTEM = "You name coding sessions for a floor plan of a team's work. From the facts given, write a title of 3 to 6 words saying what the session is working on. Reply with the title alone: no quotes and no full stop.";
+/** What the session's title is written from, each list sorted. */
+function titleInputs(facts) {
+	const subs = facts.agents.filter((a) => a.startedBy !== null);
+	const files = /* @__PURE__ */ new Map();
+	for (const e of facts.edits) {
+		const hit = files.get(e.file.toLowerCase());
+		if (!hit) files.set(e.file.toLowerCase(), {
+			file: e.file,
+			at: e.at
+		});
+		else if (e.at > hit.at) hit.at = e.at;
+	}
+	const tasks = subs.filter((a) => a.task).sort((a, b) => cmp(b.lastActive, a.lastActive));
+	return {
+		branch: facts.session.branch,
+		files: [...files.values()].sort((a, b) => cmp(b.at, a.at)).slice(0, MAX_FILES).map((f) => f.file).sort(),
+		types: [...new Set(subs.map((a) => a.agentType).filter((t) => !!t))].sort(),
+		tasks: [...new Set(tasks.map((a) => a.task))].slice(0, MAX_TASKS).sort()
+	};
+}
+/** The cache key for the inputs: a new call goes out only when this changes. */
+const titleKey = (inputs) => JSON.stringify(inputs);
+/** The prompt for the inputs. */
+function titlePrompt({ branch, files, types, tasks }) {
+	const out = [`Branch: ${branch || "(none)"}`];
+	if (files.length) out.push("Files edited:", ...files.map((f) => "- " + f));
+	if (types.length) out.push(`Agent types: ${types.join(", ")}`);
+	if (tasks.length) out.push("Subagent tasks:", ...tasks.map((t) => "- " + t));
+	return out.join("\n");
+}
+/** The title from a reply's text: its first line, unquoted, clipped; null when nothing is left. */
+function cleanTitle(reply) {
+	const title = (reply.split(/\r?\n/).map((l) => l.trim()).find(Boolean) || "").replace(/^["'`*]+|["'`*.]+$/g, "").trim();
+	if (!title) return null;
+	return title.length <= MAX_TITLE ? title : title.slice(0, 59).trimEnd() + "…";
+}
+/**
+* The title call due now, or null: when the session is titled by its branch, its inputs changed
+* since its last written title, and its last ask was at least ASK_EVERY_MS ago.
+*/
+function nextTitle(facts, cache, now) {
+	if (facts.session.titleFrom !== "branch") return null;
+	const inputs = titleInputs(facts);
+	if (!inputs.branch && !inputs.files.length && !inputs.tasks.length) return null;
+	const key = titleKey(inputs);
+	if (cache && (cache.key === key || now - cache.at < ASK_EVERY_MS)) return null;
+	return {
+		key,
+		prompt: titlePrompt(inputs)
+	};
+}
+const cmp = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+//#endregion
+//#region src/runner/naming.ts
+const INSTRUCTION_CHARS = 2e3;
+/** Every flag of the naming call's command line, after the binary. */
+function namingArgs(model, system) {
+	return [
+		"-p",
+		"--no-session-persistence",
+		"--tools",
+		"",
+		"--setting-sources",
+		"",
+		"--strict-mcp-config",
+		"--model",
+		model,
+		"--system-prompt",
+		system,
+		"--output-format",
+		"json"
+	];
+}
+/** The name from the call's output, the one JSON object `--output-format json` writes; null for a failure or nothing usable. */
+function nameFrom(stdout) {
+	let e;
+	try {
+		e = JSON.parse(stdout.trim());
+	} catch {
+		return null;
+	}
+	if (!e || e.type !== "result" || e.is_error === true || e.subtype !== "success" || typeof e.result !== "string") return null;
+	return cleanTitle(e.result);
+}
+function createNamer(o) {
+	const spawn = o.spawn ?? hiddenSpawn;
+	const env = o.env ?? process.env;
+	const platform = o.platform ?? process.platform;
+	const running = /* @__PURE__ */ new Set();
+	return {
+		async name(instruction) {
+			const bin = await o.binary();
+			if (!bin) return null;
+			const st = await o.settings();
+			const system = (await o.system()).trim();
+			let child;
+			try {
+				child = spawn([...claudeCommand(bin), ...namingArgs(st.namingModel, system)], {
+					cwd: o.cwd ?? os.tmpdir(),
+					env: forkEnv(env)
+				});
+			} catch (err) {
+				o.log(`couldn't start claude to name a session: ${err.message}`);
+				return null;
+			}
+			running.add(child);
+			return new Promise((resolve) => {
+				let stdout = "";
+				let stderr = "";
+				let over = false;
+				const finish = (name, why) => {
+					if (over) return;
+					over = true;
+					clearTimeout(timer);
+					running.delete(child);
+					if (why) o.log(`no name was written for a session: ${why}`);
+					resolve(name);
+				};
+				const timer = setTimeout(() => {
+					killTree(child, platform);
+					finish(null, `it took longer than ${st.namingTimeoutSeconds} s`);
+				}, st.namingTimeoutSeconds * 1e3);
+				timer.unref?.();
+				child.stdout.setEncoding("utf8").on("data", (piece) => stdout += piece);
+				child.stderr.setEncoding("utf8").on("data", (piece) => stderr = (stderr + piece).slice(-500));
+				child.stdin.on("error", () => {});
+				child.on("error", (err) => finish(null, `claude failed: ${err.message}`));
+				child.on("close", (code) => {
+					const name = nameFrom(stdout);
+					finish(name, name ? void 0 : `claude exited${code === null ? "" : ` with code ${code}`} with no name${stderr.trim() ? `: ${stderr.trim().split("\n").slice(-2).join(" ")}` : ""}`);
+				});
+				child.stdin.end(`Instruction:\n${instruction.slice(0, INSTRUCTION_CHARS)}`);
+			});
+		},
+		close() {
+			for (const child of running) killTree(child, platform);
+			running.clear();
+		}
+	};
+}
+//#endregion
 //#region src/runner/session.ts
 /** The permission mode a driven session runs in, unless its person asked for bypassPermissions where its office allows it. */
 const DRIVEN_PERMISSIONS = "auto";
@@ -14698,6 +14870,8 @@ function createDriver(o) {
 			cut: false,
 			outputs: /* @__PURE__ */ new Map(),
 			ending: null,
+			interrupting: null,
+			naming: false,
 			failure: null,
 			fromBefore,
 			stderr: "",
@@ -15062,6 +15236,26 @@ function createDriver(o) {
 		s.turn = null;
 		keepTurn(s, turn);
 		const failed = e.is_error === true || e.subtype !== "success";
+		const interrupted = s.interrupting === turn && failed;
+		s.interrupting = null;
+		if (interrupted) {
+			emit(s, () => ({
+				...driven,
+				kind: "turn-ended",
+				session: s.record.session,
+				turn,
+				outcome: "stopped"
+			}));
+			save(s, {
+				state: "idle",
+				driven: {
+					...s.record.driven,
+					transcript: true
+				}
+			});
+			armIdle(s);
+			return;
+		}
 		const missing = Array.isArray(e.errors) && e.errors.some((x) => typeof x === "string" && x.includes("No conversation found"));
 		const session = s.record.session;
 		if (missing) s.failure = MISSING;
@@ -15128,6 +15322,7 @@ function createDriver(o) {
 		endPrompts(s);
 		const turn = s.turn;
 		s.turn = null;
+		s.interrupting = null;
 		if (turn) keepTurn(s, turn);
 		const session = s.record.session;
 		const why = s.ending;
@@ -15198,6 +15393,7 @@ function createDriver(o) {
 		if (!child) return;
 		clearIdle(s);
 		s.turn = turn;
+		s.interrupting = null;
 		s.output = "";
 		s.cut = false;
 		s.failure = null;
@@ -15314,7 +15510,10 @@ function createDriver(o) {
 				permissions
 			}));
 			sayPromptsOn(s);
-			if (m.instruction) await beginTurn(s, m.id, m.instruction);
+			if (m.instruction) {
+				await beginTurn(s, m.id, m.instruction);
+				nameLater(s, m.instruction);
+			}
 		});
 	}
 	async function startElsewhere(server, m, mode, folder, bin) {
@@ -15372,6 +15571,38 @@ function createDriver(o) {
 			sayPromptsOn(s);
 		}
 		await beginTurn(s, id, text);
+		nameLater(s, text);
+	}
+	function nameLater(s, instruction) {
+		if (!o.namer || s.naming || s.record.driven.name) return;
+		s.naming = true;
+		const namer = o.namer;
+		const session = s.record.session;
+		count((async () => {
+			const name = await namer.name(instruction);
+			if (!name) return;
+			const matched = await o.scan(name);
+			if (matched) return o.log(`the name written for driven session ${session} wasn't used: it matches the secret pattern "${matched}"`);
+			if (!current(s)) return;
+			save(s, { driven: {
+				...s.record.driven,
+				name,
+				named: true
+			} });
+			o.log(`named driven session ${session}`);
+		})().catch((err) => o.log(`naming driven session ${session} failed: ${err?.stack ?? String(err)}`)));
+	}
+	function interrupt(s) {
+		const child = s.child;
+		const turn = s.turn;
+		if (!child || !turn || s.interrupting === turn || child.stdin.writableEnded) return;
+		s.interrupting = turn;
+		child.stdin.write(JSON.stringify({
+			type: "control_request",
+			request_id: `i-${randomUUID()}`,
+			request: { subtype: "interrupt" }
+		}) + "\n");
+		o.log(`interrupted instruction ${turn} in driven session ${s.record.session}`);
 	}
 	function sayPromptsOn(s) {
 		if (askedOf(s) === "bypassPermissions" && s.record.driven.permissions !== "bypassPermissions") emit(s, () => ({
@@ -15406,19 +15637,37 @@ function createDriver(o) {
 			why: "stopped"
 		}));
 	}
-	async function stop(s, id) {
-		if (!current(s)) return refuse(s.record.driven.office, id, "not-found");
+	async function endProcess(s, how) {
 		const child = s.child;
-		if (child) {
-			s.ending = "stopped";
-			killTree(child, platform);
-			await within(s.closed, KILL_WAIT_MS);
-			s.ending = null;
-			if (s.child === child) {
-				o.log(`driven session ${s.record.session}'s process ${child.pid} didn't end when stopped, so it is still held`);
-				return refuse(s.record.driven.office, id, "unavailable", { detail: NOT_CLOSED });
-			}
-		}
+		if (!child) return true;
+		s.ending = "stopped";
+		killTree(child, platform);
+		await within(s.closed, KILL_WAIT_MS);
+		s.ending = null;
+		if (s.child !== child) return true;
+		o.log(`driven session ${s.record.session}'s process ${child.pid} didn't end when ${how}, so it is still held`);
+		return false;
+	}
+	async function remove(s, id) {
+		const session = s.record.session;
+		const server = s.record.driven.office;
+		emit(s, () => ({
+			...driven,
+			kind: "released",
+			session,
+			why: "removed",
+			...id ? { id } : {}
+		}));
+		forget(s);
+		await s.out;
+		if (policies.has(server)) sayHolding(server);
+		await o.removed?.(session).catch((err) => o.log(`couldn't stop reporting ${session}: ${err?.message ?? String(err)}`));
+		o.log(`ended and removed driven session ${session}: it won't be opened again`);
+	}
+	async function stop(s, id, removing) {
+		if (!current(s)) return refuse(s.record.driven.office, id, "not-found");
+		if (!await endProcess(s, "stopped")) return refuse(s.record.driven.office, id, "unavailable", { detail: NOT_CLOSED });
+		if (removing) return remove(s, id);
 		emit(s, () => ({
 			...driven,
 			kind: "released",
@@ -15427,30 +15676,21 @@ function createDriver(o) {
 			id
 		}));
 	}
-	async function end(s) {
+	async function end(s, removing) {
 		if (!current(s)) return false;
-		const child = s.child;
-		if (child) {
-			s.ending = "stopped";
-			killTree(child, platform);
-			await within(s.closed, KILL_WAIT_MS);
-			s.ending = null;
-			if (s.child === child) {
-				o.log(`driven session ${s.record.session}'s process ${child.pid} didn't end when closed from this computer, so it is still held`);
-				return false;
-			}
-			emit(s, () => ({
-				...driven,
-				kind: "released",
-				session: s.record.session,
-				why: "stopped"
-			}));
+		const had = !!s.child;
+		if (!await endProcess(s, "closed from this computer")) return false;
+		if (removing) {
+			await remove(s);
+			return true;
 		}
-		const server = s.record.driven.office;
-		forget(s);
-		await s.out;
-		if (policies.has(server)) sayHolding(server);
-		o.log(`closed driven session ${s.record.session} from this computer: it won't be opened again`);
+		if (had) emit(s, () => ({
+			...driven,
+			kind: "released",
+			session: s.record.session,
+			why: "stopped"
+		}));
+		o.log(`ended driven session ${s.record.session} from this computer: the next instruction opens it again`);
 		return true;
 	}
 	async function handBack(s, id) {
@@ -15647,7 +15887,8 @@ function createDriver(o) {
 			if (!s || s.record.driven.office !== server) return refuse(server, m.id, "not-found");
 			if (s.record.driven.owner !== m.by.id) return refuse(server, m.id, "not-owner");
 			if (m.kind === "instruct") queue(s, () => instruct(s, m.id, m.text));
-			else if (m.kind === "stop") queue(s, () => stop(s, m.id));
+			else if (m.kind === "stop") queue(s, () => stop(s, m.id, m.remove === true));
+			else if (m.kind === "interrupt") interrupt(s);
 			else if (m.kind === "hand-back") queue(s, () => handBack(s, m.id));
 			else if (m.kind === "output") output(s, m.id, m.turn).catch((err) => o.log(`output ${m.id} failed: ${err.message}`));
 			else if (m.kind === "release") release(s, m.id, m.withheld);
@@ -15663,10 +15904,10 @@ function createDriver(o) {
 			for (const server of offices.keys()) sendTo(server, m);
 		},
 		held: () => [...sessions.values()].filter((s) => s.child || s.opening).length,
-		end(session) {
+		end(session, removing = false) {
 			const s = sessions.get(session);
 			if (!s) return Promise.resolve(false);
-			return new Promise((resolve) => queue(s, () => end(s).then(resolve, (err) => (resolve(false), Promise.reject(err)))));
+			return new Promise((resolve) => queue(s, () => end(s, removing).then(resolve, (err) => (resolve(false), Promise.reject(err)))));
 		},
 		takeProblem: (by) => by?.id === o.account.id ? null : NOT_YOURS_TAKE,
 		async prepareTake(server, take) {
@@ -16598,65 +16839,6 @@ async function readReleased(file) {
 	}
 }
 //#endregion
-//#region src/data-layer/titles.ts
-const ASK_EVERY_MS = 6e5;
-const MAX_FILES = 15;
-const MAX_TASKS = 10;
-const MAX_TITLE = 60;
-const TITLE_SYSTEM = "You name coding sessions for a floor plan of a team's work. From the facts given, write a title of 3 to 6 words saying what the session is working on. Reply with the title alone: no quotes and no full stop.";
-/** What the session's title is written from, each list sorted. */
-function titleInputs(facts) {
-	const subs = facts.agents.filter((a) => a.startedBy !== null);
-	const files = /* @__PURE__ */ new Map();
-	for (const e of facts.edits) {
-		const hit = files.get(e.file.toLowerCase());
-		if (!hit) files.set(e.file.toLowerCase(), {
-			file: e.file,
-			at: e.at
-		});
-		else if (e.at > hit.at) hit.at = e.at;
-	}
-	const tasks = subs.filter((a) => a.task).sort((a, b) => cmp(b.lastActive, a.lastActive));
-	return {
-		branch: facts.session.branch,
-		files: [...files.values()].sort((a, b) => cmp(b.at, a.at)).slice(0, MAX_FILES).map((f) => f.file).sort(),
-		types: [...new Set(subs.map((a) => a.agentType).filter((t) => !!t))].sort(),
-		tasks: [...new Set(tasks.map((a) => a.task))].slice(0, MAX_TASKS).sort()
-	};
-}
-/** The cache key for the inputs: a new call goes out only when this changes. */
-const titleKey = (inputs) => JSON.stringify(inputs);
-/** The prompt for the inputs. */
-function titlePrompt({ branch, files, types, tasks }) {
-	const out = [`Branch: ${branch || "(none)"}`];
-	if (files.length) out.push("Files edited:", ...files.map((f) => "- " + f));
-	if (types.length) out.push(`Agent types: ${types.join(", ")}`);
-	if (tasks.length) out.push("Subagent tasks:", ...tasks.map((t) => "- " + t));
-	return out.join("\n");
-}
-/** The title from a reply's text: its first line, unquoted, clipped; null when nothing is left. */
-function cleanTitle(reply) {
-	const title = (reply.split(/\r?\n/).map((l) => l.trim()).find(Boolean) || "").replace(/^["'`*]+|["'`*.]+$/g, "").trim();
-	if (!title) return null;
-	return title.length <= MAX_TITLE ? title : title.slice(0, 59).trimEnd() + "…";
-}
-/**
-* The title call due now, or null: when the session is titled by its branch, its inputs changed
-* since its last written title, and its last ask was at least ASK_EVERY_MS ago.
-*/
-function nextTitle(facts, cache, now) {
-	if (facts.session.titleFrom !== "branch") return null;
-	const inputs = titleInputs(facts);
-	if (!inputs.branch && !inputs.files.length && !inputs.tasks.length) return null;
-	const key = titleKey(inputs);
-	if (cache && (cache.key === key || now - cache.at < ASK_EVERY_MS)) return null;
-	return {
-		key,
-		prompt: titlePrompt(inputs)
-	};
-}
-const cmp = (a, b) => a < b ? -1 : a > b ? 1 : 0;
-//#endregion
 //#region src/data-layer/report-session.ts
 const LOG_CAP_BYTES$1 = 65536;
 const DORMANT_MS = 3e4;
@@ -17294,7 +17476,8 @@ async function reporting(o, c) {
 				at: title.at
 			};
 		}
-		const ask = nextTitle(read.facts, title, now);
+		const named = read.facts.session.titleFrom === "branch" ? await drivenName(registryPath(claudeDir), read.facts.session.id) : null;
+		const ask = named ? null : nextTitle(read.facts, title, now);
 		if (ask && await fs.mkdir(titlesDir, { recursive: true }).then(() => true, () => false)) {
 			title = {
 				key: title?.key ?? null,
@@ -17313,11 +17496,12 @@ async function reporting(o, c) {
 			});
 		}
 		if (hooked) contextWindow = await windowOf(windowFile) ?? contextWindow;
-		const titled = read.facts.session.titleFrom === "branch" && title?.title ? {
+		const given = named ?? (read.facts.session.titleFrom === "branch" ? title?.title : null);
+		const titled = given ? {
 			...read.facts,
 			session: {
 				...read.facts.session,
-				title: title.title
+				title: given
 			}
 		} : read.facts;
 		const sized = contextWindow ? {
@@ -17492,6 +17676,28 @@ function watchSessions(o) {
 	let stopped = false;
 	let timer = null;
 	let said = "";
+	const removed = /* @__PURE__ */ new Map();
+	let readRemoved = null;
+	let savingRemoved = Promise.resolve();
+	const saveRemoved = () => {
+		const file = o.removedFile;
+		if (!file) return savingRemoved;
+		return savingRemoved = savingRemoved.then(async () => {
+			await fs.mkdir(path.dirname(file), { recursive: true });
+			const temp = `${file}.${pid}.tmp`;
+			await fs.writeFile(temp, JSON.stringify(Object.fromEntries(removed)));
+			for (let tries = 0;; tries++) try {
+				return await fs.rename(temp, file);
+			} catch (err) {
+				if (tries >= 5 || ![
+					"EPERM",
+					"EBUSY",
+					"EACCES"
+				].includes(err.code ?? "")) throw err;
+				await new Promise((r) => setTimeout(r, 50 * (tries + 1)));
+			}
+		}).catch((err) => o.log(`couldn't write the sessions ended and removed to ${file}: ${err.message}`));
+	};
 	const start = (id, s, cwd, hooks = null) => {
 		let close = (_why) => {};
 		const closed = new Promise((resolve) => close = resolve);
@@ -17550,6 +17756,16 @@ function watchSessions(o) {
 		const config = await o.config();
 		const now = Date.now();
 		const windowMs = Math.max(config.idleMinutes * 6e4, first ? config.lightsOffHours * 36e5 : 0);
+		await (readRemoved ??= (async () => {
+			const text = o.removedFile ? await fs.readFile(o.removedFile, "utf8").catch(() => null) : null;
+			let kept = null;
+			try {
+				kept = text ? JSON.parse(text) : null;
+			} catch {
+				o.log(`couldn't read the sessions ended and removed in ${o.removedFile}`);
+			}
+			for (const [id, at] of Object.entries(kept && typeof kept === "object" ? kept : {})) if (typeof at === "number" && at >= now - windowMs) removed.set(id, at);
+		})());
 		const quiet = [];
 		const recent = [];
 		for (const dir of await io.listDir(projectsDir)) {
@@ -17583,6 +17799,12 @@ function watchSessions(o) {
 					size: st.size
 				});
 				const hooks = o.hooked?.(id) ?? null;
+				const removedAt = removed.get(id);
+				if (removedAt !== void 0) {
+					if (!hooks && st.mtimeMs <= removedAt) continue;
+					removed.delete(id);
+					saveRemoved();
+				}
 				if (s.running) {
 					if (s.running.hooks !== hooks) {
 						rehooked.add(id);
@@ -17691,11 +17913,15 @@ function watchSessions(o) {
 			session,
 			cwd: s.running.cwd
 		}] : []),
-		async end(id, why) {
-			const running = seen.get(id)?.running;
-			if (!running) return;
-			running.stop(why);
-			await running.done;
+		async end(id, why, remove = false) {
+			const s = seen.get(id);
+			if (s?.running) {
+				s.running.stop(why);
+				await s.running.done;
+			}
+			if (!remove) return;
+			removed.set(id, s && (await io.stat(s.file))?.mtimeMs || Date.now());
+			await saveRemoved();
 		},
 		look: lookOnce,
 		rehook: (id) => {
@@ -17714,6 +17940,7 @@ function watchSessions(o) {
 			let timeout;
 			await Promise.race([Promise.all(running.map((r) => r.done)), new Promise((r) => timeout = setTimeout(r, stopWaitMs))]);
 			clearTimeout(timeout);
+			await savingRemoved;
 		}
 	};
 }
@@ -17997,7 +18224,7 @@ function compareVersions(a, b) {
 	return 0;
 }
 const isHello = (m) => m.type === "hello" && typeof m.session === "string" && SESSION.test(m.session) && typeof m.cwd === "string" && !!m.cwd && typeof m.since === "number" && typeof m.root === "string" && typeof m.version === "string";
-const isClose = (m) => m.type === "close" && typeof m.close === "string" && m.close.length <= 300;
+const isClose = (m) => m.type === "close" && typeof m.close === "string" && m.close.length <= 300 && (m.remove === void 0 || m.remove === true);
 const isAsk = (m) => m.type === "ask" && typeof m.session === "string" && typeof m.cwd === "string" && Array.isArray(m.servers) && m.servers.every((s) => typeof s === "string");
 async function createPipeServer(o) {
 	const platform = o.platform ?? process.platform;
@@ -18059,7 +18286,7 @@ async function createPipeServer(o) {
 		socket.end();
 	};
 	const close = async (socket, request) => {
-		const closed = o.close ? await o.close(request.close).catch((err) => (o.log(`couldn't close ${request.close}: ${String(err?.message ?? err)}`), false)) : false;
+		const closed = o.close ? await o.close(request.close, request.remove === true).catch((err) => (o.log(`couldn't close ${request.close}: ${String(err?.message ?? err)}`), false)) : false;
 		writeLine(socket, {
 			type: "closed",
 			closed
@@ -18310,7 +18537,8 @@ const uuidOf = (session) => session.slice(session.indexOf(":") + 1);
 */
 function sessionsSeen(reported, records, background = /* @__PURE__ */ new Set()) {
 	const closeOf = (r) => r.kind === "driven" ? r.session : `pid:${r.pid}`;
-	const nameOf = (r) => r.driven?.name || path.basename(r.folder);
+	const drivenNames = new Map(records.flatMap((r) => r.kind === "driven" && r.driven?.name ? [[uuidOf(r.session), r.driven.name]] : []));
+	const nameOf = (r) => r.driven?.name || drivenNames.get(uuidOf(r.session)) || path.basename(r.folder);
 	const own = new Map(records.filter((r) => r.kind !== "fork" && (r.kind === "driven" || r.pid !== null)).map((r) => [uuidOf(r.session), r]));
 	const listed = /* @__PURE__ */ new Set();
 	const seen = reported.map(({ session, cwd }) => {
@@ -18358,6 +18586,7 @@ const LOG_CAP_BYTES = 262144;
 const CHECK_MS = 6e4;
 const DESKTOP_CHECK_MS = 36e5;
 const MAX_PREPARED = 20;
+const REMOVED = "it was ended and removed";
 const self = fileURLToPath(import.meta.url);
 const here = path.dirname(self);
 const appDir = path.join(here, "..");
@@ -18512,7 +18741,7 @@ async function worker() {
 	const isOff = async (folder) => await recordedState(paths, folder).catch(() => "enabled") !== "enabled";
 	const scanText = async (text) => scan(text, await loadPatterns(path.join(appDir, "secret-patterns.json"), path.join(isoplanDir, "secret-patterns.json"), log));
 	let rehook = (_session) => {};
-	let closeFor = async (_close) => false;
+	let closeFor = async (_close, _remove) => false;
 	const pipe = await createPipeServer({
 		claudeDir,
 		log,
@@ -18522,7 +18751,7 @@ async function worker() {
 			appDir,
 			scan: scanText
 		}),
-		close: (close) => closeFor(close)
+		close: (close, remove) => closeFor(close, remove)
 	}).catch((err) => (log(`the runner couldn't open its pipe for the sessions' hooks modules: ${err.message}`), null));
 	const reporting = watchSessions({
 		claudeDir,
@@ -18531,6 +18760,7 @@ async function worker() {
 		isOff,
 		log,
 		hooked: (id) => pipe?.hooked(id) ?? null,
+		removedFile: path.join(isoplanDir, "runner", "removed.json"),
 		held: (id, hooks) => {
 			sessionLog(claudeDir, id).say("an earlier version's data layer reports this session, so the runner doesn't: its hooks module is told so, and tries again later");
 			hooks.send({
@@ -18595,9 +18825,16 @@ async function worker() {
 		config,
 		track: registry.track
 	});
+	const namer = createNamer({
+		binary,
+		settings,
+		system: () => fs.readFile(path.join(appDir, "prompts", "naming.md"), "utf8"),
+		log
+	});
 	let driver = null;
 	process.on("exit", () => {
 		answerer.close();
+		namer.close();
 		driver?.close();
 	});
 	const git = createRunGit();
@@ -18793,6 +19030,8 @@ async function worker() {
 		settings,
 		scan: scanText,
 		log,
+		namer,
+		removed: (session) => reporting.end(session.slice(session.indexOf(":") + 1), REMOVED, true),
 		projectOf: async (folder) => (await homeIo.projectOf(await homeIo.resolve(folder), folder)).id,
 		elsewhere: (start, bin) => startWhere(start, bin, {
 			run: git,
@@ -18816,7 +19055,7 @@ async function worker() {
 		}
 	});
 	driver = drive;
-	closeFor = async (close) => {
+	closeFor = async (close, remove) => {
 		if (close.startsWith("pid:")) {
 			const record = await closeProcess(close, registry.list(), {
 				kill: killPid,
@@ -18829,9 +19068,7 @@ async function worker() {
 			if (record.kind === "desktop-read") await reporting.end(record.session.slice(record.session.indexOf(":") + 1), CLOSED_FROM_MENU);
 			return true;
 		}
-		if (!await drive.end(close)) return false;
-		await reporting.end(close.slice(close.indexOf(":") + 1), CLOSED_FROM_MENU);
-		return true;
+		return drive.end(close, remove);
 	};
 	let listMs = LOCK_REFRESH_MS;
 	const listSessions = async () => {

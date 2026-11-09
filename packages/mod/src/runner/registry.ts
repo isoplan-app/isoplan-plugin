@@ -18,7 +18,7 @@
 //         "started": "<ISO time>",     when Isoplan first started a process for it
 //         "lastActivity": "<ISO time>",
 //         "state": "working" | "idle" | "closed",
-//         "driven": { "room", "project", "office", "owner", "permissions", "asked"?, "transcript", "addDir"?, "name"? }   driven only
+//         "driven": { "room", "project", "office", "owner", "permissions", "asked"?, "transcript", "addDir"?, "name"?, "named"? }   driven only
 //       }
 //     ]
 //   }
@@ -84,7 +84,10 @@ export interface DrivenFields {
   transcript: boolean;
   /** A folder outside `folder` the session reads (a driven take's brief), passed as --add-dir. */
   addDir?: string;
+  /** The session's name: a take's, or the one written from its first instruction (`named`). */
   name?: string;
+  /** The runner wrote `name` from the session's first instruction (naming.ts), so its data layer gives it to the floor as the session's title. */
+  named?: true;
 }
 
 export interface ProcessRecord {
@@ -194,6 +197,13 @@ export function parseRegistry(text: string): ProcessRecord[] | null {
   } catch {
     return null;
   }
+}
+
+/** The name the runner wrote for the driven session `session` (`claude-code:<uuid>`) from its first instruction, as the registry at `file` keeps it; null with none. */
+export async function drivenName(file: string, session: string): Promise<string | null> {
+  const records = parseRegistry(await fsp.readFile(file, "utf8").catch(() => ""));
+  const d = records?.find((r) => r.kind === "driven" && r.session === session)?.driven;
+  return d?.named === true && typeof d.name === "string" && d.name ? d.name : null;
 }
 
 export function createRegistry({ file, log, pid = process.pid, isAlive = alive, info = (p) => processInfo(p), kill = (p) => killPid(p), now = Date.now }: RegistryOptions): Registry {

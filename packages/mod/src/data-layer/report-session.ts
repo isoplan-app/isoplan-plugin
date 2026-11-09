@@ -75,6 +75,7 @@ import { managedDir, newestDataLayer, normalPath, pluginDirsOf, pluginIdOf, plug
 import type { ContextWindow, DataLayerLine, TitleReply, WaitMark } from "../lines.js";
 import { claudeBinary, claudeCommand, findClaude } from "../runner/claude-binary.js";
 import { SESSION_ENV } from "../pipe/pipe.js";
+import { drivenName, registryPath } from "../runner/registry.js";
 import { errorText, loadPatterns, type Pattern } from "../runner/scan.js";
 import { startRunner, type StartOptions, type Started } from "../runner/start.js";
 import { checkForUpdate, commandEnv, gitChoices, START_GAP_MS, updatesOffBy } from "../update/update.js";
@@ -710,10 +711,12 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
     // A written title replaces the branch stand-in; the hooks module writes the reply to a file.
     const reply = await takeReply(titleFile);
     if (reply) {
-      const text = reply.key === asked ? cleanTitle(reply.text) : null;
+      const text: string | null = reply.key === asked ? cleanTitle(reply.text) : null;
       if (text && title) title = { key: reply.key, title: text, at: title.at };
     }
-    const ask = nextTitle(read.facts, title, now);
+    // A session driven from the floor has the name its runner wrote from its first instruction (runner/naming.ts), which replaces the branch stand-in too.
+    const named: string | null = read.facts.session.titleFrom === "branch" ? await drivenName(registryPath(claudeDir), read.facts.session.id) : null;
+    const ask: ReturnType<typeof nextTitle> = named ? null : nextTitle(read.facts, title, now);
     if (ask && (await fs.mkdir(titlesDir, { recursive: true }).then(() => true, () => false))) {
       title = { key: title?.key ?? null, title: title?.title ?? null, at: now };
       asked = ask.key;
@@ -721,7 +724,8 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
     }
     // The size stays as last read while the file is missing or half written; there is none until it is written.
     if (hooked) contextWindow = (await windowOf(windowFile)) ?? contextWindow;
-    const titled = read.facts.session.titleFrom === "branch" && title?.title ? { ...read.facts, session: { ...read.facts.session, title: title.title } } : read.facts;
+    const given: string | null | undefined = named ?? (read.facts.session.titleFrom === "branch" ? title?.title : null);
+    const titled = given ? { ...read.facts, session: { ...read.facts.session, title: given } } : read.facts;
     const sized: Facts = contextWindow ? { ...titled, session: { ...titled.session, contextWindow } } : titled;
     const facts: Facts = takesMessages ? { ...sized, session: { ...sized.session, takesMessages: true } } : sized;
 

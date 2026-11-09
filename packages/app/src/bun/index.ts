@@ -100,9 +100,9 @@ async function act(action: string): Promise<void> {
   if (action === "pause") engine.pause();
   else if (action === "resume") engine.resume();
   else if (action === "pairing") openPairing();
-  else if (action.startsWith("close:")) {
-    const id = closing(action, (await input()).status);
-    if (id) await close(id);
+  else if (action.startsWith("close:") || action.startsWith("remove:")) {
+    const asked = closing(action, (await input()).status);
+    if (asked) await close(asked.close, asked.remove);
   }
   else if (action === "quit") {
     log("quit from the menu: the runner stops");
@@ -111,12 +111,12 @@ async function act(action: string): Promise<void> {
   await update();
 }
 
-// A headless session the menu offers to close: this machine's runner closes it, as it owns its process.
-async function close(id: string): Promise<void> {
-  const closed = await closeSession(claudeDir, id, menuCloseWaitMs((await settings()).drivenCloseSeconds));
+// A headless session the menu offers to close: this machine's runner closes it, as it owns its process, and with `remove` removes it.
+async function close(id: string, remove: boolean): Promise<void> {
+  const closed = await closeSession(claudeDir, id, menuCloseWaitMs((await settings()).drivenCloseSeconds), remove);
   log(
     closed === true
-      ? `closed ${id} from the menu`
+      ? `${remove ? "ended and removed" : "closed"} ${id} from the menu`
       : closed === false
         ? `the runner didn't close ${id}: runner.log says why`
         : closed === "no answer"

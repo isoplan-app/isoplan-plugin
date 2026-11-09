@@ -80,12 +80,15 @@ test("status: a driven session or a take's first turn is headless and closed by 
     // A fork shares its lead's id, so the lead (in a terminal) isn't taken for headless.
     { kind: "fork" as const, pid: 12, session: "claude-code:u-lead", folder: "C:/w/api" },
     { kind: "desktop-read" as const, pid: 13, session: "claude-code:u-take", folder: "C:/w/take" },
+    // A fork of a driven lead goes by the lead's name, so it is listed beside it.
+    { kind: "fork" as const, pid: 14, session: "claude-code:u-driven", folder: "C:/w/app" },
   ];
   expect(sessionsSeen(reported, records, new Set(["u-bg"]))).toEqual([
     { name: "api", headless: true, close: "pid:12", fork: true },
     { name: "api", headless: false },
     { name: "bg", headless: true },
     { name: "Fix login", headless: true, close: "claude-code:u-driven" },
+    { name: "Fix login", headless: true, close: "pid:14", fork: true },
     { name: "site", headless: false },
     { name: "take", headless: true, close: "pid:13" },
   ]);

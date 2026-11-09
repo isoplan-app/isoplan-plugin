@@ -64,7 +64,7 @@ function machine(settings: Partial<Config> = {}) {
 type Hooks = { cwd: string; name: string; root?: string; since?: number; env?: Record<string, string> };
 
 /** watchSessions with a stand-in report: each session it starts is kept, and ends when told (or when the runner stops). */
-function watch(m: ReturnType<typeof machine>, o: { isOff?: (folder: string) => Promise<boolean>; isAlive?: (pid: number) => boolean; gapMs?: number; io?: NodeIo; hooked?: Map<string, Hooks>; recheckMs?: number } = {}) {
+function watch(m: ReturnType<typeof machine>, o: { isOff?: (folder: string) => Promise<boolean>; isAlive?: (pid: number) => boolean; gapMs?: number; io?: NodeIo; hooked?: Map<string, Hooks>; recheckMs?: number; removedFile?: string } = {}) {
   // The hooks modules told an earlier version's data layer reports their session.
   const told: { id: string; name: string }[] = [];
   const started: { id: string; notWanted: Record<string, number>; hooks?: Hooks; cwd: string; end: (ended?: Ended) => void; stoppedFor?: string }[] = [];
@@ -74,7 +74,7 @@ function watch(m: ReturnType<typeof machine>, o: { isOff?: (folder: string) => P
       started.push(entry);
       void s.closed.then((why) => ((entry.stoppedFor = why), resolve({ why: "stopped" })));
     });
-  const w = watchSessions({ claudeDir: m.claudeDir, io: o.io ?? nodeIo(), config: async () => m.config, report, isOff: o.isOff ?? (async () => false), log: () => {}, gapMs: o.gapMs ?? 0, ...(o.recheckMs !== undefined && { recheckMs: o.recheckMs }), ...(o.isAlive && { isAlive: o.isAlive }), ...(o.hooked && { hooked: (id: string) => o.hooked!.get(id) ?? null }), held: (id, hooks) => void told.push({ id, name: hooks.name }) });
+  const w = watchSessions({ claudeDir: m.claudeDir, io: o.io ?? nodeIo(), config: async () => m.config, report, isOff: o.isOff ?? (async () => false), log: () => {}, gapMs: o.gapMs ?? 0, ...(o.recheckMs !== undefined && { recheckMs: o.recheckMs }), ...(o.removedFile && { removedFile: o.removedFile }), ...(o.isAlive && { isAlive: o.isAlive }), ...(o.hooked && { hooked: (id: string) => o.hooked!.get(id) ?? null }), held: (id, hooks) => void told.push({ id, name: hooks.name }) });
   watching.push(w);
   return { w, started, told, ids: () => started.map((s) => s.id) };
 }
@@ -466,6 +466,23 @@ test("a session that stopped being reported is reported again only once its tran
   await wait(20); // a write time past the one it ended at
   m.write("s1");
   await until(() => ids().length === 2);
+});
+
+test("a session ended and removed isn't reported again by a runner started again, on its first look; once its transcript is written again (resumed in a terminal), it is", async () => {
+  const m = machine({ idleMinutes: 30, lightsOffHours: 24 });
+  const removedFile = path.join(m.claudeDir, "isoplan", "runner", "removed.json");
+  m.write("s1");
+  const before = watch(m, { removedFile });
+  await until(() => before.ids().length === 1);
+  await before.w.end("s1", "it was ended and removed", true);
+  await before.w.stop();
+  const after = watch(m, { removedFile });
+  await after.w.look();
+  await after.w.look();
+  expect(after.ids()).toEqual([]);
+  await wait(20); // a write time past the one it was removed at
+  m.write("s1");
+  await until(() => after.ids().length === 1);
 });
 
 test("a session that just stopped being reported isn't started again while the runner reads its write time", async () => {

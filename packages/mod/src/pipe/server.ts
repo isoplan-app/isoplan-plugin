@@ -46,8 +46,8 @@ export interface PipeServerOptions {
   address?: string;
   /** Answers an ask from a session whose hooks module is registered: what the agent is told. */
   ask(request: PipeAsk): Promise<string>;
-  /** Closes the runner's headless session that status.json names by `close`: whether its process has ended. */
-  close?(close: string): Promise<boolean>;
+  /** Closes the runner's headless session that status.json names by `close`, and with `remove` removes it too: whether its process has ended. */
+  close?(close: string, remove: boolean): Promise<boolean>;
   onChange(session: string): void;
   log(text: string): void;
 }
@@ -80,7 +80,7 @@ function compareVersions(a: string, b: string): number {
 const isHello = (m: Partial<PipeHello>): m is PipeHello =>
   m.type === "hello" && typeof m.session === "string" && SESSION.test(m.session) && typeof m.cwd === "string" && !!m.cwd && typeof m.since === "number" && typeof m.root === "string" && typeof m.version === "string";
 
-const isClose = (m: Partial<PipeClose>): m is PipeClose => m.type === "close" && typeof m.close === "string" && m.close.length <= 300;
+const isClose = (m: Partial<PipeClose>): m is PipeClose => m.type === "close" && typeof m.close === "string" && m.close.length <= 300 && (m.remove === undefined || m.remove === true);
 
 const isAsk = (m: Partial<PipeAsk>): m is PipeAsk => m.type === "ask" && typeof m.session === "string" && typeof m.cwd === "string" && Array.isArray(m.servers) && m.servers.every((s) => typeof s === "string");
 
@@ -136,7 +136,7 @@ export async function createPipeServer(o: PipeServerOptions): Promise<PipeServer
   };
 
   const close = async (socket: Socket, request: PipeClose) => {
-    const closed = o.close ? await o.close(request.close).catch((err: unknown) => (o.log(`couldn't close ${request.close}: ${String((err as Error)?.message ?? err)}`), false)) : false;
+    const closed = o.close ? await o.close(request.close, request.remove === true).catch((err: unknown) => (o.log(`couldn't close ${request.close}: ${String((err as Error)?.message ?? err)}`), false)) : false;
     writeLine(socket, { type: "closed", closed });
     socket.end();
   };
