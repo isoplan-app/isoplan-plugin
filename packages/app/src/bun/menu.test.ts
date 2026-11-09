@@ -39,7 +39,14 @@ test("menu: says Isoplan is running, each office's link, and the actions", () =>
       type: "normal",
       label: "Sessions",
       submenu: [
-        { type: "normal", label: "app (headless)", submenu: [{ type: "normal", label: "Close", action: "close:claude-code:u1" }] },
+        {
+          type: "normal",
+          label: "app (headless)",
+          submenu: [
+            { type: "normal", label: "End session", action: "close:claude-code:u1" },
+            { type: "normal", label: "End and remove", action: "remove:claude-code:u1" },
+          ],
+        },
         { type: "normal", label: "site (in a terminal or the Claude app)", enabled: false },
       ],
     },
@@ -74,17 +81,21 @@ test("menu: the pairing window lists the links that haven't expired, named by of
   expect(pairingView(input({ engine: "paused" }), 5000)).toEqual({ refreshMs: 5000, running: false, waiting: [], connected: [] });
 });
 
-test("menu: sessions: only a headless one can be closed, and only a Close the status still lists is acted on; paused, starting, none and an older worker each say so", () => {
+test("menu: sessions: only a headless one can be closed, a driven one ended or ended and removed, and only an action on a session the status still lists is acted on; paused, starting, none and an older worker each say so", () => {
   expect(sessionItems(input({ engine: "paused" }))).toEqual([{ type: "normal", label: "Paused: no session is reported", enabled: false }]);
   expect(sessionItems(input({ status: null }))).toEqual([{ type: "normal", label: "Starting…", enabled: false }]);
   expect(sessionItems(input({ status: { ...status, sessions: [] } }))).toEqual([{ type: "normal", label: "No session on this computer", enabled: false }]);
   const { sessions: _, ...older } = status;
   expect(sessionItems(input({ status: older }))).toEqual([{ type: "normal", label: "Not listed: Isoplan's runner needs updating", enabled: false }]);
-  expect(closing("close:claude-code:u1", status)).toBe("claude-code:u1");
+  expect(closing("close:claude-code:u1", status)).toEqual({ close: "claude-code:u1", remove: false });
+  expect(closing("remove:claude-code:u1", status)).toEqual({ close: "claude-code:u1", remove: true });
   // One gone since the menu was drawn, or one in a terminal, isn't closed.
   expect(closing("close:claude-code:gone", status)).toBeNull();
+  expect(closing("remove:claude-code:gone", status)).toBeNull();
   expect(closing("close:", { ...status, sessions: [{ name: "site", headless: false }] })).toBeNull();
   expect(closing("pause", status)).toBeNull();
+  // A fork or a take's first turn is only closed, never removed.
+  expect(closing("remove:pid:12", { ...status, sessions: [{ name: "api", headless: true, close: "pid:12", fork: true }] })).toBeNull();
   // A fork is told apart from its lead, and a claude --bg session the runner started is headless with no Close.
   const forked = [{ name: "api", headless: true, close: "pid:12", fork: true }, { name: "api", headless: false }, { name: "bg", headless: true }];
   expect(sessionItems(input({ status: { ...status, sessions: forked } }))).toEqual([

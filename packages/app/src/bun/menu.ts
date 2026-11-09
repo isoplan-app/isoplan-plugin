@@ -51,8 +51,19 @@ export function officeLines({ engine, status, now, unreachableMs }: MenuInput): 
   });
 }
 
-/** The action that closes a headless session, by the id status.json gives it. */
+/** The action that closes a headless session, by the id status.json gives it: for a driven session, End session. */
 export const closeAction = (close: string) => `close:${close}`;
+/** The action that ends a driven session and removes it, so it is never opened again. */
+export const removeAction = (close: string) => `remove:${close}`;
+
+/** What a headless session's submenu offers: a driven one, closed by its session's id, End session or End and remove; a fork or a take's first turn, by its process's, Close. */
+const closeItems = (close: string): MenuItem[] =>
+  close.startsWith("pid:")
+    ? [{ type: "normal", label: "Close", action: closeAction(close) }]
+    : [
+        { type: "normal", label: "End session", action: closeAction(close) },
+        { type: "normal", label: "End and remove", action: removeAction(close) },
+      ];
 
 /** The Sessions submenu: each session the worker reports or runs; a headless one can be closed, one in a terminal or the Claude app can't. */
 export function sessionItems({ engine, status }: MenuInput): MenuItem[] {
@@ -64,16 +75,19 @@ export function sessionItems({ engine, status }: MenuInput): MenuItem[] {
   return status.sessions.map((s) => {
     const where = s.fork ? "headless, a fork" : s.headless ? "headless" : "in a terminal or the Claude app";
     return s.headless && s.close
-      ? { type: "normal", label: `${s.name} (${where})`, submenu: [{ type: "normal", label: "Close", action: closeAction(s.close) }] }
+      ? { type: "normal", label: `${s.name} (${where})`, submenu: closeItems(s.close) }
       : { type: "normal", label: `${s.name} (${where})`, enabled: false };
   });
 }
 
-/** The session a Close action names, if the status lists it as one that can be closed now. */
-export function closing(action: string, status: RunnerStatus | null): string | null {
-  if (!action.startsWith("close:")) return null;
-  const close = action.slice("close:".length);
-  return status?.sessions?.some((s) => s.headless && s.close === close) ? close : null;
+/** The session a Close, End session or End and remove action names, and whether to remove it, if the status lists it as one that can be closed now. */
+export function closing(action: string, status: RunnerStatus | null): { close: string; remove: boolean } | null {
+  const remove = action.startsWith("remove:");
+  if (!remove && !action.startsWith("close:")) return null;
+  const close = action.slice(action.indexOf(":") + 1);
+  // Only a driven session is removed: a fork or a take's first turn is only closed.
+  if (remove && close.startsWith("pid:")) return null;
+  return status?.sessions?.some((s) => s.headless && s.close === close) ? { close, remove } : null;
 }
 
 export function trayMenu(input: MenuInput): MenuItem[] {
