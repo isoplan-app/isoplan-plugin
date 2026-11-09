@@ -36,7 +36,10 @@
 //
 // A question asked before the plugin loaded, which this hook never saw, can still be answered from
 // the floor in a session that takes messages (the line says `late`): this module ends the running
-// turn, which closes the dialog, and submits the answers as the owner's own message, as below.
+// turn, which closes the dialog, and submits the answers as the owner's own message, as below. Only
+// a build whose $.turn.abort answers as Claude Code 2.1.319's does starts the pipe's end with
+// `--ends-turns`, so only its session offers those questions. A `late` line for a call this module
+// ran is never taken: that call has had its answer, though the transcript may not show it yet.
 //
 // The pipe's end passes the runner's JSON lines on on its stdout (src/lines.ts). Claude Code closes
 // the child's stdin at launch, so what goes the other way, a title, goes through a file the line
@@ -117,6 +120,8 @@ const pairSaid = new Set<string>(); // the offices whose link was put in the tra
 const offices = new Map<string, string | undefined>();
 // The questions waiting for an answer from the floor too, by their call's id: each ends its call.
 const floorWaits = new Map<string, (answer: OwnerAnswerLine) => void>();
+// The id of each question's call this module has run, waiting or done.
+const questionCalls = new Set<string>();
 let waitsDir: string | null = null; // where the waits are marked, as the data layer said
 let shownStatus: string | undefined; // the status line, without the update note
 let updated = false; // a newer version of the plugin is on disk, loaded at /reload-plugins
@@ -183,6 +188,7 @@ async function askBoth($: Host, e: ToolCallInput, next: (e: ToolCallInput) => Pr
   let answer!: (answer: OwnerAnswerLine) => void;
   const floor = new Promise<OwnerAnswerLine>((resolve) => (answer = resolve));
   floorWaits.set(e.tool_use_id, answer);
+  questionCalls.add(e.tool_use_id);
   mark($, e.tool_use_id, true);
   try {
     const first = await Promise.race([ran.then((r) => ({ r })), floor.then((line) => ({ line }))]);
@@ -212,7 +218,7 @@ function ownerAnswer($: Host, line: OwnerAnswerLine): void {
   const say = (taken: Omit<AnswerTaken, "question">) =>
     void $.fs.write(line.file, JSON.stringify({ question: line.question, ...taken })).catch((err) => $.ui.log("isoplan: could not say whether the floor's answer was taken: " + message(err), { to: "debug" }));
   const answer = floorWaits.get(line.question);
-  if (answer || !line.late) {
+  if (answer || !line.late || questionCalls.has(line.question)) {
     answer?.(line);
     return say({ taken: !!answer });
   }
@@ -269,6 +275,17 @@ async function endTurn($: Host): Promise<boolean> {
 
 // A turn id no turn has.
 const NO_TURN = "isoplan-no-turn";
+
+// Whether this Claude Code build can end the running turn for a plugin: its $.turn.abort refuses a
+// turn id no turn has as endTurn reads it. False when it has no abort, or refuses in other words.
+async function endsTurns($: Host): Promise<boolean> {
+  try {
+    await $.turn!.abort!({ turnId: NO_TURN }); // throws when the host has no abort
+    return false;
+  } catch (err) {
+    return /no turn is running|is not the running turn \(/.test(message(err));
+  }
+}
 
 // What the model reads when the owner chooses "Chat about this" in Claude Code 2.1.319's dialog, word
 // for word: the questions, none of them answered. Given as a refusal, the model reads it inside
@@ -374,7 +391,7 @@ async function run($: Host): Promise<void> {
   const script = $.plugin.root.replace(/\\/g, "/") + "/dist/pipe.js";
   let failures = 0;
   const since = await $.clock.now();
-  const messages = (await submits($)) ? ["--messages"] : [];
+  const can = [...((await submits($)) ? ["--messages"] : []), ...((await endsTurns($)) ? ["--ends-turns"] : [])];
   for (;;) {
     if (!(await isThere($, script))) {
       updated = true;
@@ -406,7 +423,7 @@ async function run($: Host): Promise<void> {
     let code: number | null = null;
     const startedAt = await $.clock.now();
     try {
-      const child = $.process.spawn({ argv: ["node", script, "--session", session, "--cwd", cwd, "--since", String(since), ...messages], cwd });
+      const child = $.process.spawn({ argv: ["node", script, "--session", session, "--cwd", cwd, "--since", String(since), ...can], cwd });
       let buffer = "";
       for (;;) {
         const piece = await Promise.race([child.next(), switching]);

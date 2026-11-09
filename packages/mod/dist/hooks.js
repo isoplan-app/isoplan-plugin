@@ -56,6 +56,7 @@ const pairings = /* @__PURE__ */ new Map();
 const pairSaid = /* @__PURE__ */ new Set();
 const offices = /* @__PURE__ */ new Map();
 const floorWaits = /* @__PURE__ */ new Map();
+const questionCalls = /* @__PURE__ */ new Set();
 let waitsDir = null;
 let shownStatus;
 let updated = false;
@@ -115,6 +116,7 @@ async function askBoth($, e, next) {
 	let answer;
 	const floor = new Promise((resolve) => answer = resolve);
 	floorWaits.set(e.tool_use_id, answer);
+	questionCalls.add(e.tool_use_id);
 	mark($, e.tool_use_id, true);
 	try {
 		const first = await Promise.race([ran.then((r) => ({ r })), floor.then((line) => ({ line }))]);
@@ -146,7 +148,7 @@ function ownerAnswer($, line) {
 		...taken
 	})).catch((err) => $.ui.log("isoplan: could not say whether the floor's answer was taken: " + message(err), { to: "debug" }));
 	const answer = floorWaits.get(line.question);
-	if (answer || !line.late) {
+	if (answer || !line.late || questionCalls.has(line.question)) {
 		answer?.(line);
 		return say({ taken: !!answer });
 	}
@@ -210,6 +212,14 @@ async function endTurn($) {
 	}
 }
 const NO_TURN = "isoplan-no-turn";
+async function endsTurns($) {
+	try {
+		await $.turn.abort({ turnId: NO_TURN });
+		return false;
+	} catch (err) {
+		return /no turn is running|is not the running turn \(/.test(message(err));
+	}
+}
 function chatText(questions) {
 	return [
 		"The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). To tell you how to proceed, the user said:",
@@ -313,7 +323,7 @@ async function run($) {
 	const script = $.plugin.root.replace(/\\/g, "/") + "/dist/pipe.js";
 	let failures = 0;
 	const since = await $.clock.now();
-	const messages = await submits($) ? ["--messages"] : [];
+	const can = [...await submits($) ? ["--messages"] : [], ...await endsTurns($) ? ["--ends-turns"] : []];
 	for (;;) {
 		if (!await isThere($, script)) {
 			updated = true;
@@ -353,7 +363,7 @@ async function run($) {
 					cwd,
 					"--since",
 					String(since),
-					...messages
+					...can
 				],
 				cwd
 			});

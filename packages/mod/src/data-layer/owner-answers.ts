@@ -4,16 +4,17 @@
 // Each open question is secret-checked here with the patterns reports use (src/runner/scan.ts): one
 // that matches, and every one while the patterns can't be read, goes out only as a placeholder,
 // `withheld`, and is answered in the terminal. One that passes is `answerable` only while the hooks
-// module (src/hooks/register.ts) has marked that it waits for it. One it never saw, asked before the
-// plugin loaded, is `asMessage` in a session whose hooks module takes messages: the hooks module ends
-// the agent's turn, which closes the dialog, and submits the answers as the owner's own message.
-// Elsewhere it stays read-only on the floor.
+// module (src/hooks/register.ts) has marked that it waits for it. One it never marked, asked before the
+// plugin loaded, is `asMessage` in a session whose hooks module takes messages and can end a turn: the
+// hooks module ends the agent's turn, which closes the dialog, and submits the answers as the owner's
+// own message. Elsewhere it stays read-only on the floor.
 //
 // The office server sends an owner-answer request down this session's link, and the data layer
 // passes it to the hooks module, which writes back, in the file the line names, whether the answer
 // ended the call (or went in as the owner's message); the server is told: a reply only when it did, a refusal saying why when it didn't.
 // With no word in TAKEN_WAIT_MS, a question that has closed meanwhile gets a `closed` reply, which
-// says it has an answer without saying whose; one still open is refused. Either way the word is
+// says it has an answer without saying whose; one still open, or one going in as a message (whose
+// dialog the hooks module closed itself), is refused. Either way the word is
 // looked for a minute longer, and a take that comes then is sent as a `late` reply.
 // Only the plugin's own data layer can pass it on: the runner, reporting a session without a hooks
 // module, can't, so its questions are answered in the terminal. Each answer's annotations are those
@@ -35,10 +36,12 @@ export const WITHHELD_QUESTION = "Held for its owner to check: the secret check 
 
 /**
  * The facts with their questions as they are sent: each one the scan matches, or every one while
- * `patterns` is null, as a placeholder marked `withheld`; each other one `answerable` while `waiting`
- * holds its id, else `asMessage` when the session `takesMessages`, unless the source left part of it out.
+ * `patterns` is null, as a placeholder marked `withheld`; each other one `answerable` while its mark
+ * in `marks` says the hooks module waits for it, else, with no mark at all, `asMessage` when the
+ * session `answersLate`, unless the source left part of it out. A question whose mark says the wait
+ * has ended has had its answer, though the transcript may not show it yet.
  */
-export function prepareQuestions(facts: Facts, patterns: Pattern[] | null, waiting: ReadonlySet<string>, log: (text: string) => void, takesMessages = false): Facts {
+export function prepareQuestions(facts: Facts, patterns: Pattern[] | null, marks: ReadonlyMap<string, boolean>, log: (text: string) => void, answersLate = false): Facts {
   if (!facts.questions?.length) return facts;
   const questions = facts.questions.map((q) => {
     const text = q.questions.flatMap((x) => [x.question, x.header, ...x.options.flatMap((o) => [o.label, o.description, o.preview ?? ""])]).join("\n");
@@ -49,8 +52,8 @@ export function prepareQuestions(facts: Facts, patterns: Pattern[] | null, waiti
     }
     // One the source couldn't take whole (a question or option it left out) can't be answered whole here.
     if (q.extra?.incomplete) return q;
-    if (waiting.has(q.id)) return { ...q, answerable: true as const };
-    return takesMessages ? { ...q, asMessage: true as const } : q;
+    if (marks.get(q.id) === true) return { ...q, answerable: true as const };
+    return answersLate && !marks.has(q.id) ? { ...q, asMessage: true as const } : q;
   });
   return { ...facts, questions };
 }
@@ -84,7 +87,8 @@ export interface Relayed {
 /**
  * A reply only once the hooks module says the answer ended the question's call; a refusal saying why
  * not otherwise. With no word from it in `waitMs`, a question that has closed since gets a `closed`
- * reply, which says only that it has an answer, the floor's or the terminal's.
+ * reply, which says only that it has an answer, the floor's or the terminal's; one going in as a
+ * message is refused, since the hooks module closed it itself, by ending the turn.
  */
 export async function relayOwnerAnswer(request: OwnerAnswer, { detached, session, facts, file, emit, take, sleep = wait, waitMs = TAKEN_WAIT_MS }: OwnerAnswerOptions): Promise<Relayed> {
   const refuse = (detail: string, gaveUp = false): Relayed => ({ message: { type: "refusal", v: PROTOCOL_VERSION, id: request.id, reason: "unavailable", detail }, gaveUp });
@@ -104,6 +108,7 @@ export async function relayOwnerAnswer(request: OwnerAnswer, { detached, session
     if (taken.taken) return { message: { type: "reply", v: PROTOCOL_VERSION, id: request.id, kind: "owner-answer" }, gaveUp: false };
     return refuse(NOT_TAKEN[taken.reason ?? "answered"]);
   }
+  if (question.asMessage) return refuse("Claude Code hasn't taken the answer as a message yet: if the agent doesn't get it soon, answer in its terminal.", true);
   if (!open()) return { message: { type: "reply", v: PROTOCOL_VERSION, id: request.id, kind: "owner-answer", closed: true }, gaveUp: true };
   return refuse("Claude Code didn't take the answer in time: answer it in the terminal.", true);
 }

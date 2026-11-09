@@ -16593,10 +16593,12 @@ const LATE_MS = 6e4;
 const WITHHELD_QUESTION = "Held for its owner to check: the secret check found what may be a secret in this question, so it is answered in the terminal.";
 /**
 * The facts with their questions as they are sent: each one the scan matches, or every one while
-* `patterns` is null, as a placeholder marked `withheld`; each other one `answerable` while `waiting`
-* holds its id, else `asMessage` when the session `takesMessages`, unless the source left part of it out.
+* `patterns` is null, as a placeholder marked `withheld`; each other one `answerable` while its mark
+* in `marks` says the hooks module waits for it, else, with no mark at all, `asMessage` when the
+* session `answersLate`, unless the source left part of it out. A question whose mark says the wait
+* has ended has had its answer, though the transcript may not show it yet.
 */
-function prepareQuestions(facts, patterns, waiting, log, takesMessages = false) {
+function prepareQuestions(facts, patterns, marks, log, answersLate = false) {
 	if (!facts.questions?.length) return facts;
 	const questions = facts.questions.map((q) => {
 		const matched = scan(q.questions.flatMap((x) => [
@@ -16624,11 +16626,11 @@ function prepareQuestions(facts, patterns, waiting, log, takesMessages = false) 
 			};
 		}
 		if (q.extra?.incomplete) return q;
-		if (waiting.has(q.id)) return {
+		if (marks.get(q.id) === true) return {
 			...q,
 			answerable: true
 		};
-		return takesMessages ? {
+		return answersLate && !marks.has(q.id) ? {
 			...q,
 			asMessage: true
 		} : q;
@@ -16641,7 +16643,8 @@ function prepareQuestions(facts, patterns, waiting, log, takesMessages = false) 
 /**
 * A reply only once the hooks module says the answer ended the question's call; a refusal saying why
 * not otherwise. With no word from it in `waitMs`, a question that has closed since gets a `closed`
-* reply, which says only that it has an answer, the floor's or the terminal's.
+* reply, which says only that it has an answer, the floor's or the terminal's; one going in as a
+* message is refused, since the hooks module closed it itself, by ending the turn.
 */
 async function relayOwnerAnswer(request, { detached, session, facts, file, emit, take, sleep = wait$1, waitMs = TAKEN_WAIT_MS$1 }) {
 	const refuse = (detail, gaveUp = false) => ({
@@ -16691,6 +16694,7 @@ async function relayOwnerAnswer(request, { detached, session, facts, file, emit,
 		};
 		return refuse(NOT_TAKEN[taken.reason ?? "answered"]);
 	}
+	if (question.asMessage) return refuse("Claude Code hasn't taken the answer as a message yet: if the agent doesn't get it soon, answer in its terminal.", true);
 	if (!open()) return {
 		message: {
 			type: "reply",
@@ -16997,6 +17001,7 @@ async function reporting(o, c) {
 	const { sessionId, cwd, closed } = o;
 	const hooked = o.by === "hooks";
 	const takesMessages = hooked && !!o.takesMessages;
+	const answersLate = takesMessages && !!o.endsTurns;
 	const here = path.join(o.appDir, "dist");
 	const defaultsPath = path.join(o.appDir, "config.json");
 	const { dir: claudeDir, json: claudeJson } = claudePaths(process.env, os.homedir());
@@ -17183,7 +17188,7 @@ async function reporting(o, c) {
 	let isPlaceless = false;
 	let passes = 0;
 	let shown = null;
-	let waiting = /* @__PURE__ */ new Set();
+	let marks = /* @__PURE__ */ new Map();
 	const said = /* @__PURE__ */ new Set();
 	const patternLog = (text) => {
 		if (!said.has(text)) emit({
@@ -17192,7 +17197,7 @@ async function reporting(o, c) {
 		});
 		said.add(text);
 	};
-	const outgoing = (run, facts, patterns) => prepareWorkflows(prepareQuestions(run.hold.apply(facts, patterns), patterns, waiting, patternLog, takesMessages), patterns, patternLog);
+	const outgoing = (run, facts, patterns) => prepareWorkflows(prepareQuestions(run.hold.apply(facts, patterns), patterns, marks, patternLog, answersLate), patterns, patternLog);
 	let checkouts = {};
 	let answered = (_id) => false;
 	let contextWindow = null;
@@ -17595,7 +17600,7 @@ async function reporting(o, c) {
 			patternLog(`couldn't read the secret patterns, so every report is withheld: ${String(err?.message ?? err)}`);
 			return null;
 		});
-		waiting = hooked ? await waitsOf(waitsDir, facts) : /* @__PURE__ */ new Set();
+		marks = hooked ? await waitsOf(waitsDir, facts) : /* @__PURE__ */ new Map();
 		shown = [facts, patterns];
 		for (const run of taking) try {
 			run.gate.link()?.update(run.sent = outgoing(run, facts, patterns));
@@ -17676,11 +17681,11 @@ async function writeLog$1(file, text) {
 	else await fs.appendFile(file, text);
 }
 async function waitsOf(dir, facts) {
-	const out = /* @__PURE__ */ new Set();
+	const out = /* @__PURE__ */ new Map();
 	for (const q of facts.questions ?? []) {
 		if (!/^[A-Za-z0-9_-]{1,200}$/.test(q.id)) continue;
 		const mark = await fs.readFile(path.join(dir, `${q.id}.json`), "utf8").then((text) => JSON.parse(text), () => null);
-		if (mark?.question === q.id && mark.waiting === true) out.add(q.id);
+		if (mark?.question === q.id && typeof mark.waiting === "boolean") out.set(q.id, mark.waiting);
 	}
 	return out;
 }
@@ -18313,6 +18318,7 @@ async function createPipeServer(o) {
 			cwd: hello.cwd,
 			since: hello.since,
 			messages: hello.messages === true,
+			endsTurns: hello.endsTurns === true,
 			root: hello.root,
 			version: hello.version,
 			env: hello.env && typeof hello.env === "object" ? sessionEnv(hello.env) : {},
@@ -18853,6 +18859,7 @@ async function worker() {
 					since: hooks.since,
 					env: hooks.env,
 					takesMessages: hooks.messages,
+					endsTurns: hooks.endsTurns,
 					emit: (line) => {
 						said.emit(line);
 						hooks.send(line);

@@ -1,6 +1,6 @@
 // The hooks module's end of the runner's pipe (client.ts), which it spawns for its session:
 //
-//   node dist/pipe.js --session <session id> --cwd <the session's folder> [--since <ms>] [--messages]
+//   node dist/pipe.js --session <session id> --cwd <the session's folder> [--since <ms>] [--messages] [--ends-turns]
 //
 // As it starts, unless a newer version of the plugin is on disk, it puts this version's wake hook
 // and the runner's copy in place and starts the runner (startMachine), as the plugin's data layer
@@ -38,7 +38,7 @@ export async function pipeMain(argv: string[], appDir: string): Promise<number> 
   const session = value(argv, "--session");
   const cwd = value(argv, "--cwd");
   if (!session || !cwd) {
-    process.stderr.write("usage: node pipe.js --session <id> --cwd <dir> [--since <ms>] [--messages]\n");
+    process.stderr.write("usage: node pipe.js --session <id> --cwd <dir> [--since <ms>] [--messages] [--ends-turns]\n");
     return 2;
   }
   const { dir: claudeDir } = claudePaths(process.env, os.homedir());
@@ -69,7 +69,7 @@ export async function pipeMain(argv: string[], appDir: string): Promise<number> 
   await relay({
     claudeDir,
     // The session's own plugin folders and update switches go with it: the runner's environment isn't the session's.
-    hello: { session, cwd, since: Number(value(argv, "--since")) || Date.now(), messages: argv.includes("--messages"), root: appDir, version, env: sessionEnv(process.env) },
+    hello: { session, cwd, since: Number(value(argv, "--since")) || Date.now(), messages: argv.includes("--messages"), endsTurns: argv.includes("--ends-turns"), root: appDir, version, env: sessionEnv(process.env) },
     out,
     goOn,
     startRunner: () => startRunner({ claudeDir, spawn: spawnHidden }),

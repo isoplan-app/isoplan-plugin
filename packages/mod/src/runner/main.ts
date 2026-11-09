@@ -277,6 +277,7 @@ async function worker(): Promise<number> {
             since: hooks.since,
             env: hooks.env,
             takesMessages: hooks.messages,
+            endsTurns: hooks.endsTurns,
             emit: (line) => {
               said.emit(line);
               hooks.send(line);

@@ -36,6 +36,8 @@ export interface PipeHello {
   since: number;
   /** The hooks module can submit a prompt, so the session takes messages from the floor. */
   messages: boolean;
+  /** The hooks module can end the running turn; absent from an earlier version's. */
+  endsTurns?: boolean;
   /** The plugin's folder the hooks module runs from, and its version. */
   root: string;
   version: string;

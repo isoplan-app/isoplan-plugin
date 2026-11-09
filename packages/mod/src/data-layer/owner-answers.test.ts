@@ -82,10 +82,15 @@ test("owner answer: a question asked before the plugin loaded goes as the owner'
   expect(await refused(relay([JSON.stringify({ question: "toolu_1", taken: false, reason: "ended" })], { given }))).toMatch(/has ended, or carried on as a new one/);
 });
 
-test("owner answer: with no word from the hooks module, a question that has closed since gets a closed reply, and either way its word is still looked for", async () => {
+test("owner answer: with no word from the hooks module, a question that has closed since gets a closed reply, unless it went as a message, and either way its word is still looked for", async () => {
   expect(await relay([], { given: [facts, { ...facts, questions: [] }] }).sent).toEqual({ message: { type: "reply", v, id: "r1", kind: "owner-answer", closed: true }, gaveUp: true });
   expect((await relay([]).sent).gaveUp).toBe(true);
   expect((await relay([JSON.stringify({ question: "toolu_1", taken: false })]).sent).gaveUp).toBe(false);
+  // One going in as a message closes when its turn is ended, before the answer is in: it is refused.
+  const late = { ...facts, questions: [asked("toolu_1", "Which branch?", { asMessage: true })] };
+  const r = relay([], { given: [late, { ...facts, questions: [] }] });
+  expect(await refused(r)).toMatch(/hasn't taken the answer as a message yet/);
+  expect((await r.sent).gaveUp).toBe(true);
 });
 
 test("a late word: the hooks module's take, or its no, once it comes; nothing when it never does", async () => {
@@ -102,26 +107,28 @@ test("questions as sent: answerable only while their wait is marked; one the sec
   const logged: string[] = [];
   const open: Facts = { ...facts, questions: [asked("toolu_1", "Which branch?"), asked("toolu_2", `Use the key ${sk}?`), asked("toolu_3", "Ship it?")] };
   const patterns = [{ name: "Stripe secret key", regex: /sk_live_[0-9a-zA-Z]{24}/ }];
-  const sent = prepareQuestions(open, patterns, new Set(["toolu_1", "toolu_2"]), (t) => void logged.push(t));
+  const sent = prepareQuestions(open, patterns, new Map([["toolu_1", true], ["toolu_2", true]]), (t) => void logged.push(t));
   const held = { id: "toolu_2", agent: lead, at, questions: [{ question: WITHHELD_QUESTION, header: "", options: [], multiSelect: false }], withheld: true };
   expect(sent.questions).toEqual([{ ...open.questions![0], answerable: true }, held, open.questions![2]]);
   expect(JSON.stringify(sent)).not.toContain(sk);
   expect(logged).toEqual([`withheld the question toolu_2 of ${lead}: it matches the secret pattern "Stripe secret key"; it is answered in the terminal`]);
   // An option's text is checked too.
   const inOption: Facts = { ...facts, questions: [{ ...asked("toolu_4", "Which key?"), questions: [{ question: "Which key?", header: "", options: [{ label: "This one", description: sk }], multiSelect: false }] }] };
-  expect(prepareQuestions(inOption, patterns, new Set(["toolu_4"]), () => {}).questions![0]).toMatchObject({ withheld: true });
-  expect(prepareQuestions(open, null, new Set(["toolu_1"]), () => {}).questions!.every((q) => q.withheld && !q.answerable)).toBe(true);
+  expect(prepareQuestions(inOption, patterns, new Map([["toolu_4", true]]), () => {}).questions![0]).toMatchObject({ withheld: true });
+  expect(prepareQuestions(open, null, new Map([["toolu_1", true]]), () => {}).questions!.every((q) => q.withheld && !q.answerable)).toBe(true);
   // One the source took only in part is never answerable: an answer wouldn't cover all of it.
   const partial: Facts = { ...facts, questions: [asked("toolu_5", "Which branch?", { extra: { incomplete: true } })] };
-  expect(prepareQuestions(partial, patterns, new Set(["toolu_5"]), () => {}).questions![0]!.answerable).toBeUndefined();
+  expect(prepareQuestions(partial, patterns, new Map([["toolu_5", true]]), () => {}).questions![0]!.answerable).toBeUndefined();
 });
 
-test("questions as sent: one not waited on, in a session that takes messages, is answerable as a message, unless withheld or incomplete; a preview is secret-checked too", () => {
+test("questions as sent: one never marked, in a session that answers late, is answerable as a message, unless withheld or incomplete; one whose wait has ended isn't; a preview is secret-checked too", () => {
   const patterns = [{ name: "Stripe secret key", regex: /sk_live_[0-9a-zA-Z]{24}/ }];
   const inPreview = { ...asked("toolu_2", "Which key?"), questions: [{ question: "Which key?", header: "", options: [{ label: "This one", description: "", preview: `KEY=${sk}` }], multiSelect: false }] };
   const open: Facts = { ...facts, questions: [asked("toolu_1", "Which branch?"), inPreview, asked("toolu_3", "Ship it?", { extra: { incomplete: true } }), asked("toolu_4", "Now?")] };
-  const sent = prepareQuestions(open, patterns, new Set(["toolu_4"]), () => {}, true).questions!;
+  const sent = prepareQuestions(open, patterns, new Map([["toolu_4", true]]), () => {}, true).questions!;
   expect(sent.map((q) => [q.answerable, q.asMessage, q.withheld])).toEqual([[undefined, true, undefined], [undefined, undefined, true], [undefined, undefined, undefined], [true, undefined, undefined]]);
   expect(JSON.stringify(sent)).not.toContain(sk);
-  expect(prepareQuestions(open, patterns, new Set(), () => {}).questions![0]!.asMessage).toBeUndefined();
+  expect(prepareQuestions(open, patterns, new Map(), () => {}).questions![0]!.asMessage).toBeUndefined();
+  // The hooks module ran its call, which has ended: the transcript just doesn't show the answer yet.
+  expect(prepareQuestions(open, patterns, new Map([["toolu_1", false]]), () => {}, true).questions![0]).toEqual(open.questions![0]);
 });

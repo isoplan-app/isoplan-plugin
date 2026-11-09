@@ -516,7 +516,8 @@ test("hooks: a question asked before it loaded is answered by ending the running
   });
   const submit = vi.fn(async (input: { text: string }) => (steps.push("submit " + input.text), {}));
   expect(await said({ abort, submit })).toEqual({ question: "toolu_1", taken: true });
-  expect(steps).toEqual(["abort isoplan-no-turn", "abort turn-7", "submit I answered your question on the Isoplan floor:"]);
+  // The first abort, as it starts, only sees whether this build can end a turn.
+  expect(steps).toEqual(["abort isoplan-no-turn", "abort isoplan-no-turn", "abort turn-7", "submit I answered your question on the Isoplan floor:"]);
   expect(submit).toHaveBeenCalledWith({ text: "I answered your question on the Isoplan floor:", asUser: true });
   // A resumed session with no turn running has no dialog to close: the answer goes straight in.
   steps.length = 0;
@@ -529,13 +530,22 @@ test("hooks: a question asked before it loaded is answered by ending the running
   expect(await said({ abort, submit: async () => ({ drop: "a hook said no" }) })).toEqual({ question: "toolu_1", taken: false, reason: "dropped" });
 });
 
-test("hooks: a question answered in the terminal first keeps that answer, and a later floor answer isn't taken", async () => {
+test("hooks: a question answered in the terminal first keeps that answer, and a later floor answer isn't taken, even as a message", async () => {
   const file = "C:/Users/ada/.claude/isoplan/answers/s1-1.json";
   const answered: ToolCallResult = { result: { answers: { "Which branch?": "A new branch" } } };
   const asked = hooks["tool.call"]!(host([]).$, { tool: "AskUserQuestion", tool_use_id: "toolu_1" }, async () => answered) as Promise<ToolCallResult>;
   expect(await asked).toEqual(answered);
-  const h = await start([{ type: "owner-answer", question: "toolu_1", answers: { "Which branch?": "main" }, file }]);
-  await vi.waitFor(() => expect(h.written).toEqual([[file, JSON.stringify({ question: "toolu_1", taken: false })]]));
+  // The second answer came from facts sent before the transcript showed the first: they offered it as a message.
+  const lateFile = "C:/Users/ada/.claude/isoplan/answers/s1-2.json";
+  const abort = vi.fn(async () => {});
+  const submit = vi.fn(async () => ({}));
+  const h = await start([
+    { type: "owner-answer", question: "toolu_1", answers: { "Which branch?": "main" }, file },
+    { type: "owner-answer", question: "toolu_1", answers: { "Which branch?": "main" }, late: { session: "s1", text: "I answered your question on the Isoplan floor:" }, file: lateFile },
+  ], { abort, submit });
+  await vi.waitFor(() => expect(h.written).toEqual([[file, JSON.stringify({ question: "toolu_1", taken: false })], [lateFile, JSON.stringify({ question: "toolu_1", taken: false })]]));
+  expect(abort).toHaveBeenCalledTimes(1); // once, as it starts, to see whether this build can end a turn
+  expect(submit).not.toHaveBeenCalled();
 });
 
 test("hooks: a question's wait is marked where the data layer says, from its start until it ends; an unsafe call id is never marked", async () => {
@@ -612,6 +622,21 @@ test("hooks: the data layer is started saying it takes messages only on Claude C
   expect(await argv({ version: "2.1.320-dev.20261101.t101500.sha1a2b3c4", base: "2.1.320-dev" })).toBe(true);
   expect(await argv({ version: "2.2.0" })).toBe(true);
   expect(await argv({ version: "a build from source" })).toBe(false);
+});
+
+test("hooks: the data layer is started saying it can end turns only when $.turn.abort refuses a turn id no turn has as Claude Code 2.1.319 does", async () => {
+  const argv = async (abort?: HostOptions["abort"]) => {
+    vi.resetModules();
+    const { register } = await import("./register.js");
+    register(((event: keyof Hooks, hook: Function) => ((hooks[event] = hook), { catch: () => {} })) as unknown as On);
+    const h = await start([], { stays: true, abort });
+    await vi.waitFor(() => expect(h.spawned).toHaveLength(1));
+    return h.spawned[0]!.includes("--ends-turns");
+  };
+  expect(await argv()).toBe(false);
+  expect(await argv(async () => Promise.reject(new Error("isoplan: $.turn.abort: no turn is running (asked for isoplan-no-turn)")))).toBe(true);
+  expect(await argv(async () => Promise.reject(new Error("isoplan: $.turn.abort: isoplan-no-turn is not the running turn (turn-7); a hook ends the turn turn.start told it about")))).toBe(true);
+  expect(await argv(async () => Promise.reject(new Error("busy")))).toBe(false);
 });
 
 test.each([
