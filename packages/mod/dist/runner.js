@@ -18304,6 +18304,9 @@ const uuidOf = (session) => session.slice(session.indexOf(":") + 1);
 * closed by its session's id or its process's; a fork, which shares its lead's id, is listed on its own
 * and closed by its process's. A session the runner started with `claude --bg` (`background`, bare
 * ids) is headless with no close. A session in a terminal or the Claude app has no close.
+* `background` is the worker's memory alone: after the runner restarts, a `claude --bg` session it
+* started before is listed as one in a terminal or the Claude app, and one a person has since attached
+* to from a terminal is still listed as headless.
 */
 function sessionsSeen(reported, records, background = /* @__PURE__ */ new Set()) {
 	const closeOf = (r) => r.kind === "driven" ? r.session : `pid:${r.pid}`;
@@ -18330,6 +18333,24 @@ function sessionsSeen(reported, records, background = /* @__PURE__ */ new Set())
 		...r.kind === "fork" && { fork: true }
 	});
 	return seen.sort((a, b) => a.name.localeCompare(b.name) || Number(b.headless) - Number(a.headless));
+}
+/**
+* Closes a fork or a take's first turn by the `pid:<pid>` sessionsSeen gave it: ends its process and
+* waits up to `waitMs` for it to go. A take's first turn is put in `closing` (bare id) first, so its
+* failure says it was closed from the menu, and taken out again if its process is still running.
+* Answers the record of the process that ended, or null.
+*/
+async function closeProcess(close, records, o) {
+	const record = records.find((r) => r.kind !== "driven" && r.pid !== null && `pid:${r.pid}` === close);
+	if (!record) return null;
+	const pid = record.pid;
+	const id = uuidOf(record.session);
+	if (record.kind === "desktop-read") o.closing.add(id);
+	o.kill(pid);
+	for (const until = Date.now() + o.waitMs; o.alive(pid) && Date.now() < until;) await new Promise((r) => setTimeout(r, 100));
+	if (!o.alive(pid)) return record;
+	o.closing.delete(id);
+	return null;
 }
 //#endregion
 //#region src/runner/main.ts
@@ -18744,7 +18765,7 @@ async function worker() {
 						},
 						track: registry.track,
 						background: (id) => background.add(id),
-						closed: (id) => closedFromMenu.has(id),
+						closed: (id) => closedFromMenu.delete(id),
 						names
 					});
 					if (taken.session) await recordTakenOffice(claudeDir, taken.session, server).catch(() => {});
@@ -18787,7 +18808,7 @@ async function worker() {
 			orcaFolder: async (orca, folder, branch) => orcaBranchFolder(orca, git, folder, branch, await gitMs()),
 			track: registry.track,
 			background: (id) => background.add(id),
-			closed: (id) => closedFromMenu.has(id)
+			closed: (id) => closedFromMenu.delete(id)
 		}),
 		setup: (m) => {
 			claude.take(m);
@@ -18797,12 +18818,13 @@ async function worker() {
 	driver = drive;
 	closeFor = async (close) => {
 		if (close.startsWith("pid:")) {
-			const record = registry.list().find((r) => r.kind !== "driven" && r.pid !== null && `pid:${r.pid}` === close);
+			const record = await closeProcess(close, registry.list(), {
+				kill: killPid,
+				alive,
+				waitMs: (await settings()).drivenCloseSeconds * 1e3,
+				closing: closedFromMenu
+			});
 			if (!record) return false;
-			if (record.kind === "desktop-read") closedFromMenu.add(record.session.slice(record.session.indexOf(":") + 1));
-			killPid(record.pid);
-			for (const until = Date.now() + (await settings()).drivenCloseSeconds * 1e3; alive(record.pid) && Date.now() < until;) await new Promise((r) => setTimeout(r, 100));
-			if (alive(record.pid)) return false;
 			log(`closed the ${record.kind} process ${record.pid} of ${record.session} from the desktop app's menu`);
 			if (record.kind === "desktop-read") await reporting.end(record.session.slice(record.session.indexOf(":") + 1), CLOSED_FROM_MENU);
 			return true;

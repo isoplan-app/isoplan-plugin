@@ -1,7 +1,7 @@
 import path from "node:path";
 import { expect, test } from "vitest";
 import { tempRoot } from "../data-layer/fixture.js";
-import { createStatus, linkState, readStatus, sessionsSeen, type OfficeSeen } from "./status.js";
+import { closeProcess, createStatus, linkState, readStatus, sessionsSeen, type OfficeSeen } from "./status.js";
 
 const A = "wss://a.example/data-layer";
 const B = "wss://b.example/data-layer";
@@ -89,4 +89,25 @@ test("status: a driven session or a take's first turn is headless and closed by 
     { name: "site", headless: false },
     { name: "take", headless: true, close: "pid:13" },
   ]);
+});
+
+test("status: a Close by process ends a take's first turn and marks it closed from the menu; one still running is unmarked, so its later failure says its own reason", async () => {
+  const records = [
+    { kind: "desktop-read" as const, pid: 7, session: "claude-code:u7", folder: "/r" },
+    { kind: "driven" as const, pid: 8, session: "claude-code:u8", folder: "/r" },
+  ];
+  const closing = new Set<string>();
+  const running = new Set([7, 8]);
+  const killed: number[] = [];
+  const ends = { kill: (pid: number) => (killed.push(pid), running.delete(pid)), alive: (pid: number) => running.has(pid), waitMs: 300, closing };
+  expect(await closeProcess("pid:7", records, ends)).toBe(records[0]);
+  expect([...closing]).toEqual(["u7"]);
+  // A driven session is closed by its session, never by its process here.
+  expect(await closeProcess("pid:8", records, ends)).toBeNull();
+  expect(killed).toEqual([7]);
+
+  closing.clear();
+  running.add(7);
+  expect(await closeProcess("pid:7", records, { ...ends, kill: () => {} })).toBeNull();
+  expect(closing.size).toBe(0);
 });

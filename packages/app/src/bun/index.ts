@@ -19,6 +19,7 @@ import { nodeIo } from "../../../mod/src/data-layer/io.js";
 import { LOCK_REFRESH_MS } from "../../../mod/src/runner/start.js";
 import { readStatus, statusPath, type RunnerStatus } from "../../../mod/src/runner/status.js";
 import { closeSession } from "../../../mod/src/pipe/pipe.js";
+import { menuCloseWaitMs } from "../../../mod/src/runner/session.js";
 import { alive } from "../../../mod/src/wake/lock.js";
 import type { PairingRPC } from "../shared/pairing-rpc.ts";
 import { startEngine } from "./engine.ts";
@@ -111,9 +112,8 @@ async function act(action: string): Promise<void> {
 }
 
 // A headless session the menu offers to close: this machine's runner closes it, as it owns its process.
-// The runner gives a process drivenCloseSeconds to end, then ends what is reporting it: twice that covers both.
 async function close(id: string): Promise<void> {
-  const closed = await closeSession(claudeDir, id, (await settings()).drivenCloseSeconds * 2000);
+  const closed = await closeSession(claudeDir, id, menuCloseWaitMs((await settings()).drivenCloseSeconds));
   log(
     closed === true
       ? `closed ${id} from the menu`

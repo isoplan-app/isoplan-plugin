@@ -96,7 +96,7 @@ import { createPairLinks } from "./pair-links.js";
 import { startPlaces, startWhere } from "./start-where.js";
 import { runnerEnvPath } from "./environment.js";
 import { applyClaudeDir, LOCK_REFRESH_MS, RUNNER_FRESH_MS, runnerCode, runnerLockPath } from "./start.js";
-import { createStatus, sessionsSeen, statusPath } from "./status.js";
+import { closeProcess, createStatus, sessionsSeen, statusPath } from "./status.js";
 
 // The runner's log starts over once it is this big.
 const LOG_CAP_BYTES = 256 * 1024;
@@ -297,7 +297,8 @@ async function worker(): Promise<number> {
   const registry = createRegistry({ file: registryPath(claudeDir), log });
   await registry.restore();
   // The bare ids of the sessions it started with `claude --bg`, which the registry doesn't hold (no
-  // process of its own runs them), and of the takes' first turns closed from the desktop app's menu.
+  // process of its own runs them), kept in memory only (status.ts sessionsSeen); and of the takes'
+  // first turns closed from the desktop app's menu, each taken out once its failure has read it.
   const background = new Set<string>();
   const closedFromMenu = new Set<string>();
   const binary = () => claudeBinary(claudeDir, process.env, process.platform, os.homedir());
@@ -469,7 +470,7 @@ async function worker(): Promise<number> {
           driven: { problem: (by) => driver!.takeProblem(by), prepare: (take) => driver!.prepareTake(server, take) },
           track: registry.track,
           background: (id) => background.add(id),
-          closed: (id) => closedFromMenu.has(id),
+          closed: (id) => closedFromMenu.delete(id),
           names,
         });
         if (taken.session) await recordTakenOffice(claudeDir, taken.session, server).catch(() => {});
@@ -512,7 +513,7 @@ async function worker(): Promise<number> {
         orcaFolder: async (orca, folder, branch) => orcaBranchFolder(orca, git, folder, branch, await gitMs()),
         track: registry.track,
         background: (id) => background.add(id),
-        closed: (id) => closedFromMenu.has(id),
+        closed: (id) => closedFromMenu.delete(id),
       }),
     // An install or sign-in ends with the Claude app's check again, for the next hello.
     setup: (m) => {
@@ -526,13 +527,9 @@ async function worker(): Promise<number> {
   // its session, a fork or a take's first turn by its process, only while the registry records it.
   closeFor = async (close) => {
     if (close.startsWith("pid:")) {
-      const record = registry.list().find((r) => r.kind !== "driven" && r.pid !== null && `pid:${r.pid}` === close);
-      if (!record) return false;
       // A take's first turn that ends now says why to the office (handoff/take.ts).
-      if (record.kind === "desktop-read") closedFromMenu.add(record.session.slice(record.session.indexOf(":") + 1));
-      killPid(record.pid!);
-      for (const until = Date.now() + (await settings()).drivenCloseSeconds * 1000; alive(record.pid!) && Date.now() < until; ) await new Promise((r) => setTimeout(r, 100));
-      if (alive(record.pid!)) return false;
+      const record = await closeProcess(close, registry.list(), { kill: killPid, alive, waitMs: (await settings()).drivenCloseSeconds * 1000, closing: closedFromMenu });
+      if (!record) return false;
       log(`closed the ${record.kind} process ${record.pid} of ${record.session} from the desktop app's menu`);
       if (record.kind === "desktop-read") await reporting.end(record.session.slice(record.session.indexOf(":") + 1), CLOSED_FROM_MENU);
       return true;

@@ -136,6 +136,9 @@ const uuidOf = (session: string) => session.slice(session.indexOf(":") + 1);
  * closed by its session's id or its process's; a fork, which shares its lead's id, is listed on its own
  * and closed by its process's. A session the runner started with `claude --bg` (`background`, bare
  * ids) is headless with no close. A session in a terminal or the Claude app has no close.
+ * `background` is the worker's memory alone: after the runner restarts, a `claude --bg` session it
+ * started before is listed as one in a terminal or the Claude app, and one a person has since attached
+ * to from a terminal is still listed as headless.
  */
 export function sessionsSeen(
   reported: { session: string; cwd: string }[],
@@ -154,6 +157,29 @@ export function sessionsSeen(
   });
   for (const r of records) if (r.pid !== null && !listed.has(r)) seen.push({ name: nameOf(r), headless: true, close: closeOf(r), ...(r.kind === "fork" && { fork: true }) });
   return seen.sort((a, b) => a.name.localeCompare(b.name) || Number(b.headless) - Number(a.headless));
+}
+
+/**
+ * Closes a fork or a take's first turn by the `pid:<pid>` sessionsSeen gave it: ends its process and
+ * waits up to `waitMs` for it to go. A take's first turn is put in `closing` (bare id) first, so its
+ * failure says it was closed from the menu, and taken out again if its process is still running.
+ * Answers the record of the process that ended, or null.
+ */
+export async function closeProcess<R extends { kind: "driven" | "fork" | "desktop-read"; pid: number | null; session: string }>(
+  close: string,
+  records: R[],
+  o: { kill: (pid: number) => void; alive: (pid: number) => boolean; waitMs: number; closing: Set<string> },
+): Promise<R | null> {
+  const record = records.find((r) => r.kind !== "driven" && r.pid !== null && `pid:${r.pid}` === close);
+  if (!record) return null;
+  const pid = record.pid!;
+  const id = uuidOf(record.session);
+  if (record.kind === "desktop-read") o.closing.add(id);
+  o.kill(pid);
+  for (const until = Date.now() + o.waitMs; o.alive(pid) && Date.now() < until; ) await new Promise((r) => setTimeout(r, 100));
+  if (!o.alive(pid)) return record;
+  o.closing.delete(id);
+  return null;
 }
 
 /** The status the worker last wrote; null when there is none or it doesn't parse. */

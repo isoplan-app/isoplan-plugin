@@ -324,6 +324,13 @@ const TAKES_KEPT = 20;
 // How long a process that was ended at once gets to say it has gone.
 const KILL_WAIT_MS = 10000;
 
+/**
+ * How long a Close from the desktop app's menu waits for the runner's answer: a fork or a take's first
+ * turn gets drivenCloseSeconds to end, a driven session KILL_WAIT_MS, and then what is reporting it
+ * ends. Twice the longer covers both.
+ */
+export const menuCloseWaitMs = (drivenCloseSeconds: number) => 2 * Math.max(drivenCloseSeconds * 1000, KILL_WAIT_MS);
+
 const NO_CLAUDE = "Claude Code for the terminal isn't installed on this computer, so no session can run here.";
 const NO_FOLDER = "This computer has no folder for this room: open Claude Code once in the room's repo here, then try again.";
 const NOT_LISTED = "That folder isn't one this computer offers for this repo any more, so nothing was started. Pick one of the folders it offers now.";

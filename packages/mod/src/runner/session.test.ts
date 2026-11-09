@@ -14,7 +14,7 @@ import type { Spawn } from "./claude.js";
 import { createRegistry, registryPath, type ProcessRecord } from "./registry.js";
 import { loadPatterns, scan } from "./scan.js";
 import type { RepoFolders } from "./repo-folders.js";
-import { createDriver, drivenArgs, promptDescription, type DriveOffice, type DriverOptions, type DriveSettings, type StartElsewhere } from "./session.js";
+import { createDriver, drivenArgs, menuCloseWaitMs, promptDescription, type DriveOffice, type DriverOptions, type DriveSettings, type StartElsewhere } from "./session.js";
 
 // Each test starts real (fake) claude processes, which is slow on Windows under load.
 vi.setConfig({ testTimeout: 30000 });
@@ -668,6 +668,11 @@ test("closed from this computer: the process and its tree end mid-turn, it is re
   t.drive({ id: "d2", kind: "instruct", session: S1, text: "more" });
   await t.until(() => t.of("refused").length === 1);
   expect(t.of("refused")[0]).toMatchObject({ id: "d2", reason: "not-found" });
+});
+
+test("closed from the menu: the desktop app waits twice the longer of drivenCloseSeconds and the 10 s a driven session gets to end", () => {
+  expect(menuCloseWaitMs(2)).toBe(20000);
+  expect(menuCloseWaitMs(30)).toBe(60000);
 });
 
 test("hand back: a process that doesn't end within drivenCloseSeconds is ended, its running turn stopped", async () => {
