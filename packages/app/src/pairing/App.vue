@@ -33,7 +33,7 @@ const until = (expires: string) => new Date(expires).toLocaleTimeString([], { ho
 	<main>
 		<h1>Pair this computer</h1>
 		<p v-if="!view" class="quiet">Looking…</p>
-		<p v-else-if="!view.running" class="quiet">Isoplan isn't running on this computer, so there's nothing to pair. Resume it from the menu.</p>
+		<p v-else-if="!view.running" class="quiet">Isoplan isn't running on this computer, so there's nothing to pair.</p>
 		<template v-else>
 			<section v-if="view.waiting.length">
 				<p>Open the link, sign in to your office and approve this computer.</p>

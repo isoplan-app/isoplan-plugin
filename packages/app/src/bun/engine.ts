@@ -9,8 +9,7 @@
 // lock held by another app means one runs already, and this one ends. `engine: "app"` in the lock
 // tells startRunner (src/runner/start.ts) that a live app is the runner.
 //
-// Pause stops the worker and keeps the lock, so nothing reports and nothing else starts a runner;
-// resume starts it again. Quit stops the worker and lets the lock go.
+// Quit stops the worker and lets the lock go.
 
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
@@ -41,7 +40,7 @@ export function spawnWorker(script: string, args: string[], cwd: string, env: Re
   return { exited, kill: () => void child.kill() };
 }
 
-export type EngineState = "starting" | "running" | "paused" | "stopped";
+export type EngineState = "starting" | "running" | "stopped";
 
 /** Why the engine ended: the supervisor's reason, or it never held the lock. */
 export type Ended = Stopped | "quit" | "taken" | "busy" | "held-off" | "not-installed";
@@ -66,8 +65,6 @@ export interface EngineOptions {
 
 export interface Engine {
   state(): EngineState;
-  pause(): void;
-  resume(): void;
   /** Stops the worker, lets the lock go and ends. */
   quit(): Promise<Ended>;
   ended: Promise<Ended>;
@@ -81,10 +78,9 @@ export function startEngine(o: EngineOptions): Engine {
   const lock = runnerLockPath(o.claudeDir);
   let state: EngineState = "starting";
   let worker: Worker | null = null;
-  // The worker was stopped on purpose (pause, new code, quit), not crashed.
+  // The worker was stopped on purpose (new code, quit), not crashed.
   let interrupted = false;
   let quitting = false;
-  let resumed: (() => void) | null = null;
   let refresh: ReturnType<typeof setInterval> | undefined;
   let taken: (() => void) | null = null;
   const set = (to: EngineState) => {
@@ -95,7 +91,6 @@ export function startEngine(o: EngineOptions): Engine {
   const stopWorker = () => {
     interrupted = true;
     worker?.kill();
-    resumed?.();
   };
 
   async function run(): Promise<Ended> {
@@ -162,12 +157,9 @@ export function startEngine(o: EngineOptions): Engine {
       run: async () => {
         for (;;) {
           if (quitting) return 0;
-          if (state === "paused") await new Promise<void>((r) => (resumed = r));
-          resumed = null;
-          if (quitting) return 0;
           interrupted = false;
           worker = spawnOne(script, ["--claude-dir", o.claudeDir, "--worker"], o.claudeDir, env);
-          if (state !== "paused") set("running");
+          set("running");
           const exit = await worker.exited;
           worker = null;
           if (quitting) return 0;
@@ -193,18 +185,6 @@ export function startEngine(o: EngineOptions): Engine {
   const ended = run().then((why) => (set("stopped"), why));
   return {
     state: () => state,
-    pause() {
-      if (state !== "running") return;
-      set("paused");
-      o.log("paused: the runner stops reporting until it is resumed");
-      stopWorker();
-    },
-    resume() {
-      if (state !== "paused") return;
-      set("running");
-      o.log("resumed");
-      resumed?.();
-    },
     async quit() {
       quitting = true;
       stopWorker();

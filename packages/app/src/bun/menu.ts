@@ -18,7 +18,6 @@ export interface MenuInput {
 const HEADLINE: Record<EngineState, string> = {
   starting: "Isoplan is starting",
   running: "Isoplan is running",
-  paused: "Isoplan is paused",
   stopped: "Isoplan has stopped",
 };
 
@@ -41,7 +40,7 @@ const connected = (email: string | undefined) => (email ? `connected as ${email}
 
 /** Each office's line in the Offices submenu. */
 export function officeLines({ engine, status, now, unreachableMs }: MenuInput): string[] {
-  if (engine !== "running") return [engine === "paused" ? "Paused: no office is told anything" : "Not running"];
+  if (engine !== "running") return ["Not running"];
   // Its worker is starting, or starting again: it hasn't said yet.
   if (!status) return ["Starting…"];
   if (!status.offices.length) return ["No office yet"];
@@ -51,24 +50,24 @@ export function officeLines({ engine, status, now, unreachableMs }: MenuInput): 
   });
 }
 
-/** The action that closes a headless session, by the id status.json gives it: for a driven session, End session. */
+/** The action that closes a headless session, by the id status.json gives it: for a driven session, Close session. */
 export const closeAction = (close: string) => `close:${close}`;
 /** The action that ends a driven session and removes it, so it is never opened again. */
 export const removeAction = (close: string) => `remove:${close}`;
 
-/** What a headless session's submenu offers: a driven one, closed by its session's id, End session or End and remove; a fork or a take's first turn, by its process's, Close. */
+/** What a headless session's submenu offers: a driven one, closed by its session's id, Close session or End and remove; a fork or a take's first turn, by its process's, Close. */
 const closeItems = (close: string): MenuItem[] =>
   close.startsWith("pid:")
     ? [{ type: "normal", label: "Close", action: closeAction(close) }]
     : [
-        { type: "normal", label: "End session", action: closeAction(close) },
+        { type: "normal", label: "Close session", action: closeAction(close) },
         { type: "normal", label: "End and remove", action: removeAction(close) },
       ];
 
 /** The Sessions submenu: each session the worker reports or runs; a headless one can be closed, one in a terminal or the Claude app can't. */
 export function sessionItems({ engine, status }: MenuInput): MenuItem[] {
   const line = (label: string): MenuItem[] => [{ type: "normal", label, enabled: false }];
-  if (engine !== "running") return line(engine === "paused" ? "Paused: no session is reported" : "Not running");
+  if (engine !== "running") return line("Not running");
   if (!status) return line("Starting…");
   if (!status.sessions) return line("Not listed: Isoplan's runner needs updating");
   if (!status.sessions.length) return line("No session on this computer");
@@ -80,7 +79,7 @@ export function sessionItems({ engine, status }: MenuInput): MenuItem[] {
   });
 }
 
-/** The session a Close, End session or End and remove action names, and whether to remove it, if the status lists it as one that can be closed now. */
+/** The session a Close, Close session or End and remove action names, and whether to remove it, if the status lists it as one that can be closed now. */
 export function closing(action: string, status: RunnerStatus | null): { close: string; remove: boolean } | null {
   const remove = action.startsWith("remove:");
   if (!remove && !action.startsWith("close:")) return null;
@@ -97,7 +96,6 @@ export function trayMenu(input: MenuInput): MenuItem[] {
     { type: "divider" },
     { type: "normal", label: "Offices", submenu: officeLines(input).map((label) => ({ type: "normal", label, enabled: false })) },
     { type: "normal", label: "Sessions", submenu: sessionItems(input) },
-    input.engine === "paused" ? { type: "normal", label: "Resume", action: "resume" } : { type: "normal", label: "Pause", action: "pause", enabled: input.engine === "running" },
     { type: "normal", label: waiting ? `Pair this computer… (${waiting} waiting)` : "Open pairing…", action: "pairing" },
     { type: "divider" },
     { type: "normal", label: "Quit Isoplan", action: "quit" },
