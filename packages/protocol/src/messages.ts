@@ -636,7 +636,9 @@ export const RequestMessageSchema = z.discriminatedUnion("kind", [
   // The owner answered their agent's question from the floor. `question` is the question fact's id,
   // and `answers` maps each question's text to its answer. `annotations` (protocol 0.11.0 on), keyed
   // by question text as `answers` is: the owner's notes on each answer, and the preview of the option
-  // they chose, as Claude Code's own dialog gives them.
+  // they chose, as Claude Code's own dialog gives them. `chat` (protocol 0.11.1 on): the owner chose
+  // "Chat about this" instead of answering, which ends the call as Claude Code's own dialog does, with
+  // the agent told the owner wants to clarify the questions; `answers` is then empty.
   z.object({
     type: z.literal("request"),
     v: Version,
@@ -646,6 +648,7 @@ export const RequestMessageSchema = z.discriminatedUnion("kind", [
     question: z.string().min(1),
     answers: z.record(z.string(), z.string()),
     annotations: z.record(z.string(), z.object({ notes: z.string().optional(), preview: z.string().optional() })).optional(),
+    chat: z.literal(true).optional(),
   }),
   // The owner sends their session a message from the floor (protocol 0.8.0 on), sent only for a
   // session whose fact says `takesMessages`: the plugin in that session submits `text` as the owner's
