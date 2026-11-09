@@ -550,6 +550,31 @@ test("a question parses with answerable or withheld, and not with either false",
   expect(parseDataLayerMessage({ ...valid.full, facts: { ...facts, questions: [{ ...question, answerable: false }] } })).toMatchObject({ ok: false, kind: "invalid" });
 });
 
+test("a question parses with asMessage, and not with asMessage false", () => {
+  const [question] = facts.questions!;
+  expect(parseDataLayerMessage({ ...valid.full, facts: { ...facts, questions: [{ ...question, asMessage: true }] } })).toMatchObject({ ok: true });
+  expect(parseDataLayerMessage({ ...valid.full, facts: { ...facts, questions: [{ ...question, asMessage: false }] } })).toMatchObject({ ok: false, kind: "invalid" });
+});
+
+test("a question's option keeps its preview", () => {
+  const question = facts.questions![0]!;
+  const first = question.questions[0]!;
+  const withPreview = { ...question, questions: [{ ...first, options: first.options.map((option) => ({ ...option, preview: "```ts\nconst a = 1;\n```" })) }] };
+  const message = { ...valid.full, facts: { ...facts, questions: [withPreview] } };
+  expect(parseDataLayerMessage(message)).toEqual({ ok: true, message });
+});
+
+test("a session parses with hooks, and not with hooks false", () => {
+  expect(parseDataLayerMessage({ ...valid.full, facts: { ...facts, session: { ...facts.session, hooks: true } } })).toMatchObject({ ok: true });
+  expect(parseDataLayerMessage({ ...valid.full, facts: { ...facts, session: { ...facts.session, hooks: false } } })).toMatchObject({ ok: false, kind: "invalid" });
+});
+
+test("an owner-answer request keeps the owner's notes and the chosen option's preview", () => {
+  const request = { ...valid["request owner-answer"], annotations: { "Which one?": { notes: "Keep it short.", preview: "A" }, "And this?": {} } };
+  expect(parseOfficeServerMessage(request)).toEqual({ ok: true, message: request });
+  expect(parseOfficeServerMessage({ ...request, annotations: { "Which one?": { notes: 1 } } })).toMatchObject({ ok: false, kind: "invalid" });
+});
+
 test("an edit, a read or a command in another repo carries that repo, and whether it is away from home", () => {
   const frontend = { id: "github.com/team/frontend", name: "frontend" };
   const edit = { agent: worker.id, file: "src/api.ts", at, project: frontend, away: true };
