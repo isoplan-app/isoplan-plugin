@@ -24,12 +24,14 @@ interface HostOptions {
   version?: { version: string; base?: string };
   /** $.prompt.submit; none, as in an older build, unless given. */
   submit?: NonNullable<Host["prompt"]>["submit"];
+  /** $.turn.abort; none, as in an older build, unless given. */
+  abort?: NonNullable<Host["turn"]>["abort"];
   /** $.clock.after keeps its callbacks in `timers` rather than run them at once. */
   heldTimers?: boolean;
 }
 
 // A host whose data layer writes `lines` and then exits (or stays up).
-function host(lines: DataLayerLine[], { wakes = 0, runMs = 0, stays = false, noNode = false, later, usage, version, submit, heldTimers = false }: HostOptions = {}) {
+function host(lines: DataLayerLine[], { wakes = 0, runMs = 0, stays = false, noNode = false, later, usage, version, submit, abort, heldTimers = false }: HostOptions = {}) {
   const status: (string | undefined)[] = [];
   const written: [string, string][] = [];
   const spawned: (readonly string[])[] = [];
@@ -48,6 +50,7 @@ function host(lines: DataLayerLine[], { wakes = 0, runMs = 0, stays = false, noN
     plugin: { root: "C:\\plugins\\isoplan" },
     session: { id: async () => session.id, cwd: async () => "C:/w/repo", ...(usage ? { usage } : {}), ...(version ? { version: async () => version } : {}) },
     ...(submit ? { prompt: { submit } } : {}),
+    ...(abort ? { turn: { abort } } : {}),
     process: {
       spawn: ({ argv, cwd }) => {
         spawned.push(argv);
@@ -473,6 +476,57 @@ test("hooks: a question runs at once, so the terminal shows it; an answer from t
   const h = await start([{ type: "owner-answer", question: "toolu_1", answers: { "Which branch?": "main" }, file }]);
   expect(await asked).toEqual({ result: { questions, answers: { "Which branch?": "main" } } });
   await vi.waitFor(() => expect(h.written).toEqual([[file, JSON.stringify({ question: "toolu_1", taken: true })]]));
+});
+
+test("hooks: a floor answer's annotations go in the call's result; \"Chat about this\" ends the call with the error result Claude Code's dialog gives", async () => {
+  const file = "C:/Users/ada/.claude/isoplan/answers/s1-1.json";
+  const questions = [{ question: "Which layout?", header: "Layout", options: [{ label: "Alpha", description: "", preview: "A" }], multiSelect: false }, { question: "Ship it?", header: "", options: [{ label: "Yes", description: "" }], multiSelect: false }];
+  const ask = (id: string) => hooks["tool.call"]!(host([]).$, { tool: "AskUserQuestion", tool_use_id: id, questions }, () => new Promise<ToolCallResult>(() => {})) as Promise<ToolCallResult>;
+  const answered = ask("toolu_1");
+  const chatted = ask("toolu_2");
+  const annotations = { "Which layout?": { notes: "Wider", preview: "A" } };
+  await start([
+    { type: "owner-answer", question: "toolu_1", answers: { "Which layout?": "Alpha", "Ship it?": "Yes" }, annotations, file },
+    { type: "owner-answer", question: "toolu_2", answers: {}, chat: true, file },
+  ]);
+  expect(await answered).toEqual({ result: { questions, answers: { "Which layout?": "Alpha", "Ship it?": "Yes" }, annotations } });
+  expect(await chatted).toEqual({
+    deny:
+      "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). To tell you how to proceed, the user said:\nThe user wants to clarify these questions.\n    This means they may have additional information, context or questions for you.\n    Take their response into account and then reformulate the questions if appropriate.\n    Start by asking them what they would like to clarify.\n\n    Questions asked:\n- \"Which layout?\"\n  (No answer provided)\n- \"Ship it?\"\n  (No answer provided)",
+  });
+});
+
+test("hooks: a question asked before it loaded is answered by ending the running turn, which abort's refusal names, then submitting the answer as the owner's words; one that can't says why", async () => {
+  const file = "/Users/ada/.claude/isoplan/answers/s1/1.json";
+  const answer: DataLayerLine = { type: "owner-answer", question: "toolu_1", answers: { "Which branch?": "main" }, late: { session: "s1", text: "I answered your question on the Isoplan floor:" }, file };
+  const said = async (opts: HostOptions, session = "s1") => {
+    vi.resetModules();
+    const { register } = await import("./register.js");
+    register(((event: keyof Hooks, hook: Function) => ((hooks[event] = hook), { catch: () => {} })) as unknown as On);
+    const h = host([answer], { stays: true, ...opts });
+    h.session.id = session;
+    await hooks["session.start"]!(h.$, { cwd: "C:/w/repo" }, async () => ({}));
+    await vi.waitFor(() => expect(h.written).toHaveLength(1));
+    return JSON.parse(h.written[0]![1]);
+  };
+  const steps: string[] = [];
+  const abort = vi.fn(async ({ turnId }: { turnId: string }) => {
+    steps.push("abort " + turnId);
+    if (turnId !== "turn-7") throw new Error(`isoplan: $.turn.abort: ${turnId} is not the running turn (turn-7); a hook ends the turn turn.start told it about`);
+  });
+  const submit = vi.fn(async (input: { text: string }) => (steps.push("submit " + input.text), {}));
+  expect(await said({ abort, submit })).toEqual({ question: "toolu_1", taken: true });
+  expect(steps).toEqual(["abort isoplan-no-turn", "abort turn-7", "submit I answered your question on the Isoplan floor:"]);
+  expect(submit).toHaveBeenCalledWith({ text: "I answered your question on the Isoplan floor:", asUser: true });
+  // A resumed session with no turn running has no dialog to close: the answer goes straight in.
+  steps.length = 0;
+  expect(await said({ abort: async () => Promise.reject(new Error("isoplan: $.turn.abort: no turn is running (asked for isoplan-no-turn)")), submit })).toEqual({ question: "toolu_1", taken: true });
+  expect(steps).toEqual(["submit I answered your question on the Isoplan floor:"]);
+  // A /clear moved the process on; a turn that can't be ended, or no abort in this build; Claude Code dropped it.
+  expect(await said({ abort, submit }, "s2")).toEqual({ question: "toolu_1", taken: false, reason: "ended" });
+  expect(await said({ abort: async () => Promise.reject(new Error("busy")), submit })).toEqual({ question: "toolu_1", taken: false, reason: "no-turn" });
+  expect(await said({ submit })).toEqual({ question: "toolu_1", taken: false, reason: "no-turn" });
+  expect(await said({ abort, submit: async () => ({ drop: "a hook said no" }) })).toEqual({ question: "toolu_1", taken: false, reason: "dropped" });
 });
 
 test("hooks: a question answered in the terminal first keeps that answer, and a later floor answer isn't taken", async () => {

@@ -25,9 +25,10 @@
 // `window` line names; without one there is none. A Claude Code workflow's name,
 // description, phases and agents' labels are secret-checked too, and one that matches goes out as a
 // placeholder (src/data-layer/workflows.ts); its agents' results are reports like any other.
-// For a hooks module that can submit a prompt (`takesMessages`), the session fact says
-// `takesMessages`, and a message its owner sends from the floor goes to that hooks module, which
-// submits it as the session's next turn (src/data-layer/owner-messages.ts).
+// For a hooks module the session fact says `hooks`. For one that can submit a prompt
+// (`takesMessages`), it says `takesMessages` too, and a message its owner sends from the floor goes
+// to that hooks module, which submits it as the session's next turn (src/data-layer/owner-messages.ts);
+// its open questions the hooks module didn't see asked are answerable as the owner's message.
 //
 // Its log lines go to <claude dir>/isoplan/logs/<session>.log (the runner's sessionLog), and without
 // a hooks module the other lines are dropped. Without one it reports only while the session is at work, and the
@@ -436,7 +437,7 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
   // What goes to an office's link: the reports its hold keeps held, the questions checked and
   // marked, and the workflows' names, phases and labels checked (workflows.ts).
   const outgoing = (run: OfficeRun, facts: Facts, patterns: Pattern[] | null) =>
-    prepareWorkflows(prepareQuestions(run.hold.apply(facts, patterns), patterns, waiting, patternLog), patterns, patternLog);
+    prepareWorkflows(prepareQuestions(run.hold.apply(facts, patterns), patterns, waiting, patternLog, takesMessages), patterns, patternLog);
   // The project of each subagent working in a worktree of another repo, from the latest read.
   let checkouts: Record<string, string> = {};
   // Whether a question got an answer, from the latest read, so one that closed says how.
@@ -469,7 +470,7 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
           c.watch(fs
             .mkdir(answersDir, { recursive: true })
             .then(async () => {
-              const relayed = await relayOwnerAnswer(message, { detached: !hooked, facts: () => run.sent, file, emit, take: takeFile });
+              const relayed = await relayOwnerAnswer(message, { detached: !hooked, session: sessionId, facts: () => run.sent, file, emit, take: takeFile });
               run.gate.current()?.send(relayed.message);
               if (!relayed.gaveUp) return;
               // The hooks module's word may still come: a take that does follows as a late reply.
@@ -727,7 +728,7 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
     const given: string | null | undefined = named ?? (read.facts.session.titleFrom === "branch" ? title?.title : null);
     const titled = given ? { ...read.facts, session: { ...read.facts.session, title: given } } : read.facts;
     const sized: Facts = contextWindow ? { ...titled, session: { ...titled.session, contextWindow } } : titled;
-    const facts: Facts = takesMessages ? { ...sized, session: { ...sized.session, takesMessages: true } } : sized;
+    const facts: Facts = hooked ? { ...sized, session: { ...sized.session, hooks: true, ...(takesMessages && { takesMessages: true as const }) } } : sized;
 
     checkouts = read.checkouts ?? {};
     answered = read.answered ?? answered;

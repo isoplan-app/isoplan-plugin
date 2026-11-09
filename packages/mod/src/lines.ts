@@ -58,13 +58,20 @@ export interface PairLine {
 
 /**
  * The owner answered a question from the floor: `question` is the AskUserQuestion call's id, and
- * `answers` maps each question's text to its answer. The hooks module ends the call with them if
- * it is still waiting for it, and writes an AnswerTaken as JSON to `file` either way.
+ * `answers` maps each question's text to its answer, `annotations` its notes and the chosen option's
+ * preview, as Claude Code's dialog gives them. With `chat` the owner chose "Chat about this" in place
+ * of answering. The hooks module ends the call with them if it is still waiting for it. One it isn't
+ * waiting for, asked before it loaded, comes with `late`: the hooks module ends the running turn,
+ * which closes the dialog, if the process still runs `session`, and submits `text` as the owner's
+ * own message. It writes an AnswerTaken as JSON to `file` either way.
  */
 export interface OwnerAnswerLine {
   type: "owner-answer";
   question: string;
   answers: Record<string, string>;
+  annotations?: Record<string, { notes?: string; preview?: string }>;
+  chat?: true;
+  late?: { session: string; text: string };
   file: string;
 }
 
@@ -119,10 +126,16 @@ export interface WaitMark {
   waiting: boolean;
 }
 
-/** What an owner-answer's file holds: whether the answer reached the call waiting for it. */
+/**
+ * What an owner-answer's file holds: whether the answer reached the call waiting for it, or, for a
+ * `late` one, went in as the owner's message. A late one that didn't says why: `ended`, the session
+ * has moved on; `no-turn`, the running turn couldn't be ended; `no-submit`, this Claude Code build
+ * can't take a message from a plugin; `dropped`, Claude Code didn't let it in.
+ */
 export interface AnswerTaken {
   question: string;
   taken: boolean;
+  reason?: "ended" | "no-turn" | "no-submit" | "dropped";
 }
 
 /**

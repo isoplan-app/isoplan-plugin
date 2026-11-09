@@ -443,6 +443,8 @@ test("the session's context window reaches the office only once the hooks module
   expect(sent().find((m) => m.type === "full")!.facts!.session).not.toHaveProperty("contextWindow");
   // Without messages, the session doesn't say it takes messages from the floor.
   expect(sent().find((m) => m.type === "full")!.facts!.session).not.toHaveProperty("takesMessages");
+  // It says its hooks module runs in it.
+  expect(sent().find((m) => m.type === "full")!.facts!.session.hooks).toBe(true);
   expect(sent().some((m) => m.upsert?.session && "contextWindow" in m.upsert.session)).toBe(false);
 
   fs.writeFileSync(file, JSON.stringify({ contextWindow: 1000000 }));

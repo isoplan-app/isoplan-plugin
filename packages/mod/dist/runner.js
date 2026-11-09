@@ -10490,7 +10490,8 @@ function addQuestions(list, agent, t, results, mtimeMs) {
 				header: typeof q.header === "string" ? q.header : "",
 				options: options.map((o) => ({
 					label: o.label,
-					description: typeof o.description === "string" ? o.description : ""
+					description: typeof o.description === "string" ? o.description : "",
+					...typeof o.preview === "string" && o.preview ? { preview: o.preview } : {}
 				})),
 				multiSelect: q.multiSelect === true
 			});
@@ -16593,15 +16594,19 @@ const WITHHELD_QUESTION = "Held for its owner to check: the secret check found w
 /**
 * The facts with their questions as they are sent: each one the scan matches, or every one while
 * `patterns` is null, as a placeholder marked `withheld`; each other one `answerable` while `waiting`
-* holds its id, unless the source left part of it out.
+* holds its id, else `asMessage` when the session `takesMessages`, unless the source left part of it out.
 */
-function prepareQuestions(facts, patterns, waiting, log) {
+function prepareQuestions(facts, patterns, waiting, log, takesMessages = false) {
 	if (!facts.questions?.length) return facts;
 	const questions = facts.questions.map((q) => {
 		const matched = scan(q.questions.flatMap((x) => [
 			x.question,
 			x.header,
-			...x.options.flatMap((o) => [o.label, o.description])
+			...x.options.flatMap((o) => [
+				o.label,
+				o.description,
+				o.preview ?? ""
+			])
 		]).join("\n"), patterns);
 		if (matched) {
 			log(`withheld the question ${q.id} of ${q.agent}: ${patterns ? `it matches the secret pattern "${matched}"` : "the secret patterns couldn't be read"}; it is answered in the terminal`);
@@ -16618,9 +16623,14 @@ function prepareQuestions(facts, patterns, waiting, log) {
 				withheld: true
 			};
 		}
-		return waiting.has(q.id) && !q.extra?.incomplete ? {
+		if (q.extra?.incomplete) return q;
+		if (waiting.has(q.id)) return {
 			...q,
 			answerable: true
+		};
+		return takesMessages ? {
+			...q,
+			asMessage: true
 		} : q;
 	});
 	return {
@@ -16633,7 +16643,7 @@ function prepareQuestions(facts, patterns, waiting, log) {
 * not otherwise. With no word from it in `waitMs`, a question that has closed since gets a `closed`
 * reply, which says only that it has an answer, the floor's or the terminal's.
 */
-async function relayOwnerAnswer(request, { detached, facts, file, emit, take, sleep = wait$1, waitMs = TAKEN_WAIT_MS$1 }) {
+async function relayOwnerAnswer(request, { detached, session, facts, file, emit, take, sleep = wait$1, waitMs = TAKEN_WAIT_MS$1 }) {
 	const refuse = (detail, gaveUp = false) => ({
 		message: {
 			type: "refusal",
@@ -16645,21 +16655,32 @@ async function relayOwnerAnswer(request, { detached, facts, file, emit, take, sl
 		gaveUp
 	});
 	const open = () => facts()?.questions?.find((q) => q.id === request.question);
-	if (detached) return refuse("This session is seen only through Isoplan's wake hook, so its question can only be answered in its terminal.");
+	if (detached) return refuse("Isoplan's plugin isn't running in this session: type /reload-plugins in it, or answer the question in its terminal.");
 	const question = open();
 	if (!question) return refuse("The question isn't waiting for an answer any more: it was answered in the terminal, or the agent moved on.");
-	if (!question.answerable) return refuse("Isoplan's plugin isn't waiting for this question in its session, so answer it in its terminal.");
-	emit({
+	if (!question.answerable && !question.asMessage) return refuse("This question was asked before Isoplan's plugin loaded in its session, so answer it in its terminal.");
+	const answers = request.chat ? {} : request.answers;
+	const annotations = request.chat ? void 0 : annotationsOf(question, answers, request.annotations);
+	const line = {
 		type: "owner-answer",
 		question: request.question,
-		answers: request.answers,
+		answers,
+		...annotations && { annotations },
+		...request.chat && { chat: true },
 		file
-	});
+	};
+	emit(question.asMessage ? {
+		...line,
+		late: {
+			session,
+			text: lateText(question, answers, annotations, !!request.chat)
+		}
+	} : line);
 	for (let waited = 0; waited < waitMs; waited += POLL_MS$1) {
 		await sleep(POLL_MS$1);
 		const taken = await takenFrom(take, file, request.question);
 		if (taken === null) continue;
-		if (taken) return {
+		if (taken.taken) return {
 			message: {
 				type: "reply",
 				v: 1,
@@ -16668,7 +16689,7 @@ async function relayOwnerAnswer(request, { detached, facts, file, emit, take, sl
 			},
 			gaveUp: false
 		};
-		return refuse("The question was answered in the terminal first.");
+		return refuse(NOT_TAKEN[taken.reason ?? "answered"]);
 	}
 	if (!open()) return {
 		message: {
@@ -16690,10 +16711,54 @@ async function lateTake(question, file, take, { sleep = wait$1, ms = LATE_MS } =
 	for (let waited = 0; waited < ms; waited += POLL_MS$1) {
 		await sleep(POLL_MS$1);
 		const taken = await takenFrom(take, file, question);
-		if (taken !== null) return taken;
+		if (taken !== null) return taken.taken;
 	}
 	return null;
 }
+/** Why the floor's answer didn't go in, as the floor is told. */
+const NOT_TAKEN = {
+	answered: "The question was answered in the terminal first.",
+	ended: "This session has ended, or carried on as a new one, so the answer wasn't sent.",
+	"no-turn": "Isoplan's plugin couldn't stop the agent's turn to send the answer, so answer the question in its terminal.",
+	"no-submit": "This session's version of Claude Code can't take messages from Isoplan, so answer the question in its terminal.",
+	dropped: "Claude Code didn't let the answer in as a message, so answer the question in its terminal."
+};
+/**
+* The annotations Claude Code's dialog would give: the owner's notes on each answer, and on a
+* question with one answer, the preview of the option chosen, from the question itself. None when
+* there are neither.
+*/
+function annotationsOf(question, answers, given = {}) {
+	const out = {};
+	for (const q of question.questions) {
+		const notes = given[q.question]?.notes;
+		const preview = q.multiSelect ? void 0 : q.options.find((o) => o.label === answers[q.question])?.preview;
+		if (notes || preview) out[q.question] = {
+			...notes && { notes },
+			...preview && { preview }
+		};
+	}
+	return Object.keys(out).length ? out : void 0;
+}
+/**
+* The owner's message for a question the hooks module never saw: their answers and notes, as a
+* person would put them, saying they answered on the Isoplan floor; or, for "Chat about this", that
+* they want to talk the questions through first.
+*/
+function lateText(question, answers, annotations, chat) {
+	const several = question.questions.length > 1;
+	const asked = several ? "questions" : "question";
+	if (chat) return [`I saw your ${asked} on the Isoplan floor, and I'd like to talk ${several ? "them" : "it"} through before I answer:`, ...question.questions.map((q) => `- "${q.question}"`)].join("\n");
+	const lines = [`I answered your ${asked} on the Isoplan floor:`];
+	for (const q of question.questions) {
+		const answer = answers[q.question];
+		const notes = annotations?.[q.question]?.notes;
+		lines.push(`- "${q.question}": ${answer && answer !== NOTES_ONLY ? answer : notes ? "no option, just a note" : "no answer"}`);
+		if (notes) lines.push(`  My notes: ${notes}`);
+	}
+	return lines.join("\n");
+}
+const NOTES_ONLY = "(notes only)";
 async function takenFrom(take, file, question) {
 	const text = await take(file);
 	if (text === null) return null;
@@ -16701,7 +16766,11 @@ async function takenFrom(take, file, question) {
 	try {
 		taken = JSON.parse(text);
 	} catch {}
-	return taken.question === question ? taken.taken === true : null;
+	if (taken.question !== question) return null;
+	return {
+		taken: taken.taken === true,
+		...taken.reason && taken.reason in NOT_TAKEN && { reason: taken.reason }
+	};
 }
 const wait$1 = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 //#endregion
@@ -17123,7 +17192,7 @@ async function reporting(o, c) {
 		});
 		said.add(text);
 	};
-	const outgoing = (run, facts, patterns) => prepareWorkflows(prepareQuestions(run.hold.apply(facts, patterns), patterns, waiting, patternLog), patterns, patternLog);
+	const outgoing = (run, facts, patterns) => prepareWorkflows(prepareQuestions(run.hold.apply(facts, patterns), patterns, waiting, patternLog, takesMessages), patterns, patternLog);
 	let checkouts = {};
 	let answered = (_id) => false;
 	let contextWindow = null;
@@ -17149,6 +17218,7 @@ async function reporting(o, c) {
 				c.watch(fs.mkdir(answersDir, { recursive: true }).then(async () => {
 					const relayed = await relayOwnerAnswer(message, {
 						detached: !hooked,
+						session: sessionId,
 						facts: () => run.sent,
 						file,
 						emit,
@@ -17511,11 +17581,12 @@ async function reporting(o, c) {
 				contextWindow
 			}
 		} : titled;
-		const facts = takesMessages ? {
+		const facts = hooked ? {
 			...sized,
 			session: {
 				...sized.session,
-				takesMessages: true
+				hooks: true,
+				...takesMessages && { takesMessages: true }
 			}
 		} : sized;
 		checkouts = read.checkouts ?? {};

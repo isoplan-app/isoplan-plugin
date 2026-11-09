@@ -202,6 +202,15 @@ test("questions: an AskUserQuestion with no result is open while the turn is, ma
   expect(await questions()).toEqual([]);
 });
 
+test("questions: each option's preview is carried as the agent gave it, multi-line kept", async () => {
+  const { home, main } = office();
+  const options = [{ label: "Alpha", description: "First", preview: "┌──┐\n│A │\n└──┘" }, { label: "Beta", description: "Second" }];
+  const questions = [{ question: "Which layout?", header: "Layout", options, multiSelect: false }];
+  const asked = { ...line.tool(main, "AskUserQuestion", { questions }, 30), message: { role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "AskUserQuestion", input: { questions } }] } };
+  session(home, "s", [line.user(main, "pick a layout", 60), asked]);
+  expect((await factsOf(home, "s")).questions![0]!.questions[0]!.options).toEqual(options);
+});
+
 test("questions: one with a result that isn't an error was answered; an interrupted one, or one a prompt came before, was not", async () => {
   const { home, main } = office();
   const prompt = line.user(main, "fix the bug", 60);
