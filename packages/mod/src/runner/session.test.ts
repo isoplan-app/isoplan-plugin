@@ -710,7 +710,7 @@ test("stop with remove: the process and its tree end mid-turn, it is released re
   expect(t.of("refused")[0]).toMatchObject({ id: "d3", reason: "not-found" });
 });
 
-test("closed from this computer: End session ends the process mid-turn and is released stopped, kept for the next instruction to open again; End and remove is released removed and forgotten", async () => {
+test("closed from this computer: Close session ends the process mid-turn and is released stopped, kept for the next instruction to open again; End and remove is released removed and forgotten", async () => {
   const t = await setUp();
   t.drive(start("d1", { instruction: "now hang" }));
   await t.until(() => t.fakeLog().some((l) => l.turn === "now hang"));

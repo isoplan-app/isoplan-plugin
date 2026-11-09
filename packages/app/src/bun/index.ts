@@ -83,7 +83,7 @@ async function input(): Promise<MenuInput> {
 async function update(): Promise<void> {
   const state = engine.state();
   // The icon shows once this app is the runner: a second copy, or one with nothing to run, never shows one.
-  if (!tray && (state === "running" || state === "paused")) {
+  if (!tray && state === "running") {
     const mac = process.platform === "darwin";
     tray = new Tray({ title: "", image: mac ? "views://assets/tray-template.png" : "views://assets/isoplan.ico", template: mac, width: mac ? 18 : 16, height: mac ? 18 : 16 });
     tray.on("tray-clicked", (event: unknown) => void act((event as { data?: { action?: string } }).data?.action ?? ""));
@@ -97,9 +97,7 @@ async function update(): Promise<void> {
 }
 
 async function act(action: string): Promise<void> {
-  if (action === "pause") engine.pause();
-  else if (action === "resume") engine.resume();
-  else if (action === "pairing") openPairing();
+  if (action === "pairing") openPairing();
   else if (action.startsWith("close:") || action.startsWith("remove:")) {
     const asked = closing(action, (await input()).status);
     if (asked) await close(asked.close, asked.remove);

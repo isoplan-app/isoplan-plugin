@@ -72,25 +72,18 @@ test("engine: a second app finds the first running and ends without a worker", a
   expect(engine.state()).toBe("stopped");
 });
 
-test("engine: pause stops the worker and keeps the lock; resume starts it again; quit stops it and lets the lock go", async () => {
+test("engine: quit stops the worker and lets the lock go", async () => {
   const m = machine();
   const engine = m.start();
   await settle();
-  engine.pause();
-  await settle();
-  expect(engine.state()).toBe("paused");
-  expect(m.workers[0]?.killed).toBe(true);
-  expect(m.workers).toHaveLength(1);
   expect((await readLock(m.lock))?.pid).toBe(ME);
-  engine.resume();
-  await settle();
-  expect(engine.state()).toBe("running");
-  expect(m.workers).toHaveLength(2);
-  // A pause is not a crash: nothing was logged as one.
-  expect(m.logs.some((l) => l.includes("starting it again"))).toBe(false);
   expect(await engine.quit()).toBe("quit");
-  expect(m.workers[1]?.killed).toBe(true);
+  expect(m.workers).toHaveLength(1);
+  expect(m.workers[0]?.killed).toBe(true);
+  // A quit is not a crash: nothing was logged as one.
+  expect(m.logs.some((l) => l.includes("starting it again"))).toBe(false);
   expect(fs.existsSync(m.lock)).toBe(false);
+  expect(engine.state()).toBe("stopped");
 });
 
 test("engine: a crashed worker starts again; one that ends cleanly ends the app and its lock", async () => {

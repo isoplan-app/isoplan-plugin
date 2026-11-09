@@ -88,8 +88,8 @@
 //   then forgotten here, so it is never opened again, `holding` goes again without it, and its
 //   reporting ends (`removed`), so its agent leaves the floor once the office supports it
 //   (isoplan-app#245; an office before that shows it disconnected).
-// - Closed from this computer (the desktop app's End session and End and remove, `end`): the same as
-//   the floor's `stop` and `stop` with `remove`, with no request to answer. End session keeps the
+// - Closed from this computer (the desktop app's Close session and End and remove, `end`): the same
+//   as the floor's `stop` and `stop` with `remove`, with no request to answer. Close session keeps the
 //   session, released `stopped`, so the floor's next instruction opens it again.
 // - `interrupt` (protocol 0.12.0) stops the reply in progress and keeps the process: the runner
 //   writes Claude Code's own interrupt, the control request the Agent SDK sends. Probed on Claude Code
@@ -293,7 +293,7 @@ export interface Driver {
   /** The take has ended: with `opens` (its `taken` was handed to the link, and it wasn't dropped or given up) its session opens now; without, its place under the cap is freed. */
   taken(session: string, opens: boolean): void;
   /**
-   * Ends the session from this machine (the desktop app's End session, or End and remove with
+   * Ends the session from this machine (the desktop app's Close session, or End and remove with
    * `remove`): its process tree ends, as a stop ends it. Kept, it is released `stopped`, and the next
    * instruction opens it again; removed, it is released `removed`, forgotten here, so it isn't opened
    * again, its office is sent `holding` again without it, and its reporting ends. False when there is
