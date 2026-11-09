@@ -6493,7 +6493,8 @@ const RequestMessageSchema = discriminatedUnion("kind", [
 		annotations: record(string(), object({
 			notes: string().optional(),
 			preview: string().optional()
-		})).optional()
+		})).optional(),
+		chat: literal(true).optional()
 	}),
 	object({
 		type: literal("request"),
