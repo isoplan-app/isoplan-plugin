@@ -257,6 +257,7 @@ async function worker(): Promise<number> {
     isOff,
     log,
     hooked: (id) => pipe?.hooked(id) ?? null,
+    removedFile: path.join(isoplanDir, "runner", "removed.json"),
     held: (id, hooks) => {
       sessionLog(claudeDir, id).say("an earlier version's data layer reports this session, so the runner doesn't: its hooks module is told so, and tries again later");
       hooks.send({ type: "superseded", reason: "earlier" });
@@ -503,8 +504,9 @@ async function worker(): Promise<number> {
     scan: scanText,
     log,
     namer,
-    // Its agent leaves the floor: reported again only once its transcript moves, which it won't.
-    removed: (session) => reporting.end(session.slice(session.indexOf(":") + 1), REMOVED),
+    // Kept on disk, so it isn't reported again after a runner restart either; it is once its
+    // transcript is written again (resumed in a terminal, say), or its hooks module connects.
+    removed: (session) => reporting.end(session.slice(session.indexOf(":") + 1), REMOVED, true),
     projectOf: async (folder) => (await homeIo.projectOf(await homeIo.resolve(folder), folder)).id,
     // A start that opens outside the floor (#85), as a take opens its session.
     elsewhere: (start, bin) =>

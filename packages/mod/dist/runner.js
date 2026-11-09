@@ -17663,6 +17663,28 @@ function watchSessions(o) {
 	let stopped = false;
 	let timer = null;
 	let said = "";
+	const removed = /* @__PURE__ */ new Map();
+	let readRemoved = null;
+	let savingRemoved = Promise.resolve();
+	const saveRemoved = () => {
+		const file = o.removedFile;
+		if (!file) return savingRemoved;
+		return savingRemoved = savingRemoved.then(async () => {
+			await fs.mkdir(path.dirname(file), { recursive: true });
+			const temp = `${file}.${pid}.tmp`;
+			await fs.writeFile(temp, JSON.stringify(Object.fromEntries(removed)));
+			for (let tries = 0;; tries++) try {
+				return await fs.rename(temp, file);
+			} catch (err) {
+				if (tries >= 5 || ![
+					"EPERM",
+					"EBUSY",
+					"EACCES"
+				].includes(err.code ?? "")) throw err;
+				await new Promise((r) => setTimeout(r, 50 * (tries + 1)));
+			}
+		}).catch((err) => o.log(`couldn't write the sessions ended and removed to ${file}: ${err.message}`));
+	};
 	const start = (id, s, cwd, hooks = null) => {
 		let close = (_why) => {};
 		const closed = new Promise((resolve) => close = resolve);
@@ -17721,6 +17743,16 @@ function watchSessions(o) {
 		const config = await o.config();
 		const now = Date.now();
 		const windowMs = Math.max(config.idleMinutes * 6e4, first ? config.lightsOffHours * 36e5 : 0);
+		await (readRemoved ??= (async () => {
+			const text = o.removedFile ? await fs.readFile(o.removedFile, "utf8").catch(() => null) : null;
+			let kept = null;
+			try {
+				kept = text ? JSON.parse(text) : null;
+			} catch {
+				o.log(`couldn't read the sessions ended and removed in ${o.removedFile}`);
+			}
+			for (const [id, at] of Object.entries(kept && typeof kept === "object" ? kept : {})) if (typeof at === "number" && at >= now - windowMs) removed.set(id, at);
+		})());
 		const quiet = [];
 		const recent = [];
 		for (const dir of await io.listDir(projectsDir)) {
@@ -17754,6 +17786,12 @@ function watchSessions(o) {
 					size: st.size
 				});
 				const hooks = o.hooked?.(id) ?? null;
+				const removedAt = removed.get(id);
+				if (removedAt !== void 0) {
+					if (!hooks && st.mtimeMs <= removedAt) continue;
+					removed.delete(id);
+					saveRemoved();
+				}
 				if (s.running) {
 					if (s.running.hooks !== hooks) {
 						rehooked.add(id);
@@ -17862,11 +17900,15 @@ function watchSessions(o) {
 			session,
 			cwd: s.running.cwd
 		}] : []),
-		async end(id, why) {
-			const running = seen.get(id)?.running;
-			if (!running) return;
-			running.stop(why);
-			await running.done;
+		async end(id, why, remove = false) {
+			const s = seen.get(id);
+			if (s?.running) {
+				s.running.stop(why);
+				await s.running.done;
+			}
+			if (!remove) return;
+			removed.set(id, s && (await io.stat(s.file))?.mtimeMs || Date.now());
+			await saveRemoved();
 		},
 		look: lookOnce,
 		rehook: (id) => {
@@ -17885,6 +17927,7 @@ function watchSessions(o) {
 			let timeout;
 			await Promise.race([Promise.all(running.map((r) => r.done)), new Promise((r) => timeout = setTimeout(r, stopWaitMs))]);
 			clearTimeout(timeout);
+			await savingRemoved;
 		}
 	};
 }
@@ -18481,7 +18524,8 @@ const uuidOf = (session) => session.slice(session.indexOf(":") + 1);
 */
 function sessionsSeen(reported, records, background = /* @__PURE__ */ new Set()) {
 	const closeOf = (r) => r.kind === "driven" ? r.session : `pid:${r.pid}`;
-	const nameOf = (r) => r.driven?.name || path.basename(r.folder);
+	const drivenNames = new Map(records.flatMap((r) => r.kind === "driven" && r.driven?.name ? [[uuidOf(r.session), r.driven.name]] : []));
+	const nameOf = (r) => r.driven?.name || drivenNames.get(uuidOf(r.session)) || path.basename(r.folder);
 	const own = new Map(records.filter((r) => r.kind !== "fork" && (r.kind === "driven" || r.pid !== null)).map((r) => [uuidOf(r.session), r]));
 	const listed = /* @__PURE__ */ new Set();
 	const seen = reported.map(({ session, cwd }) => {
@@ -18703,6 +18747,7 @@ async function worker() {
 		isOff,
 		log,
 		hooked: (id) => pipe?.hooked(id) ?? null,
+		removedFile: path.join(isoplanDir, "runner", "removed.json"),
 		held: (id, hooks) => {
 			sessionLog(claudeDir, id).say("an earlier version's data layer reports this session, so the runner doesn't: its hooks module is told so, and tries again later");
 			hooks.send({
@@ -18973,7 +19018,7 @@ async function worker() {
 		scan: scanText,
 		log,
 		namer,
-		removed: (session) => reporting.end(session.slice(session.indexOf(":") + 1), REMOVED),
+		removed: (session) => reporting.end(session.slice(session.indexOf(":") + 1), REMOVED, true),
 		projectOf: async (folder) => (await homeIo.projectOf(await homeIo.resolve(folder), folder)).id,
 		elsewhere: (start, bin) => startWhere(start, bin, {
 			run: git,

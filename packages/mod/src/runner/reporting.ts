@@ -45,6 +45,10 @@
 //
 // A session closed from the desktop app's menu (`end`) stops being reported at once, so its links to
 // the offices close as a session's that finished do, and is reported again only once its transcript moves.
+// One ended and removed (`end` with `remove`: from the floor or the desktop app's menu) is kept so in
+// `removedFile` with its transcript's write time, so a runner started again doesn't report it again on
+// its first look either; it is reported again once its transcript is written after that (resumed in a
+// terminal, say), or its hooks module connects.
 
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -104,6 +108,8 @@ export interface ReportingOptions<H extends HookedSession = HookedSession> {
   stopWaitMs?: number;
   /** How long a hooks module told `held` waits before it connects again (SUPERSEDED_RECHECK_MS). */
   recheckMs?: number;
+  /** Where the sessions ended and removed are kept, each with its transcript's write time then (see above). */
+  removedFile?: string;
 }
 
 export interface Reporting {
@@ -113,8 +119,8 @@ export interface Reporting {
   reporting(): string[];
   /** The sessions it reports now, each with its folder. */
   sessions(): { session: string; cwd: string }[];
-  /** Stops reporting the session, its process ended from this machine (the desktop app's Close): its links to the offices close, and it is reported again only once its transcript moves. */
-  end(sessionId: string, why: string): Promise<void>;
+  /** Stops reporting the session, its process ended from this machine (the desktop app's Close of a take's first turn, or a driven session ended and removed from the floor or the menu): its links to the offices close, and it is reported again only once its transcript moves; with `remove`, not after a runner restart either (see above). */
+  end(sessionId: string, why: string, remove?: boolean): Promise<void>;
   /** Looks once (it looks by itself every `streamSeconds`). */
   look(): Promise<void>;
   /** The session's hooks module connected, changed or went: it is reported again for the one it has now. */
@@ -179,6 +185,30 @@ export function watchSessions<H extends HookedSession>(o: ReportingOptions<H>): 
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let said = ""; // a lasting problem is logged once
+  // The sessions ended and removed, each with its transcript's write time then; read on the first look.
+  const removed = new Map<string, number>();
+  let readRemoved: Promise<void> | null = null;
+  let savingRemoved: Promise<void> = Promise.resolve();
+  const saveRemoved = () => {
+    const file = o.removedFile;
+    if (!file) return savingRemoved;
+    return (savingRemoved = savingRemoved
+      .then(async () => {
+        await fs.mkdir(path.dirname(file), { recursive: true });
+        const temp = `${file}.${pid}.tmp`;
+        await fs.writeFile(temp, JSON.stringify(Object.fromEntries(removed)));
+        // On Windows a reader that has the file open makes the rename fail for a moment.
+        for (let tries = 0; ; tries++) {
+          try {
+            return await fs.rename(temp, file);
+          } catch (err) {
+            if (tries >= 5 || !["EPERM", "EBUSY", "EACCES"].includes((err as NodeJS.ErrnoException).code ?? "")) throw err;
+            await new Promise((r) => setTimeout(r, 50 * (tries + 1)));
+          }
+        }
+      })
+      .catch((err: Error) => o.log(`couldn't write the sessions ended and removed to ${file}: ${err.message}`)));
+  };
 
   const start = (id: string, s: Seen, cwd: string, hooks: H | null = null) => {
     let close = (_why: string) => {};
@@ -238,6 +268,17 @@ export function watchSessions<H extends HookedSession>(o: ReportingOptions<H>): 
     const config = await o.config();
     const now = Date.now();
     const windowMs = Math.max(config.idleMinutes * 60000, first ? config.lightsOffHours * 3600000 : 0);
+    await (readRemoved ??= (async () => {
+      const text = o.removedFile ? await fs.readFile(o.removedFile, "utf8").catch(() => null) : null;
+      let kept: unknown = null;
+      try {
+        kept = text ? JSON.parse(text) : null;
+      } catch {
+        o.log(`couldn't read the sessions ended and removed in ${o.removedFile}`);
+      }
+      // One last written before the first look's window can't be reported until it is written again.
+      for (const [id, at] of Object.entries(kept && typeof kept === "object" ? kept : {})) if (typeof at === "number" && at >= now - windowMs) removed.set(id, at);
+    })());
     const quiet: [string, Seen, string][] = [];
     const recent: [string, Seen, string][] = []; // on the first look, those to start once the hooks modules have said hello
     for (const dir of await io.listDir(projectsDir)) {
@@ -253,6 +294,12 @@ export function watchSessions<H extends HookedSession>(o: ReportingOptions<H>): 
         if (!s) seen.set(id, (s = { file, mtimeMs: st.mtimeMs, size: st.size, cwd: null, running: null, endedFor: null, queued: false, endedAt: null, holdOff: null, notWanted: {}, held: false, tookBack: null, told: null, toldAt: null }));
         Object.assign(s, { file, mtimeMs: st.mtimeMs, size: st.size });
         const hooks = o.hooked?.(id) ?? null;
+        const removedAt = removed.get(id);
+        if (removedAt !== undefined) {
+          if (!hooks && st.mtimeMs <= removedAt) continue;
+          removed.delete(id);
+          void saveRemoved();
+        }
         if (s.running) {
           // Reported for another hooks module than the session has now: stopped, and reported again for this one.
           if (s.running.hooks !== hooks) {
@@ -366,11 +413,15 @@ export function watchSessions<H extends HookedSession>(o: ReportingOptions<H>): 
     },
     reporting: () => [...seen].filter(([, s]) => s.running).map(([id]) => id),
     sessions: () => [...seen].flatMap(([session, s]) => (s.running ? [{ session, cwd: s.running.cwd }] : [])),
-    async end(id, why) {
-      const running = seen.get(id)?.running;
-      if (!running) return;
-      running.stop(why);
-      await running.done;
+    async end(id, why, remove = false) {
+      const s = seen.get(id);
+      if (s?.running) {
+        s.running.stop(why);
+        await s.running.done;
+      }
+      if (!remove) return;
+      removed.set(id, (s && (await io.stat(s.file))?.mtimeMs) || Date.now());
+      await saveRemoved();
     },
     look: lookOnce,
     rehook: (id) => {
@@ -389,6 +440,7 @@ export function watchSessions<H extends HookedSession>(o: ReportingOptions<H>): 
       let timeout: ReturnType<typeof setTimeout> | undefined;
       await Promise.race([Promise.all(running.map((r) => r.done)), new Promise((r) => (timeout = setTimeout(r, stopWaitMs)))]);
       clearTimeout(timeout);
+      await savingRemoved;
     },
   };
 }

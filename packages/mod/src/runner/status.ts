@@ -146,7 +146,9 @@ export function sessionsSeen(
   background: ReadonlySet<string> = new Set(),
 ): SessionSeen[] {
   const closeOf = (r: (typeof records)[number]) => (r.kind === "driven" ? r.session : `pid:${r.pid}`);
-  const nameOf = (r: (typeof records)[number]) => r.driven?.name || path.basename(r.folder);
+  // A fork goes by its lead's driven name, when its lead is a driven session that has one.
+  const drivenNames = new Map(records.flatMap((r) => (r.kind === "driven" && r.driven?.name ? [[uuidOf(r.session), r.driven.name] as const] : [])));
+  const nameOf = (r: (typeof records)[number]) => r.driven?.name || drivenNames.get(uuidOf(r.session)) || path.basename(r.folder);
   const own = new Map(records.filter((r) => r.kind !== "fork" && (r.kind === "driven" || r.pid !== null)).map((r) => [uuidOf(r.session), r]));
   const listed = new Set<(typeof records)[number]>();
   const seen: SessionSeen[] = reported.map(({ session, cwd }) => {

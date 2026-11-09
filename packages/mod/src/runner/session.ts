@@ -86,7 +86,8 @@
 //   A working turn is never cut short: stopping is the person's to do.
 // - `stop` with `remove` (protocol 0.11.0): ended as a stop ends it, answered `released` `removed`,
 //   then forgotten here, so it is never opened again, `holding` goes again without it, and its
-//   reporting ends (`removed`), so its agent can leave the floor.
+//   reporting ends (`removed`), so its agent leaves the floor once the office supports it
+//   (isoplan-app#245; an office before that shows it disconnected).
 // - Closed from this computer (the desktop app's End session and End and remove, `end`): the same as
 //   the floor's `stop` and `stop` with `remove`, with no request to answer. End session keeps the
 //   session, released `stopped`, so the floor's next instruction opens it again.
@@ -263,7 +264,7 @@ export interface DriverOptions {
   elsewhere?: (start: StartElsewhere, bin: string) => Promise<{ opened: boolean; problem: string | null }>;
   /** Writes a short name for a session from its first instruction (naming.ts); without one, sessions keep their folder's name. */
   namer?: { name(instruction: string): Promise<string | null> };
-  /** The session was ended and removed: its reporting ends, so its agent can leave the floor. */
+  /** The session was ended and removed: its reporting ends, so its agent leaves the floor once the office supports it (isoplan-app#245). */
   removed?: (session: string) => Promise<void>;
   /** Installs Claude Code, or signs it in, for a request whose `by` is the runner's own person (claude-setup.ts). */
   setup?: (m: Extract<DriveMessage, { kind: "install-claude" | "sign-in-claude" }>) => void;
