@@ -157,7 +157,7 @@ test("install adds the login item by default and takes it out while runner.json'
   const root = tempRoot();
   const claudeDir = path.join(root, ".claude");
   const plugin = path.join(root, "plugin");
-  for (const file of ["config.json", "secret-patterns.json", "prompts/instructions.md", "prompts/question.md", "prompts/brief.md", "prompts/spin-off.md", "dist/connect.js", "dist/runner.js", "dist/wake.js", "dist/data-layer.js"]) {
+  for (const file of ["config.json", "secret-patterns.json", "prompts/instructions.md", "prompts/question.md", "prompts/brief.md", "prompts/spin-off.md", "prompts/naming.md", "dist/connect.js", "dist/runner.js", "dist/wake.js", "dist/data-layer.js"]) {
     fs.mkdirSync(path.dirname(path.join(plugin, file)), { recursive: true });
     fs.writeFileSync(path.join(plugin, file), "");
   }

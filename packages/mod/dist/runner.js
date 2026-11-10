@@ -15676,6 +15676,7 @@ function createDriver(o) {
 			why: "stopped",
 			id
 		}));
+		o.log(`ended driven session ${s.record.session} from the floor: the next instruction opens it again`);
 	}
 	async function end(s, removing) {
 		if (!current(s)) return false;
@@ -17594,6 +17595,7 @@ async function reporting(o, c) {
 				...takesMessages && { takesMessages: true }
 			}
 		} : sized;
+		if (facts.session.title) o.titled?.(facts.session.title);
 		checkouts = read.checkouts ?? {};
 		answered = read.answered ?? answered;
 		const patterns = await loadPatterns(modPatterns, ownerPatterns, patternLog).catch((err) => {
@@ -18610,18 +18612,19 @@ const uuidOf = (session) => session.slice(session.indexOf(":") + 1);
 * ids) is headless with no close. A session in a terminal or the Claude app has no close.
 * `background` is the worker's memory alone: after the runner restarts, a `claude --bg` session it
 * started before is listed as one in a terminal or the Claude app, and one a person has since attached
-* to from a terminal is still listed as headless.
+* to from a terminal is still listed as headless. Each goes by its driven name, else the title its latest
+* report pass worked out for the offices (`titles`, bare ids, the worker's memory too), else its folder's name.
 */
-function sessionsSeen(reported, records, background = /* @__PURE__ */ new Set()) {
+function sessionsSeen(reported, records, background = /* @__PURE__ */ new Set(), titles = /* @__PURE__ */ new Map()) {
 	const closeOf = (r) => r.kind === "driven" ? r.session : `pid:${r.pid}`;
 	const drivenNames = new Map(records.flatMap((r) => r.kind === "driven" && r.driven?.name ? [[uuidOf(r.session), r.driven.name]] : []));
-	const nameOf = (r) => r.driven?.name || drivenNames.get(uuidOf(r.session)) || path.basename(r.folder);
+	const nameOf = (r) => r.driven?.name || drivenNames.get(uuidOf(r.session)) || titles.get(uuidOf(r.session)) || path.basename(r.folder);
 	const own = new Map(records.filter((r) => r.kind !== "fork" && (r.kind === "driven" || r.pid !== null)).map((r) => [uuidOf(r.session), r]));
 	const listed = /* @__PURE__ */ new Set();
 	const seen = reported.map(({ session, cwd }) => {
 		const r = own.get(session);
 		if (!r) return {
-			name: path.basename(cwd),
+			name: titles.get(session) || path.basename(cwd),
 			headless: background.has(session)
 		};
 		listed.add(r);
@@ -18830,6 +18833,7 @@ async function worker() {
 		}),
 		close: (close, remove) => closeFor(close, remove)
 	}).catch((err) => (log(`the runner couldn't open its pipe for the sessions' hooks modules: ${err.message}`), null));
+	const titles = /* @__PURE__ */ new Map();
 	const reporting = watchSessions({
 		claudeDir,
 		io,
@@ -18849,6 +18853,7 @@ async function worker() {
 			const said = sessionLog(claudeDir, sessionId);
 			said.say(hooks ? `the runner reports this session for its hooks module, in ${cwd}` : `the runner reports this session, in ${cwd}`);
 			const shares = (office) => shared.get(office.server) ?? null;
+			const titled = (title) => void titles.set(sessionId, title);
 			try {
 				if (hooks) return await reportSession({
 					sessionId,
@@ -18866,7 +18871,8 @@ async function worker() {
 						pairLinks.sent(sessionId, line, hooks.send);
 					},
 					closed: Promise.race([closed, hooks.closed.then(() => "its hooks module's link to the runner closed")]),
-					shared: shares
+					shared: shares,
+					titled
 				}).finally(() => pairLinks.ended(sessionId, hooks.send));
 				return await reportSession({
 					sessionId,
@@ -18877,7 +18883,8 @@ async function worker() {
 					closed,
 					notWanted,
 					isOff: () => isOff(cwd),
-					shared: shares
+					shared: shares,
+					titled
 				});
 			} catch (err) {
 				said.say(`stopping: something went wrong: ${String(err?.stack ?? err)}`);
@@ -19151,7 +19158,7 @@ async function worker() {
 	let listMs = LOCK_REFRESH_MS;
 	const listSessions = async () => {
 		try {
-			status.sessions(sessionsSeen(reporting.sessions(), registry.list(), background));
+			status.sessions(sessionsSeen(reporting.sessions(), registry.list(), background, titles));
 			listMs = (await settings()).trayRefreshSeconds * 1e3;
 		} catch (err) {
 			log(`couldn't list the sessions for the desktop app's menu: ${String(err?.message ?? err)}`);

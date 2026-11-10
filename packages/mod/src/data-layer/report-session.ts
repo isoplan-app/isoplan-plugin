@@ -193,6 +193,8 @@ export interface ReportSessionOptions {
   notWanted?: Record<string, number>;
   /** The runner's own pairing and list of repos for an office, shared by every session it reports. */
   shared?: (office: Office) => { pairing: Pairing; approved: Approved } | null;
+  /** The session's title as each pass works it out for the offices, sent or not, for the desktop app's menu (runner/status.ts). */
+  titled?: (title: string) => void;
 }
 
 /** How it ended: why, as its log says; and without a hooks module, a hold-off for the runner to keep. */
@@ -734,6 +736,7 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
     const titled = given ? { ...read.facts, session: { ...read.facts.session, title: given } } : read.facts;
     const sized: Facts = contextWindow ? { ...titled, session: { ...titled.session, contextWindow } } : titled;
     const facts: Facts = hooked ? { ...sized, session: { ...sized.session, hooks: true, ...(takesMessages && { takesMessages: true as const }) } } : sized;
+    if (facts.session.title) o.titled?.(facts.session.title);
 
     checkouts = read.checkouts ?? {};
     answered = read.answered ?? answered;

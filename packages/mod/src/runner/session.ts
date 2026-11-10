@@ -1223,6 +1223,7 @@ export function createDriver(o: DriverOptions): Driver {
     if (!(await endProcess(s, "stopped"))) return refuse(s.record.driven.office, id, "unavailable", { detail: NOT_CLOSED });
     if (removing) return remove(s, id);
     emit(s, () => ({ ...driven, kind: "released", session: s.record.session, why: "stopped", id }));
+    o.log(`ended driven session ${s.record.session} from the floor: the next instruction opens it again`);
   }
 
   async function end(s: Session, removing: boolean): Promise<boolean> {

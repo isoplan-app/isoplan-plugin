@@ -517,7 +517,7 @@ test("install and sign in Claude Code: the runner's own person's go to its setup
   ]);
 });
 
-test("instruct: the next instruction goes to the same process; one while a turn runs is busy; stop ends the process and its tree mid-turn", async () => {
+test("instruct: the next instruction goes to the same process; one while a turn runs is busy; stop ends the process and its tree mid-turn, and runner.log says so as for a Close session", async () => {
   const t = await setUp();
   t.drive(start("d1", { instruction: "first" }));
   await t.until(() => t.of("turn-ended").length === 1);
@@ -533,6 +533,7 @@ test("instruct: the next instruction goes to the same process; one while a turn 
     { type: "driven", v: 1, kind: "turn-ended", session: S1, turn: "d2", outcome: "stopped" },
     { type: "driven", v: 1, kind: "released", session: S1, why: "stopped", id: "d4" },
   ]);
+  expect(t.logs).toContain(`ended driven session ${S1} from the floor: the next instruction opens it again`);
   // One process took both turns.
   expect(t.fakeLog().filter((l) => l.argv)).toHaveLength(1);
   expect(t.fakeLog().filter((l) => l.turn).map((l) => l.turn)).toEqual(["first", "now hang"]);
@@ -721,6 +722,7 @@ test("closed from this computer: Close session ends the process mid-turn and is 
     { type: "driven", v: 1, kind: "turn-ended", session: S1, turn: "d1", outcome: "stopped" },
     { type: "driven", v: 1, kind: "released", session: S1, why: "stopped" },
   ]);
+  expect(t.logs).toContain(`ended driven session ${S1} from this computer: the next instruction opens it again`);
   for (let i = 0; i < 100 && (alive(pid) || alive(grandchild)); i++) await new Promise((r) => setTimeout(r, 50));
   expect([alive(pid), alive(grandchild)]).toEqual([false, false]);
   expect(t.removed).toEqual([]);
