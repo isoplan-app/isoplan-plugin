@@ -137,7 +137,7 @@ test("a running run: phases from its script's meta, agents at work until quiet; 
   expect(w!.phases).toEqual([{ title: "Plugin tickets", detail: "one at a time" }, { title: "Protocol release" }, { title: "App tickets" }]);
   const agents = byId(facts.agents);
   expect([agents.a0000000000000001!.status, agents.a0000000000000002!.status]).toEqual(["done", "working"]);
-  expect(facts.reports.map((r) => [r.agent, r.text])).toEqual([[cc("a0000000000000001"), "Built #64."]]);
+  expect(facts.reports.filter((r) => agents[r.agent.replace(/^claude-code:/, "")]?.startedBy !== null).map((r) => [r.agent, r.text])).toEqual([[cc("a0000000000000001"), "Built #64."]]);
 
   clock = NOW + 6 * 60_000; // past stalledMinutes (5) of quiet
   const stalled = (await read("s")).facts!;

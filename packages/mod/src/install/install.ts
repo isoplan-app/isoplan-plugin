@@ -74,7 +74,7 @@ export const runnerAppDir = (claudeDir: string) => path.join(claudeDir, "isoplan
 
 // The runner's files, by their path in the plugin's folder, and the link handler's, which reads the
 // same defaults. runner.js goes last, so a runner started on new code finds the new defaults beside it.
-export const RUNNER_FILES = ["config.json", "runner.json", "secret-patterns.json", "prompts/instructions.md", "prompts/question.md", "prompts/brief.md", "prompts/spin-off.md", "dist/connect.js", "dist/runner.js"];
+export const RUNNER_FILES = ["config.json", "runner.json", "secret-patterns.json", "prompts/instructions.md", "prompts/question.md", "prompts/brief.md", "prompts/spin-off.md", "prompts/naming.md", "dist/connect.js", "dist/runner.js"];
 
 /** The link handler's copy, which the operating system runs for an isoplan:// link. */
 export const connectScriptPath = (claudeDir: string) => path.join(runnerAppDir(claudeDir), copiedAs("dist/connect.js"));

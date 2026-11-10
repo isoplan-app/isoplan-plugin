@@ -1497,6 +1497,7 @@ const RUNNER_FILES = [
 	"prompts/question.md",
 	"prompts/brief.md",
 	"prompts/spin-off.md",
+	"prompts/naming.md",
 	"dist/connect.js",
 	"dist/runner.js"
 ];

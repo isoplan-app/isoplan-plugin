@@ -304,6 +304,12 @@ test("uninstall: takes out the auto-update the plugin turned on from an entry no
   expect(u.read()).toEqual({ extraKnownMarketplaces: { isoplan: { source: moved, autoUpdate: true } } });
 });
 
+test("install: every prompt the runner reads is among the runner's files it copies", () => {
+  const prompts = fs.readdirSync(path.join(import.meta.dirname, "..", "..", "prompts")).map((name) => `prompts/${name}`);
+  expect(prompts).toContain("prompts/naming.md");
+  for (const file of prompts) expect(RUNNER_FILES).toContain(file);
+});
+
 test("install: copies the runner and its defaults out of the plugin's folder, and records the copy", async () => {
   const s = setup();
   // A stand-in plugin folder holding the runner's files.

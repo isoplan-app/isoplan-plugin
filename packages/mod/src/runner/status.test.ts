@@ -94,6 +94,31 @@ test("status: a driven session or a take's first turn is headless and closed by 
   ]);
 });
 
+test("status: a session goes by its driven name, else the title its report gave the offices, else its folder's name, so two sessions in one folder don't look the same", () => {
+  const reported = [
+    { session: "u-a", cwd: "C:/w/app" },
+    { session: "u-b", cwd: "C:/w/app" },
+    { session: "u-driven", cwd: "C:/w/app" },
+    { session: "u-new", cwd: "C:/w/app" },
+  ];
+  const records = [
+    { kind: "driven" as const, pid: 11, session: "claude-code:u-driven", folder: "C:/w/app", driven: { name: "Fix login" } },
+    // Not named yet: its report's title until it is.
+    { kind: "driven" as const, pid: 12, session: "claude-code:u-b", folder: "C:/w/app" },
+  ];
+  const titles = new Map([
+    ["u-a", "Tidy the docs"],
+    ["u-b", "main"],
+    ["u-driven", "Something else"],
+  ]);
+  expect(sessionsSeen(reported, records, new Set(), titles)).toEqual([
+    { name: "app", headless: false },
+    { name: "Fix login", headless: true, close: "claude-code:u-driven" },
+    { name: "main", headless: true, close: "claude-code:u-b" },
+    { name: "Tidy the docs", headless: false },
+  ]);
+});
+
 test("status: a Close by process ends a take's first turn and marks it closed from the menu; one still running is unmarked, so its later failure says its own reason", async () => {
   const records = [
     { kind: "desktop-read" as const, pid: 7, session: "claude-code:u7", folder: "/r" },
