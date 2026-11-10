@@ -29,7 +29,7 @@ export interface OfficeSeen {
 
 /** A session on this machine, as the app's Sessions menu lists it. */
 export interface SessionSeen {
-  /** Its folder's name, or the name a driven session was given. */
+  /** The name a driven session was given, else the title its latest report pass worked out for the offices, else its folder's name. */
   name: string;
   /** A process the runner started (driven from the floor, a fork, a take's first turn, or a `claude --bg` session), not a terminal or the Claude app. */
   headless: boolean;
@@ -138,22 +138,24 @@ const uuidOf = (session: string) => session.slice(session.indexOf(":") + 1);
  * ids) is headless with no close. A session in a terminal or the Claude app has no close.
  * `background` is the worker's memory alone: after the runner restarts, a `claude --bg` session it
  * started before is listed as one in a terminal or the Claude app, and one a person has since attached
- * to from a terminal is still listed as headless.
+ * to from a terminal is still listed as headless. Each goes by its driven name, else the title its latest
+ * report pass worked out for the offices (`titles`, bare ids, the worker's memory too), else its folder's name.
  */
 export function sessionsSeen(
   reported: { session: string; cwd: string }[],
   records: { kind: "driven" | "fork" | "desktop-read"; pid: number | null; session: string; folder: string; driven?: { name?: string } }[],
   background: ReadonlySet<string> = new Set(),
+  titles: ReadonlyMap<string, string> = new Map(),
 ): SessionSeen[] {
   const closeOf = (r: (typeof records)[number]) => (r.kind === "driven" ? r.session : `pid:${r.pid}`);
   // A fork goes by its lead's driven name, when its lead is a driven session that has one.
   const drivenNames = new Map(records.flatMap((r) => (r.kind === "driven" && r.driven?.name ? [[uuidOf(r.session), r.driven.name] as const] : [])));
-  const nameOf = (r: (typeof records)[number]) => r.driven?.name || drivenNames.get(uuidOf(r.session)) || path.basename(r.folder);
+  const nameOf = (r: (typeof records)[number]) => r.driven?.name || drivenNames.get(uuidOf(r.session)) || titles.get(uuidOf(r.session)) || path.basename(r.folder);
   const own = new Map(records.filter((r) => r.kind !== "fork" && (r.kind === "driven" || r.pid !== null)).map((r) => [uuidOf(r.session), r]));
   const listed = new Set<(typeof records)[number]>();
   const seen: SessionSeen[] = reported.map(({ session, cwd }) => {
     const r = own.get(session);
-    if (!r) return { name: path.basename(cwd), headless: background.has(session) };
+    if (!r) return { name: titles.get(session) || path.basename(cwd), headless: background.has(session) };
     listed.add(r);
     return { name: nameOf(r), headless: true, close: closeOf(r) };
   });
