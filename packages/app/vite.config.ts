@@ -9,7 +9,9 @@ const page = (name: string) => fileURLToPath(new URL(`./src/${name}/index.html`,
 export default defineConfig({
   plugins: [vue()],
   root: "src",
-  base: "./",
+  // Absolute, because a views:// address treats the window's folder as its root, so ../ can't reach
+  // view-assets: each page loads views://view-assets/….
+  base: "views://",
   resolve: { alias: { "electrobun/view": fileURLToPath(new URL("./.hutch/devkit/api/browser/index.ts", import.meta.url)) } },
   build: { outDir: "../dist", emptyOutDir: true, assetsDir: "view-assets", rollupOptions: { input: { pairing: page("pairing"), running: page("running") } } },
 });
