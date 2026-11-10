@@ -192,7 +192,7 @@ test("install registers the handler for the copy beside the runner, and uninstal
   const claudeDir = path.join(root, ".claude");
   const plugin = path.join(root, "plugin");
   fs.mkdirSync(path.join(plugin, "dist"), { recursive: true });
-  for (const file of ["config.json", "runner.json", "secret-patterns.json", "prompts/instructions.md", "prompts/question.md", "prompts/brief.md", "prompts/spin-off.md", "dist/connect.js", "dist/runner.js", "dist/wake.js", "dist/data-layer.js"]) {
+  for (const file of ["config.json", "runner.json", "secret-patterns.json", "prompts/instructions.md", "prompts/question.md", "prompts/brief.md", "prompts/spin-off.md", "prompts/naming.md", "dist/connect.js", "dist/runner.js", "dist/wake.js", "dist/data-layer.js"]) {
     fs.mkdirSync(path.dirname(path.join(plugin, file)), { recursive: true });
     fs.writeFileSync(path.join(plugin, file), "");
   }
