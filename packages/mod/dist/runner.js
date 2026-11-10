@@ -18644,20 +18644,28 @@ function sessionsSeen(reported, records, background = /* @__PURE__ */ new Set(),
 		const r = own.get(session);
 		if (!r) return {
 			name: titles.get(session) || path.basename(cwd),
-			headless: background.has(session)
+			headless: background.has(session),
+			folder: cwd,
+			id: session
 		};
 		listed.add(r);
 		return {
 			name: nameOf(r),
 			headless: true,
-			close: closeOf(r)
+			close: closeOf(r),
+			folder: r.folder,
+			id: session,
+			...r.pid !== null && { pid: r.pid }
 		};
 	});
 	for (const r of records) if (r.pid !== null && !listed.has(r)) seen.push({
 		name: nameOf(r),
 		headless: true,
 		close: closeOf(r),
-		...r.kind === "fork" && { fork: true }
+		...r.kind === "fork" && { fork: true },
+		folder: r.folder,
+		id: uuidOf(r.session),
+		pid: r.pid
 	});
 	return seen.sort((a, b) => a.name.localeCompare(b.name) || Number(b.headless) - Number(a.headless));
 }

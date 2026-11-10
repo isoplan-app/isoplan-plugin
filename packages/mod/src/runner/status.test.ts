@@ -56,11 +56,11 @@ test("status: each office's entry names the email of its pairing's person once k
   const status = createStatus({ file, offices: [{ server: A, label: "a" }, { server: B, label: "b" }], pid: 7, now: () => 1000 });
   status.email(A, "ada@example.com");
   status.email(B, undefined);
-  status.sessions([{ name: "app", headless: true, close: "claude-code:1" }]);
+  status.sessions([{ name: "app", headless: true, close: "claude-code:1", folder: "/w/app", id: "1" }]);
   await status.written();
   const seen = await readStatus(file);
   expect(seen?.offices.map((o) => o.email)).toEqual(["ada@example.com", undefined]);
-  expect(seen?.sessions).toEqual([{ name: "app", headless: true, close: "claude-code:1" }]);
+  expect(seen?.sessions).toEqual([{ name: "app", headless: true, close: "claude-code:1", folder: "/w/app", id: "1" }]);
   status.email(A, undefined);
   await status.written();
   expect((await readStatus(file))?.offices[0]).not.toHaveProperty("email");
@@ -84,13 +84,13 @@ test("status: a driven session or a take's first turn is headless and closed by 
     { kind: "fork" as const, pid: 14, session: "claude-code:u-driven", folder: "C:/w/app" },
   ];
   expect(sessionsSeen(reported, records, new Set(["u-bg"]))).toEqual([
-    { name: "api", headless: true, close: "pid:12", fork: true },
-    { name: "api", headless: false },
-    { name: "bg", headless: true },
-    { name: "Fix login", headless: true, close: "claude-code:u-driven" },
-    { name: "Fix login", headless: true, close: "pid:14", fork: true },
-    { name: "site", headless: false },
-    { name: "take", headless: true, close: "pid:13" },
+    { name: "api", headless: true, close: "pid:12", fork: true, folder: "C:/w/api", id: "u-lead", pid: 12 },
+    { name: "api", headless: false, folder: "C:/w/api", id: "u-lead" },
+    { name: "bg", headless: true, folder: "C:/w/bg", id: "u-bg" },
+    { name: "Fix login", headless: true, close: "claude-code:u-driven", folder: "C:/w/app", id: "u-driven", pid: 11 },
+    { name: "Fix login", headless: true, close: "pid:14", fork: true, folder: "C:/w/app", id: "u-driven", pid: 14 },
+    { name: "site", headless: false, folder: "C:/w/site", id: "u-terminal" },
+    { name: "take", headless: true, close: "pid:13", folder: "C:/w/take", id: "u-take", pid: 13 },
   ]);
 });
 
@@ -112,10 +112,10 @@ test("status: a session goes by its driven name, else the title its report gave 
     ["u-driven", "Something else"],
   ]);
   expect(sessionsSeen(reported, records, new Set(), titles)).toEqual([
-    { name: "app", headless: false },
-    { name: "Fix login", headless: true, close: "claude-code:u-driven" },
-    { name: "main", headless: true, close: "claude-code:u-b" },
-    { name: "Tidy the docs", headless: false },
+    { name: "app", headless: false, folder: "C:/w/app", id: "u-new" },
+    { name: "Fix login", headless: true, close: "claude-code:u-driven", folder: "C:/w/app", id: "u-driven", pid: 11 },
+    { name: "main", headless: true, close: "claude-code:u-b", folder: "C:/w/app", id: "u-b", pid: 12 },
+    { name: "Tidy the docs", headless: false, folder: "C:/w/app", id: "u-a" },
   ]);
 });
 

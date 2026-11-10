@@ -1,7 +1,7 @@
 import path from "node:path";
 import { expect, test } from "vitest";
 import { modDir } from "../data-layer/fixture.js";
-import { loadPatterns, scan } from "./scan.js";
+import { CUT, cut, loadPatterns, scan } from "./scan.js";
 
 const patterns = (await loadPatterns(path.join(modDir, "secret-patterns.json"), path.join(modDir, "missing.json"), () => {}))!;
 
@@ -39,4 +39,11 @@ test("secret patterns: ordinary prose and code pass the whole scan", () => {
   for (const text of ["Coverage was 79.16% against an 80% floor, on handover-polish.", "Set `apiKey: config.apiKey` in client.ts and read `process.env.STRIPE_SECRET`.", "Run git push origin isoplan/handoff/h-1."]) {
     expect(scan(text, patterns)).toBe(null);
   }
+});
+
+test("secret patterns: cut takes every match out of a command and leaves the rest; with unreadable patterns there is nothing to show", () => {
+  const key = "sk-ant-api03-abcdefghijklmnopqrstuv";
+  expect(cut(`node run.js --key ${key} --again ${key} postgres://admin:s3cretpw@db:5432/app`, patterns)).toBe(`node run.js --key ${CUT} --again ${CUT} ${CUT}db:5432/app`);
+  expect(cut("pnpm test", patterns)).toBe("pnpm test");
+  expect(cut("pnpm test", null)).toBeNull();
 });
