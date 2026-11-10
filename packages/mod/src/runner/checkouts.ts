@@ -5,8 +5,9 @@
 //   `.git` folder: the checkout every worktree of the repo shares. A worktree whose main checkout
 //   was found is remembered in `~/.claude/isoplan/runner/checkouts.json`, so a repo seen only in
 //   worktrees since deleted is still offered while its main checkout is there.
-// - The branches are the remote's own, `git ls-remote --heads origin` (origin is the remote the
-//   project id comes from, identity.ts), never local or `refs/remotes` ones, which can be stale.
+// - The branches are the remote's own, `git ls-remote --symref origin HEAD refs/heads/*` (origin is
+//   the remote the project id comes from, identity.ts), never local or `refs/remotes` ones, which can
+//   be stale. The remote's default branch, its HEAD, is listed first.
 //   Hidden, never prompting (handoff/git.ts createRunGit), under gitTimeoutSeconds, and asked again
 //   once older than branchRefreshMinutes. One that fails is logged when it starts failing, not on
 //   every check, and its repo is offered with no branches.
@@ -99,14 +100,17 @@ export function createCheckouts({ file, resolve, isDir }: { file: string; resolv
   };
 }
 
-/** The branch names `git ls-remote --heads` printed; none that git would read as an option. */
+/** The branch names `git ls-remote --symref` printed, the one its HEAD names first; none that git would read as an option. */
 export function parseHeads(stdout: string): string[] {
   const out: string[] = [];
+  let head: string | null = null;
   for (const line of stdout.split(/\r?\n/)) {
     const m = /^[0-9a-f]+\trefs\/heads\/(.+)$/.exec(line.trim());
     if (m && !m[1]!.startsWith("-")) out.push(m[1]!);
+    head ??= /^ref: refs\/heads\/(.+)\tHEAD$/.exec(line.trim())?.[1] ?? null;
   }
-  return out;
+  const at = head === null ? -1 : out.indexOf(head);
+  return at > 0 ? [out[at]!, ...out.slice(0, at), ...out.slice(at + 1)] : out;
 }
 
 export interface RemoteBranchesOptions {
@@ -127,7 +131,7 @@ export function createRemoteBranches({ run, timeoutMs, refreshMs, log, now = Dat
     const hit = cache.get(key);
     if (hit && now() - hit.at < (await refreshMs())) return hit.branches;
     const branches = (async () => {
-      const r = await run(["ls-remote", "--heads", "origin"], { cwd: checkout, timeoutMs: await timeoutMs() });
+      const r = await run(["ls-remote", "--symref", "origin", "HEAD", "refs/heads/*"], { cwd: checkout, timeoutMs: await timeoutMs() });
       if (r.code !== 0) {
         if (!failing.has(key)) log(`couldn't list the branches on the remote of ${checkout} (${r.timedOut ? "git took too long" : `git ls-remote exited ${r.code}`}), so it is offered for new sessions with no branches; this is logged again only once it has worked`);
         failing.add(key);

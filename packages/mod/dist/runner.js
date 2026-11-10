@@ -14282,14 +14282,21 @@ function createCheckouts({ file, resolve, isDir }) {
 		}
 	};
 }
-/** The branch names `git ls-remote --heads` printed; none that git would read as an option. */
+/** The branch names `git ls-remote --symref` printed, the one its HEAD names first; none that git would read as an option. */
 function parseHeads(stdout) {
 	const out = [];
+	let head = null;
 	for (const line of stdout.split(/\r?\n/)) {
 		const m = /^[0-9a-f]+\trefs\/heads\/(.+)$/.exec(line.trim());
 		if (m && !m[1].startsWith("-")) out.push(m[1]);
+		head ??= /^ref: refs\/heads\/(.+)\tHEAD$/.exec(line.trim())?.[1] ?? null;
 	}
-	return out;
+	const at = head === null ? -1 : out.indexOf(head);
+	return at > 0 ? [
+		out[at],
+		...out.slice(0, at),
+		...out.slice(at + 1)
+	] : out;
 }
 /** The branches on `checkout`'s origin, by name; null when its remote couldn't be asked. */
 function createRemoteBranches({ run, timeoutMs, refreshMs, log, now = Date.now }) {
@@ -14302,8 +14309,10 @@ function createRemoteBranches({ run, timeoutMs, refreshMs, log, now = Date.now }
 		const branches = (async () => {
 			const r = await run([
 				"ls-remote",
-				"--heads",
-				"origin"
+				"--symref",
+				"origin",
+				"HEAD",
+				"refs/heads/*"
 			], {
 				cwd: checkout,
 				timeoutMs: await timeoutMs()
