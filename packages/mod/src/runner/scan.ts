@@ -67,3 +67,12 @@ export function errorText(err: unknown, patterns: Pattern[] | null): string {
   const hit = scan(text, patterns);
   return hit === null ? text : hit === UNREADABLE ? "(its text is left out: the secret patterns can't be read)" : `(its text is left out: it matches the secret pattern ${hit})`;
 }
+
+/** What `cut` puts in place of a secret. */
+export const CUT = "[secret cut]";
+
+/** `text` with every match of every pattern cut out, for showing on this machine (the desktop app's window of what's running); null when `patterns` is null. */
+export function cut(text: string, patterns: Pattern[] | null): string | null {
+  if (!patterns) return null;
+  return patterns.reduce((t, p) => t.replace(new RegExp(p.regex.source, p.regex.flags.includes("g") ? p.regex.flags : p.regex.flags + "g"), (m) => (m ? CUT : "")), text);
+}

@@ -51,7 +51,7 @@ async function loadSettings(io, defaultsPath, userPath) {
 	return config;
 }
 const BYTE_KEYS = /* @__PURE__ */ new Set(["tailBytes"]);
-const FLOORS = /* @__PURE__ */ new Map([["streamSeconds", .25]]);
+const FLOORS = /* @__PURE__ */ new Map([["streamSeconds", .25], ["processRefreshSeconds", 1]]);
 const ZERO_OFF = /* @__PURE__ */ new Set(["lightsOffHours", "updateCheckHours"]);
 function fits(key, value, fallback) {
 	if (key === "server") return typeof value === "string" && isWebSocketUrl(value);

@@ -97,6 +97,8 @@ export function trayMenu(input: MenuInput): MenuItem[] {
     { type: "normal", label: "Offices", submenu: officeLines(input).map((label) => ({ type: "normal", label, enabled: false })) },
     { type: "normal", label: "Sessions", submenu: sessionItems(input) },
     { type: "normal", label: waiting ? `Pair this computer… (${waiting} waiting)` : "Open pairing…", action: "pairing" },
+    // The window of what's running on this computer (running.ts), only from a click.
+    { type: "normal", label: "Show what's running…", action: "running" },
     { type: "divider" },
     { type: "normal", label: "Quit Isoplan", action: "quit" },
   ];

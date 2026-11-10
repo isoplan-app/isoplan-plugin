@@ -30,6 +30,7 @@
   "appStartSeconds": 120,
   "officeUnreachableSeconds": 60,
   "trayRefreshSeconds": 2,
+  "processRefreshSeconds": 5,
   "drivenIdleMinutes": 30,
   "drivenPerProject": 4,
   "drivenCloseSeconds": 30,

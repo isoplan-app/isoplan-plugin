@@ -13,15 +13,16 @@ export default {
     version: pkg.version,
   },
   runtime: {
-    // A tray app: closing the pairing window leaves it running.
+    // A tray app: closing a window leaves it running.
     exitOnLastWindowClosed: false,
   },
   build: {
     mainProcess: "bun",
     bun: { entrypoint: "src/bun/index.ts" },
     copy: {
-      "dist/index.html": "views/pairing/index.html",
-      "dist/assets": "views/pairing/assets",
+      "dist/pairing/index.html": "views/pairing/index.html",
+      "dist/running/index.html": "views/running/index.html",
+      "dist/view-assets": "views/view-assets",
       "assets/isoplan.ico": "views/assets/isoplan.ico",
       "assets/tray-template.png": "views/assets/tray-template.png",
       "assets/tray-template@2x.png": "views/assets/tray-template@2x.png",

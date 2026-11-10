@@ -598,6 +598,11 @@ test("runner.json: the labelled defaults load, and the owner's file overrides th
   const s = await loadSettings<RunnerSettings & { claudeModel: string }>(nodeIo(), path.join(modDir, "runner.json"), user);
   expect(defaults).toMatchObject({ claudeModel: "opus" });
   expect(s).toEqual({ ...defaults, claudeModel: "sonnet", answersPerRoomPerHour: 3 });
+  // The app's process listing is asked at most once a second.
+  fs.writeFileSync(user, JSON.stringify({ processRefreshSeconds: 0.01 }));
+  expect((await loadSettings<{ processRefreshSeconds: number }>(nodeIo(), path.join(modDir, "runner.json"), user)).processRefreshSeconds).toBe(5);
+  fs.writeFileSync(user, JSON.stringify({ processRefreshSeconds: 1 }));
+  expect((await loadSettings<{ processRefreshSeconds: number }>(nodeIo(), path.join(modDir, "runner.json"), user)).processRefreshSeconds).toBe(1);
 });
 
 test("secret patterns: the owner's file adds patterns", async () => {

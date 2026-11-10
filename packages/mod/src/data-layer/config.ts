@@ -115,8 +115,11 @@ export async function loadSettings<T>(io: ConfigIo, defaultsPath: string, userPa
 const BYTE_KEYS = new Set(["tailBytes"]);
 
 // Keys with a floor above zero. The read pace is one: a pass every few milliseconds would spin the
-// machine.
-const FLOORS = new Map([["streamSeconds", 0.25]]);
+// machine; the app's process listing is another.
+const FLOORS = new Map([
+  ["streamSeconds", 0.25],
+  ["processRefreshSeconds", 1],
+]);
 
 // Every number in config.json is a window or a size, so it must be finite and above zero; a
 // window in ZERO_OFF may also be 0, which turns its feature off.

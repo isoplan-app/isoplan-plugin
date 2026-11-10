@@ -7,7 +7,8 @@
 // worker writing again. Each office's entry names the email of the person its pairing belongs to, once
 // the office has said it (pairing.ts). It also lists the machine's sessions the worker reports or runs
 // (`sessions`): headless ones, a process of the runner's, carry the id the app asks the worker to
-// close them by, over the runner's pipe (src/pipe). The file never leaves the machine.
+// close them by, over the runner's pipe (src/pipe), and each one's folder, transcript id and, for one the
+// runner started, its process, for the app's window of what's running. The file never leaves the machine.
 
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -37,6 +38,12 @@ export interface SessionSeen {
   fork?: boolean;
   /** What the app asks the worker to close it by; headless ones alone have one. */
   close?: string;
+  /** The folder it runs in, for the app's window of what's running (#137). */
+  folder: string;
+  /** Its transcript's id, bare: the app finds a session's process by it when the runner didn't start it. */
+  id: string;
+  /** Its process, when the runner started it and it runs now. */
+  pid?: number;
 }
 
 export interface RunnerStatus {
@@ -155,11 +162,12 @@ export function sessionsSeen(
   const listed = new Set<(typeof records)[number]>();
   const seen: SessionSeen[] = reported.map(({ session, cwd }) => {
     const r = own.get(session);
-    if (!r) return { name: titles.get(session) || path.basename(cwd), headless: background.has(session) };
+    if (!r) return { name: titles.get(session) || path.basename(cwd), headless: background.has(session), folder: cwd, id: session };
     listed.add(r);
-    return { name: nameOf(r), headless: true, close: closeOf(r) };
+    return { name: nameOf(r), headless: true, close: closeOf(r), folder: r.folder, id: session, ...(r.pid !== null && { pid: r.pid }) };
   });
-  for (const r of records) if (r.pid !== null && !listed.has(r)) seen.push({ name: nameOf(r), headless: true, close: closeOf(r), ...(r.kind === "fork" && { fork: true }) });
+  for (const r of records)
+    if (r.pid !== null && !listed.has(r)) seen.push({ name: nameOf(r), headless: true, close: closeOf(r), ...(r.kind === "fork" && { fork: true }), folder: r.folder, id: uuidOf(r.session), pid: r.pid });
   return seen.sort((a, b) => a.name.localeCompare(b.name) || Number(b.headless) - Number(a.headless));
 }
 

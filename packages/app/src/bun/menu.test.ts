@@ -14,8 +14,8 @@ const status: RunnerStatus = {
   ],
   pairs: [{ server: "wss://new.example/data-layer", url: "https://new.example/pair/abc", expires: "2026-11-08T12:10:00Z" }],
   sessions: [
-    { name: "app", headless: true, close: "claude-code:u1" },
-    { name: "site", headless: false },
+    { name: "app", headless: true, close: "claude-code:u1", folder: "C:/w/app", id: "u1" },
+    { name: "site", headless: false, folder: "C:/w/site", id: "u2" },
   ],
 };
 const input = (over: Partial<MenuInput> = {}): MenuInput => ({ engine: "running", status, now: NOW, unreachableMs: 60_000, ...over });
@@ -51,6 +51,7 @@ test("menu: says Isoplan is running, each office's link, and the actions", () =>
       ],
     },
     { type: "normal", label: "Pair this computer… (1 waiting)", action: "pairing" },
+    { type: "normal", label: "Show what's running…", action: "running" },
     { type: "divider" },
     { type: "normal", label: "Quit Isoplan", action: "quit" },
   ]);
@@ -89,12 +90,16 @@ test("menu: sessions: only a headless one can be closed, a driven one closed or 
   // One gone since the menu was drawn, or one in a terminal, isn't closed.
   expect(closing("close:claude-code:gone", status)).toBeNull();
   expect(closing("remove:claude-code:gone", status)).toBeNull();
-  expect(closing("close:", { ...status, sessions: [{ name: "site", headless: false }] })).toBeNull();
+  expect(closing("close:", { ...status, sessions: [{ name: "site", headless: false, folder: "C:/w/site", id: "u2" }] })).toBeNull();
   expect(closing("quit", status)).toBeNull();
   // A fork or a take's first turn is only closed, never removed.
-  expect(closing("remove:pid:12", { ...status, sessions: [{ name: "api", headless: true, close: "pid:12", fork: true }] })).toBeNull();
+  expect(closing("remove:pid:12", { ...status, sessions: [{ name: "api", headless: true, close: "pid:12", fork: true, folder: "C:/w/api", id: "u3" }] })).toBeNull();
   // A fork is told apart from its lead, and a claude --bg session the runner started is headless with no Close.
-  const forked = [{ name: "api", headless: true, close: "pid:12", fork: true }, { name: "api", headless: false }, { name: "bg", headless: true }];
+  const forked = [
+    { name: "api", headless: true, close: "pid:12", fork: true, folder: "C:/w/api", id: "u3" },
+    { name: "api", headless: false, folder: "C:/w/api", id: "u3" },
+    { name: "bg", headless: true, folder: "C:/w/bg", id: "u4" },
+  ];
   expect(sessionItems(input({ status: { ...status, sessions: forked } }))).toEqual([
     { type: "normal", label: "api (headless, a fork)", submenu: [{ type: "normal", label: "Close", action: "close:pid:12" }] },
     { type: "normal", label: "api (in a terminal or the Claude app)", enabled: false },
