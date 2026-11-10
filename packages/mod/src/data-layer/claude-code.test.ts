@@ -250,6 +250,18 @@ test("foreground agent: working until the parent's tool_result says completed, t
   expect(f.reports).toEqual([{ agent: cc("fg1"), at: at(3), text: "Found it." }]);
 });
 
+test("a lead's last reply: its newest text as its turn ends, kept while the next turn runs", async () => {
+  const { home, main } = office();
+  const first = [line.user(main, "Add tests", 60), line.tool(main, "Bash", { command: "npm test" }, 50), line.text(main, "Tests added and passing.", 40)];
+  session(home, "s", first);
+  const reply = [{ agent: cc("s:lead"), at: at(40), text: "Tests added and passing." }];
+  expect((await factsOf(home, "s")).reports).toEqual(reply);
+  session(home, "s", [...first, line.user(main, "Now commit", 20), line.tool(main, "Bash", { command: "git commit" }, 10)]);
+  const f = await factsOf(home, "s");
+  expect(byId(f.agents)["s:lead"]!.status).toBe("working");
+  expect(f.reports).toEqual(reply);
+});
+
 test("background agent: the launch acknowledgement is not done; the task-notification is", async () => {
   const { home, main } = office();
   const launch = [line.spawn(main, "tu-bg", { run_in_background: true }, 100), line.result(main, "tu-bg", { isAsync: true, status: "async_launched", agentId: "bg1" }, 99)];
