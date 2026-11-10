@@ -417,6 +417,8 @@ export function createClaudeCode(io: SourceIo) {
       ...checkInsOf(lead, main, c.ownMtime),
       usage: usageOf(main, c.ownMtime),
     });
+    // Its last reply, as its owner reads it on the floor: the server sends it to them alone.
+    if (main.answer) facts.reports.push({ agent: lead, at: iso(main.answer.at, c.ownMtime), text: main.answer.text });
     main.touches = await addFiles(facts.edits, lead, main.touches, [...config.touchedTools, ...config.shellTools], now, config, place);
     main.reads = await addFiles(facts.reads, lead, main.reads, [...READ_TOOLS, ...config.shellTools], now, config, place);
     // The lead's question is open while its turn is: a prompt after it means it was never answered.
@@ -657,6 +659,7 @@ interface TranscriptState {
   waiting: boolean; // the newest assistant line asked for a tool
   turnOpen: boolean; // a lead's turn is in progress
   turnAt: number; // when it opened
+  answer: { text: string; at: number } | null; // a lead's newest text as its last turn ended: its reply, kept while the next turn runs
   results: Map<string, ToolResult>; // tool_use_id → its result
   spawns: Map<string, number>; // id of each Agent tool_use this file made → its time
   spawnNames: Map<string, string[]>; // id of each Agent or Task tool_use → the name and description it gave the agent
@@ -757,6 +760,7 @@ function newTranscriptState(): TranscriptState {
     waiting: false,
     turnOpen: false,
     turnAt: NaN,
+    answer: null,
     results: new Map(),
     spawns: new Map(),
     spawnNames: new Map(),
@@ -944,6 +948,8 @@ function usageOf(st: TranscriptState, fallbackMs: number): AgentFact["usage"] {
 
 function setTurn(st: TranscriptState, open: boolean, at: number): void {
   if (open && !st.turnOpen) st.turnAt = at;
+  // A turn that ends having said something leaves that as its reply; one that said nothing keeps the last.
+  if (!open && st.turnOpen && st.lastText !== null && !(st.lastTextAt < st.turnAt)) st.answer = { text: st.lastText, at: st.lastTextAt };
   st.turnOpen = open;
 }
 

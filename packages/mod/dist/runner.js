@@ -10335,6 +10335,11 @@ function createClaudeCode(io) {
 			...checkInsOf(lead, main, c.ownMtime),
 			usage: usageOf(main, c.ownMtime)
 		});
+		if (main.answer) facts.reports.push({
+			agent: lead,
+			at: iso$1(main.answer.at, c.ownMtime),
+			text: main.answer.text
+		});
 		main.touches = await addFiles(facts.edits, lead, main.touches, [...config.touchedTools, ...config.shellTools], now, config, place);
 		main.reads = await addFiles(facts.reads, lead, main.reads, [...READ_TOOLS, ...config.shellTools], now, config, place);
 		if (main.turnOpen) addQuestions(facts.questions, lead, main, results, c.ownMtime);
@@ -10557,6 +10562,7 @@ function newTranscriptState() {
 		waiting: false,
 		turnOpen: false,
 		turnAt: NaN,
+		answer: null,
 		results: /* @__PURE__ */ new Map(),
 		spawns: /* @__PURE__ */ new Map(),
 		spawnNames: /* @__PURE__ */ new Map(),
@@ -10764,6 +10770,10 @@ function usageOf(st, fallbackMs) {
 }
 function setTurn(st, open, at) {
 	if (open && !st.turnOpen) st.turnAt = at;
+	if (!open && st.turnOpen && st.lastText !== null && !(st.lastTextAt < st.turnAt)) st.answer = {
+		text: st.lastText,
+		at: st.lastTextAt
+	};
 	st.turnOpen = open;
 }
 function userTurn$1(ev, content) {
