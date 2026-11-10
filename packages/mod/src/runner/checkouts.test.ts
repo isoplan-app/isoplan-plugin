@@ -73,12 +73,12 @@ test("the branches are the remote's own: one pushed from elsewhere is listed, a 
   let t = 0;
   const logs: string[] = [];
   const branches = createRemoteBranches({ run, timeoutMs: async () => 30000, refreshMs: async () => 1000, log: (l) => void logs.push(l), now: () => t });
-  expect(await branches(clone)).toEqual(["feat/dark", "feat/old", "main"]);
+  expect(await branches(clone)).toEqual(["main", "feat/dark", "feat/old"]);
   git(other, "push", "-q", "origin", "--delete", "feat/old");
   // Within the refresh time the list is kept; after it the remote is asked again, though the clone still has origin/feat/old.
-  expect(await branches(clone)).toEqual(["feat/dark", "feat/old", "main"]);
+  expect(await branches(clone)).toEqual(["main", "feat/dark", "feat/old"]);
   t = 1000;
-  expect(await branches(clone)).toEqual(["feat/dark", "main"]);
+  expect(await branches(clone)).toEqual(["main", "feat/dark"]);
   expect(git(clone, "branch", "-r")).toContain("origin/feat/old");
   expect(logs).toEqual([]);
 });
