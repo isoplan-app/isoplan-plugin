@@ -9,16 +9,23 @@ test("processes: on Windows one hidden PowerShell call lists this logon session'
   expect(args.slice(0, 3)).toEqual(["-NoProfile", "-NonInteractive", "-Command"]);
   expect(args[3]).toContain("SessionId = $s");
   expect(args[3]).toContain("Where-Object { $_.CommandLine }");
+  // Each one's working folder, read from its own memory: no admin for this user's own.
+  expect(args[3]).toContain("Add-Type -TypeDefinition");
+  expect(args[3]).toContain("cwd = [IsoplanCwd]::Of([int]$_.ProcessId)");
   const stdout = JSON.stringify([
     { pid: 4100, ppid: 4000, name: "node.exe", command: "node C:\\w\\app\\node_modules\\vitest\\vitest.mjs", start: NOW - 60_000, memory: 52_428_800 },
-    { pid: 4200, ppid: 4100, name: "bash.exe", command: '"C:\\Program Files\\Git\\bin\\bash.exe" -c "pnpm test"', start: NOW - 30_000, memory: 4_194_304 },
+    { pid: 4200, ppid: 4100, name: "bash.exe", command: '"C:\\Program Files\\Git\\bin\\bash.exe" -c "pnpm test"', start: NOW - 30_000, memory: 4_194_304, cwd: "C:\\w\\app\\" },
+    { pid: 4300, ppid: 1, name: "cmd.exe", command: "cmd.exe", start: NOW, memory: 1, cwd: "C:\\" },
+    { pid: 4400, ppid: 1, name: "svc.exe", command: "svc.exe", start: NOW, memory: 1, cwd: null },
     { pid: "x", command: "bad" },
   ]);
   const asked: string[][] = [];
   const run: Run = async (argv) => (asked.push(argv), stdout);
   expect(await listProcesses({ platform: "win32", run })).toEqual([
     { pid: 4100, ppid: 4000, name: "node.exe", command: "node C:\\w\\app\\node_modules\\vitest\\vitest.mjs", startMs: NOW - 60_000, memory: 52_428_800 },
-    { pid: 4200, ppid: 4100, name: "bash.exe", command: '"C:\\Program Files\\Git\\bin\\bash.exe" -c "pnpm test"', startMs: NOW - 30_000, memory: 4_194_304 },
+    { pid: 4200, ppid: 4100, name: "bash.exe", command: '"C:\\Program Files\\Git\\bin\\bash.exe" -c "pnpm test"', startMs: NOW - 30_000, memory: 4_194_304, cwd: "C:\\w\\app" },
+    { pid: 4300, ppid: 1, name: "cmd.exe", command: "cmd.exe", startMs: NOW, memory: 1, cwd: "C:\\" },
+    { pid: 4400, ppid: 1, name: "svc.exe", command: "svc.exe", startMs: NOW, memory: 1 },
   ]);
   expect(asked).toHaveLength(1);
   expect(parseWindowsList("not json")).toBeNull();

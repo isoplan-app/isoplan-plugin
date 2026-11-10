@@ -4,21 +4,30 @@
 // Read-only: nothing here ends a process.
 import { Electroview } from "electrobun/view";
 import { onMounted, onUnmounted, ref } from "vue";
-import type { ProcessLine, RunningView } from "../bun/running.ts";
+import type { FolderLine, ProcessLine, RunningView } from "../bun/running.ts";
+import { askAgainMs } from "../shared/ask-again.ts";
 import type { RunningRPC } from "../shared/running-rpc.ts";
 
-// How long the app may take to answer (listing the processes can take a few seconds); unanswered, it is asked again after as long.
+// How long the app may take to answer (listing the processes can take a few seconds), and how long the
+// window waits before asking again until an answer gives its own pace.
 const REQUEST_MS = 15000;
 const rpc = Electroview.defineRPC<RunningRPC>({ maxRequestTime: REQUEST_MS, handlers: { requests: {}, messages: {} } });
 new Electroview({ rpc });
 
 const view = ref<RunningView | null>(null);
+// Whether the last ask went unanswered, so what shows is from before.
+const stale = ref(false);
 let timer: ReturnType<typeof setTimeout> | undefined;
 let closed = false;
-// Asked again at the pace the app gives (processRefreshSeconds).
+// Asked again at the pace the last answer gave (processRefreshSeconds).
 const load = async () => {
-	view.value = await rpc.request.view({}).catch(() => view.value);
-	if (!closed) timer = setTimeout(load, view.value?.refreshMs ?? REQUEST_MS);
+	try {
+		view.value = await rpc.request.view({});
+		stale.value = false;
+	} catch {
+		stale.value = true;
+	}
+	if (!closed) timer = setTimeout(load, askAgainMs(view.value?.refreshMs, REQUEST_MS));
 };
 onMounted(() => void load());
 onUnmounted(() => {
@@ -32,8 +41,13 @@ const started = (iso: string) => {
 	const today = d.toDateString() === new Date().toDateString();
 	return today ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : d.toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 };
-const parent = (p: ProcessLine) => (p.parent.name ? `${p.parent.name} (${p.parent.pid})` : `${p.parent.pid}, no longer running`);
+const parent = (p: ProcessLine) => (p.parent.name ? `${p.parent.name} (${p.parent.pid})` : `${p.parent.pid}, not running or not shown`);
 const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+// A folder's sessions, then its processes that belong to no session, shown alike.
+const groups = (folder: FolderLine) => [
+	...folder.sessions.map((s) => ({ key: s.key, name: s.name, detail: s.how + (s.state ? `, ${s.state}` : ""), lost: !s.found, strays: false, processes: s.processes })),
+	...(folder.strays.length ? [{ key: ":no session", name: "Belonging to no session", detail: count(folder.strays.length, "process", "processes"), lost: false, strays: true, processes: folder.strays }] : []),
+];
 </script>
 
 <template>
@@ -44,47 +58,30 @@ const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : 
 		</header>
 		<p v-if="!view" class="quiet">Looking…</p>
 		<template v-else>
+			<p v-if="stale" class="quiet small">Couldn't refresh just now; this is from before.</p>
 			<p v-if="!view.processesListed" class="note">This computer's processes couldn't be listed just now. Trying again…</p>
 			<p v-if="!view.sessionsListed" class="note">Isoplan's runner isn't listing sessions with their folders right now (it isn't running, or it needs updating), so every process shows as belonging to no session.</p>
 			<p v-if="view.processesListed && !view.folders.length" class="quiet">Nothing is running in a work tree or checkout on this computer.</p>
 			<section v-for="folder in view.folders" :key="folder.folder" class="folder">
 				<div class="folder-head">
-					<h2 :title="folder.folder">{{ folder.folder }}</h2>
+					<h2 :title="folder.folder"><bdi>{{ folder.folder }}</bdi></h2>
 					<span class="quiet">{{ memory(folder.memory) }}</span>
 				</div>
-				<div v-for="session in folder.sessions" :key="session.name + session.how" class="session">
+				<div v-for="group in groups(folder)" :key="group.key" class="session" :class="{ strays: group.strays }">
 					<div class="session-head">
-						<span class="name">{{ session.name }}</span>
-						<span class="quiet">{{ session.how }}<template v-if="session.state">, {{ session.state }}</template></span>
+						<span class="name">{{ group.name }}</span>
+						<span class="quiet">{{ group.detail }}</span>
 					</div>
-					<p v-if="!session.found" class="quiet small">Its process wasn't found, so its processes can't be told apart from the others here.</p>
-					<table v-if="session.processes.length">
+					<p v-if="group.lost" class="quiet small">Its process wasn't found, so its processes can't be told apart from the others here.</p>
+					<table v-if="group.processes.length">
 						<tbody>
-							<tr v-for="p in session.processes" :key="p.pid">
+							<tr v-for="p in group.processes" :key="p.pid">
 								<td class="proc">{{ p.name }} <span class="quiet">{{ p.pid }}</span></td>
 								<td class="command" :title="p.command ?? ''">{{ p.command ?? "Hidden: the secret patterns can't be read" }}</td>
 								<td class="quiet nowrap">started {{ started(p.started) }}</td>
 								<td class="quiet nowrap">{{ memory(p.memory) }}</td>
 								<td class="quiet">started by {{ parent(p) }}</td>
-								<td class="quiet nowrap">{{ p.session }}</td>
-							</tr>
-						</tbody>
-					</table>
-				</div>
-				<div v-if="folder.strays.length" class="session strays">
-					<div class="session-head">
-						<span class="name">Belonging to no session</span>
-						<span class="quiet">{{ count(folder.strays.length, "process", "processes") }}</span>
-					</div>
-					<table>
-						<tbody>
-							<tr v-for="p in folder.strays" :key="p.pid">
-								<td class="proc">{{ p.name }} <span class="quiet">{{ p.pid }}</span></td>
-								<td class="command" :title="p.command ?? ''">{{ p.command ?? "Hidden: the secret patterns can't be read" }}</td>
-								<td class="quiet nowrap">started {{ started(p.started) }}</td>
-								<td class="quiet nowrap">{{ memory(p.memory) }}</td>
-								<td class="quiet">started by {{ parent(p) }}</td>
-								<td class="quiet nowrap">no session</td>
+								<td class="quiet nowrap">{{ p.session ?? "no session" }}</td>
 							</tr>
 						</tbody>
 					</table>

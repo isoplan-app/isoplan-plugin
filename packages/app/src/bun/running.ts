@@ -3,8 +3,8 @@
 // Pure, so it can be tested without a window or real processes. Read-only: nothing is ended (#144).
 //
 // A process's folder is the git work tree (the nearest folder above holding `.git`) of its working
-// folder, where the OS says it (macOS), else of the first path in its command line that is in one
-// (Windows, which doesn't say a process's working folder). One with neither has the folder of the
+// folder (processes.ts reads it on both OSes), else of the first path in its command line that is in
+// one, for a process whose working folder couldn't be read. One with neither has the folder of the
 // nearest process above it that has one. A session's processes are its own process and every process
 // under it, all in the session's folder. A session's process is the one the runner started (its pid in
 // status.json), else the one Claude Code's own record of the session names (<claude dir>/sessions/<pid>.json),
@@ -44,13 +44,15 @@ export interface ProcessLine {
   started: string;
   /** Bytes. */
   memory: number;
-  /** What started it: its name while it still runs; none when it has ended. */
+  /** What started it: its name when it is among the processes listed; none when it has ended or isn't listed (another user's, an elevated one, or one whose command line can't be read). */
   parent: { pid: number; name?: string };
   /** The name of the session it belongs to; null for one that belongs to no session. */
   session: string | null;
 }
 
 export interface SessionLine {
+  /** Its id, told apart from another session's with the same id (a fork beside its lead). */
+  key: string;
   name: string;
   /** How it runs, in words. */
   how: string;
@@ -89,6 +91,8 @@ export interface RunningInput {
   claudeSessions: ClaudeSessionRecord[];
   /** The git work tree `path` is in, or null. */
   workTree: (path: string) => string | null;
+  /** Which OS's paths a command line holds; this one's by default. */
+  platform?: NodeJS.Platform;
   /** The command with secrets cut out, or null when the secret patterns can't be read. */
   cut: (command: string) => string | null;
   refreshMs: number;
@@ -105,14 +109,28 @@ export function howItRuns(s: SessionSeen): string {
 
 const STATE: Record<string, string> = { busy: "working", idle: "idle" };
 
-/** The absolute paths in a command line: quoted or not, and after a flag's `=`. */
-export function commandPaths(command: string): string[] {
+/**
+ * The absolute paths in a command line: quoted or not, and after a flag's `=`. On Windows only a
+ * drive's paths, with Git Bash's `/c/...` read as `C:/...`, so cmd's `/c` and `/d` aren't taken for paths.
+ */
+export function commandPaths(command: string, platform: NodeJS.Platform = process.platform): string[] {
+  const asPath = (t: string): string | null => {
+    const clean = t.replace(/[;,]+$/, "");
+    if (platform !== "win32") return clean.startsWith("/") ? clean : null;
+    const bash = /^\/([A-Za-z])(\/.*)$/.exec(clean);
+    return bash ? `${bash[1]!.toUpperCase()}:${bash[2]}` : /^[A-Za-z]:[\\/]/.test(clean) ? clean : null;
+  };
   const out: string[] = [];
-  for (const m of command.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)) {
-    const token = (m[1] ?? m[2] ?? m[3])!;
-    for (const t of [token, token.slice(token.indexOf("=") + 1)]) {
-      const clean = t.replace(/[;,]+$/, "");
-      if ((/^[A-Za-z]:[\\/]/.test(clean) || clean.startsWith("/")) && !out.includes(clean)) out.push(clean);
+  for (const m of command.matchAll(/(?:"[^"]*"|'[^']*'|[^\s"'])+/g)) {
+    const token = m[0].replace(/["']/g, "");
+    // A quoted path keeps its spaces; a quoted command (cmd /c "...") is read word by word.
+    const whole = asPath(token) !== null || asPath(token.slice(token.indexOf("=") + 1)) !== null;
+    const words = whole ? [token] : token.split(/\s+/);
+    for (const word of words) {
+      for (const t of [word, word.slice(word.indexOf("=") + 1)]) {
+        const p = asPath(t);
+        if (p !== null && !out.includes(p)) out.push(p);
+      }
     }
   }
   return out;
@@ -136,7 +154,7 @@ export function workTreeFinder(exists: (path: string) => boolean, p: { join: (..
   return find;
 }
 
-export function runningView({ status, processes, claudeSessions, workTree, cut, refreshMs }: RunningInput): RunningView {
+export function runningView({ status, processes, claudeSessions, workTree, platform = process.platform, cut, refreshMs }: RunningInput): RunningView {
   const procs = processes ?? [];
   const byPid = new Map(procs.map((p) => [p.pid, p]));
   // A process's parent, only if it started before it: a parent pid reused since is another process.
@@ -175,7 +193,7 @@ export function runningView({ status, processes, claudeSessions, workTree, cut, 
     if (seen.has(p)) return null;
     seen.add(p);
     const own = p.cwd ? workTree(p.cwd) : null;
-    let folder = own ?? commandPaths(p.command).map(workTree).find((f) => f !== null) ?? null;
+    let folder = own ?? commandPaths(p.command, platform).map(workTree).find((f) => f !== null) ?? null;
     if (folder === null) {
       const parent = parentOf(p);
       folder = parent ? placed(parent, seen) : null;
@@ -195,7 +213,8 @@ export function runningView({ status, processes, claudeSessions, workTree, cut, 
   const sessionLines = sessions.map((s, i) => {
     const record = claudeSessions.find((c) => c.sessionId === s.id && rootOf.get(c.pid) === i);
     const state = record?.status ? STATE[record.status] : undefined;
-    const line: SessionLine = { name: s.name, how: howItRuns(s), ...(state && { state }), found: found.has(i), processes: [] };
+    const key = sessions.filter((o) => o.id === s.id).length > 1 ? `${s.id}:${s.pid ?? i}` : s.id;
+    const line: SessionLine = { key, name: s.name, how: howItRuns(s), ...(state && { state }), found: found.has(i), processes: [] };
     folderLine(sessionFolder(s)).sessions.push(line);
     return line;
   });

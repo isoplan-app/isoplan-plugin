@@ -2,6 +2,7 @@ import path from "node:path";
 import { expect, test } from "vitest";
 import type { RunnerStatus } from "../../../mod/src/runner/status.js";
 import type { Proc } from "./processes.ts";
+import { askAgainMs } from "../shared/ask-again.ts";
 import { commandPaths, parseClaudeSession, runningView, workTreeFinder, type RunningInput } from "./running.ts";
 
 const T = Date.parse("2026-11-10T12:00:00Z");
@@ -30,6 +31,8 @@ const processes: Proc[] = [
   proc(400, 999, "node.exe", "node C:\\w\\app\\node_modules\\vite\\bin\\vite.js --port 5173", T - 6000, 90 * MB),
   // No path of its own: in the folder of what started it.
   proc(401, 400, "esbuild.exe", "esbuild --service=0.25", T - 5900, 20 * MB),
+  // A shell started with no path: placed by its working folder.
+  proc(450, 1, "bash.exe", "bash --login -i", T - 5800, 5 * MB, "C:\\w\\app\\src"),
   // In no work tree.
   proc(500, 1, "explorer.exe", "C:\\Windows\\Explorer.EXE", T - 99_000, 120 * MB),
   // Its parent's pid is the session's, but it started before it: that pid was reused, so it isn't the session's.
@@ -45,6 +48,7 @@ const input = (over: Partial<RunningInput> = {}): RunningInput => ({
     { pid: 150, sessionId: "u-gone", startedAt: T - 900_000, status: "idle" },
   ],
   workTree: workTreeFinder((p) => trees.has(p), path.win32),
+  platform: "win32",
   cut: (command) => command.replace("sk-SECRET", "[secret cut]"),
   refreshMs: 5000,
   ...over,
@@ -55,13 +59,14 @@ test("what's running: each folder lists its sessions with their processes, and t
     sessionsListed: true,
     processesListed: true,
     refreshMs: 5000,
-    memory: (300 + 60 + 90 + 20 + 250 + 4 + 40) * MB,
+    memory: (300 + 60 + 90 + 20 + 5 + 250 + 4 + 40) * MB,
     folders: [
       {
         folder: "C:\\w\\app",
-        memory: (300 + 60 + 90 + 20) * MB,
+        memory: (300 + 60 + 90 + 20 + 5) * MB,
         sessions: [
           {
+            key: "u-d",
             name: "Fix login",
             how: "from the floor",
             found: true,
@@ -74,6 +79,7 @@ test("what's running: each folder lists its sessions with their processes, and t
         strays: [
           { pid: 400, name: "node.exe", command: "node C:\\w\\app\\node_modules\\vite\\bin\\vite.js --port 5173", started: at(T - 6000), memory: 90 * MB, parent: { pid: 999 }, session: null },
           { pid: 401, name: "esbuild.exe", command: "esbuild --service=0.25", started: at(T - 5900), memory: 20 * MB, parent: { pid: 400, name: "node.exe" }, session: null },
+          { pid: 450, name: "bash.exe", command: "bash --login -i", started: at(T - 5800), memory: 5 * MB, parent: { pid: 1 }, session: null },
         ],
       },
       {
@@ -82,8 +88,9 @@ test("what's running: each folder lists its sessions with their processes, and t
         memory: (250 + 4 + 40) * MB,
         sessions: [
           // Claude Code's record of it names a process that started at another time: not believed.
-          { name: "docs", how: "in a terminal or the Claude app", found: false, processes: [] },
+          { key: "u-gone", name: "docs", how: "in a terminal or the Claude app", found: false, processes: [] },
           {
+            key: "u-t",
             name: "site",
             how: "in a terminal or the Claude app",
             state: "working",
@@ -100,12 +107,13 @@ test("what's running: each folder lists its sessions with their processes, and t
   });
 });
 
-test("what's running: on macOS a process's working folder places it; how each kind of session runs is said", () => {
+test("what's running: on macOS a process's working folder places it; how each kind of session runs is said; a fork beside its lead is told apart", () => {
   const view = runningView(
     input({
       status: {
         ...status,
         sessions: [
+          { name: "api", headless: true, close: "claude-code:u-l", folder: "/w/api", id: "u-l" },
           { name: "api", headless: true, close: "pid:12", fork: true, folder: "/w/api", id: "u-l", pid: 12 },
           { name: "take", headless: true, close: "pid:13", folder: "/w/api", id: "u-k", pid: 13 },
           { name: "bg", headless: true, folder: "/w/api", id: "u-b" },
@@ -114,13 +122,15 @@ test("what's running: on macOS a process's working folder places it; how each ki
       processes: [proc(12, 1, "claude", "claude -p", T, MB), proc(30, 1, "node", "node server.js", T, 2 * MB, "/w/api/server"), proc(31, 1, "zsh", "-zsh", T, MB, "/Users/ada")],
       claudeSessions: [],
       workTree: workTreeFinder((p) => p === "/w/api/.git", path.posix),
+      platform: "darwin",
     }),
   );
   expect(view.folders.map((f) => f.folder)).toEqual(["/w/api"]);
-  expect(view.folders[0]!.sessions.map((s) => [s.name, s.how, s.found])).toEqual([
-    ["api", "a fork answering for its room", true],
-    ["bg", "headless", false],
-    ["take", "a take's first turn", false],
+  expect(view.folders[0]!.sessions.map((s) => [s.key, s.name, s.how, s.found])).toEqual([
+    ["u-l:0", "api", "from the floor", false],
+    ["u-l:12", "api", "a fork answering for its room", true],
+    ["u-b", "bg", "headless", false],
+    ["u-k", "take", "a take's first turn", false],
   ]);
   expect(view.folders[0]!.strays.map((p) => p.pid)).toEqual([30]);
 });
@@ -129,8 +139,8 @@ test("what's running: with the runner not running, every process is in no sessio
   const stopped = runningView(input({ status: null, cut: () => null }));
   expect(stopped.sessionsListed).toBe(false);
   expect(stopped.folders.flatMap((f) => f.sessions)).toEqual([]);
-  expect(stopped.folders.flatMap((f) => f.strays.map((p) => p.pid))).toEqual([400, 401, 101, 600]);
-  expect(stopped.folders.flatMap((f) => f.strays.map((p) => p.command))).toEqual([null, null, null, null]);
+  expect(stopped.folders.flatMap((f) => f.strays.map((p) => p.pid))).toEqual([400, 401, 450, 101, 600]);
+  expect(stopped.folders.flatMap((f) => f.strays.map((p) => p.command))).toEqual([null, null, null, null, null]);
   // A runner older than the window lists sessions without their folders.
   const older = runningView(input({ status: { ...status, sessions: [{ name: "app", headless: false } as never] } }));
   expect([older.sessionsListed, older.folders.flatMap((f) => f.sessions)]).toEqual([false, []]);
@@ -141,8 +151,18 @@ test("what's running: with the runner not running, every process is in no sessio
 });
 
 test("what's running: paths are read from a command line quoted or not, and after a flag's =; Claude Code's session record is read for its pid, id, start and status", () => {
-  expect(commandPaths('"C:\\Program Files\\nodejs\\node.exe" C:\\w\\app\\x.js --dir=C:\\w\\b; /usr/bin/env --flag x')).toEqual(["C:\\Program Files\\nodejs\\node.exe", "C:\\w\\app\\x.js", "C:\\w\\b", "/usr/bin/env"]);
+  const line = '"C:\\Program Files\\nodejs\\node.exe" C:\\w\\app\\x.js --dir=C:\\w\\b; --out="C:\\w\\out dir" /usr/bin/env --flag x';
+  expect(commandPaths(line, "win32")).toEqual(["C:\\Program Files\\nodejs\\node.exe", "C:\\w\\app\\x.js", "C:\\w\\b", "C:\\w\\out dir"]);
+  expect(commandPaths(line, "darwin")).toEqual(["/usr/bin/env"]);
+  // On Windows cmd's flags aren't paths, and Git Bash's /c/... is C:/...
+  expect(commandPaths('cmd.exe /d /s /c "bash /c/w/app/run.sh"', "win32")).toEqual(["C:/w/app/run.sh"]);
   expect(parseClaudeSession(JSON.stringify({ pid: 7, sessionId: "u", startedAt: 1, status: "idle", cwd: "C:\\w" }))).toEqual({ pid: 7, sessionId: "u", startedAt: 1, status: "idle" });
   expect(parseClaudeSession("{}")).toBeNull();
   expect(parseClaudeSession("nope")).toBeNull();
+});
+
+test("what's running: the window asks again at the answer's pace, else after its own wait, and never sooner than a wait above zero", () => {
+  expect(askAgainMs(5000, 15000)).toBe(5000);
+  for (const bad of [Number.NaN, null, undefined, 0, -1, Infinity]) expect(askAgainMs(bad, 15000)).toBe(15000);
+  expect(askAgainMs(1e13, 15000)).toBe(2 ** 31 - 1);
 });

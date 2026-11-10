@@ -161,12 +161,21 @@ async function claudeSessions(): Promise<ClaudeSessionRecord[]> {
   return records.filter((r) => r !== null);
 }
 
+// Secret patterns the window can't use say why once, not at every refresh.
+let lastPatternsProblem = "";
+function patternsProblem(text: string): void {
+  if (text && text !== lastPatternsProblem) log(`the secret patterns can't be used, so the window of what's running shows no command: ${text}`);
+  lastPatternsProblem = text;
+}
+
 // What the window of what's running shows now: read only when the open window asks.
 async function runningNow(): Promise<RunningView> {
   const s = await settings();
   const status = engine.state() === "running" ? currentStatus(await readStatus(statusPath(claudeDir)), alive) : null;
   const appDir = path.join(isoplanDir, "runner", "app");
-  const patterns = await loadPatterns(path.join(appDir, "secret-patterns.json"), path.join(isoplanDir, "secret-patterns.json"), log).catch((err: Error) => (log(`the secret patterns can't be read, so the window of what's running shows no command: ${err.message}`), null));
+  const problems: string[] = [];
+  const patterns = await loadPatterns(path.join(appDir, "secret-patterns.json"), path.join(isoplanDir, "secret-patterns.json"), (text) => problems.push(text)).catch((err: Error) => (problems.push(err.message), null));
+  patternsProblem(problems.join("; "));
   const [processes, claude] = await Promise.all([listProcesses(), claudeSessions()]);
   return runningView({ status, processes, claudeSessions: claude, workTree: workTreeFinder(existsSync, path), cut: (command) => cut(command, patterns), refreshMs: s.processRefreshSeconds * 1000 });
 }
