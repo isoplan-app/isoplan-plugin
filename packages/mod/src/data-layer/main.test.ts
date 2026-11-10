@@ -205,6 +205,19 @@ test("the runner keeps the session's lock fresh each pass, and as it stops repor
   expect(logged()).toContain("stopping: the runner stopped");
 });
 
+test("the runner hears the title each pass gives the office, for the desktop app's menu", async () => {
+  const o = await office();
+  o.state.repos = ["github.com/team/app"];
+  const root = tempRoot();
+  const claudeDir = path.join(root, "claude");
+  const repo = session(claudeDir, root, (repo, now) => [...turn(repo, now), { type: "ai-title", aiTitle: "Tidy the docs", sessionId: "s1" }]);
+  fs.writeFileSync(path.join(claudeDir, "isoplan", "config.json"), JSON.stringify({ server: o.url }));
+  const titles: string[] = [];
+  void inRunner(claudeDir, repo, { titled: (title) => void titles.push(title) });
+  await until(() => titles.length > 0);
+  expect(titles[0]).toBe("Tidy the docs");
+});
+
 test("an approved session connects; once its copy of the list is past its maximum age and can't be checked, its link closes and no other socket opens, reconnects included", async () => {
   const o = await office();
   o.state.repos = ["github.com/team/app"];

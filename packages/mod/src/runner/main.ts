@@ -250,6 +250,9 @@ async function worker(): Promise<number> {
     ask: (request) => askFromMachine({ ...request, appDir, scan: scanText }),
     close: (close, remove) => closeFor(close, remove),
   }).catch((err: Error) => (log(`the runner couldn't open its pipe for the sessions' hooks modules: ${err.message}`), null));
+  // Each session's title as its report last gave it to the offices, by bare id, for the desktop app's
+  // menu (status.ts sessionsSeen); in memory only.
+  const titles = new Map<string, string>();
   const reporting = watchSessions<Hooked>({
     claudeDir,
     io,
@@ -266,6 +269,7 @@ async function worker(): Promise<number> {
       const said = sessionLog(claudeDir, sessionId);
       said.say(hooks ? `the runner reports this session for its hooks module, in ${cwd}` : `the runner reports this session, in ${cwd}`);
       const shares = (office: Office) => shared.get(office.server) ?? null;
+      const titled = (title: string) => void titles.set(sessionId, title);
       try {
         if (hooks)
           return await reportSession({
@@ -285,8 +289,9 @@ async function worker(): Promise<number> {
             },
             closed: Promise.race([closed, hooks.closed.then(() => "its hooks module's link to the runner closed")]),
             shared: shares,
+            titled,
           }).finally(() => pairLinks.ended(sessionId, hooks.send));
-        return await reportSession({ sessionId, cwd, by: "runner", appDir, emit: said.emit, closed, notWanted, isOff: () => isOff(cwd), shared: shares });
+        return await reportSession({ sessionId, cwd, by: "runner", appDir, emit: said.emit, closed, notWanted, isOff: () => isOff(cwd), shared: shares, titled });
       } catch (err) {
         said.say(`stopping: something went wrong: ${String((err as Error)?.stack ?? err)}`);
         throw err;
@@ -554,7 +559,7 @@ async function worker(): Promise<number> {
   let listMs = LOCK_REFRESH_MS;
   const listSessions = async () => {
     try {
-      status.sessions(sessionsSeen(reporting.sessions(), registry.list(), background));
+      status.sessions(sessionsSeen(reporting.sessions(), registry.list(), background, titles));
       listMs = (await settings()).trayRefreshSeconds * 1000;
     } catch (err) {
       log(`couldn't list the sessions for the desktop app's menu: ${String((err as Error)?.message ?? err)}`);
