@@ -12,6 +12,9 @@ test("processes: on Windows one hidden PowerShell call lists this logon session'
   // Each one's working folder, read from its own memory: no admin for this user's own.
   expect(args[3]).toContain("Add-Type -TypeDefinition");
   expect(args[3]).toContain("cwd = [IsoplanCwd]::Of([int]$_.ProcessId)");
+  // A 32-bit (WOW64) process's current folder is in its 32-bit PEB, not the 64-bit one it started with.
+  expect(args[3]).toContain("NtQueryInformationProcess(h, 26, info, 8, out length) == 0 && info[0] != IntPtr.Zero");
+  expect(args[3]).toContain("(long)BitConverter.ToUInt32(p32, 0) + 0x24");
   const stdout = JSON.stringify([
     { pid: 4100, ppid: 4000, name: "node.exe", command: "node C:\\w\\app\\node_modules\\vitest\\vitest.mjs", start: NOW - 60_000, memory: 52_428_800 },
     { pid: 4200, ppid: 4100, name: "bash.exe", command: '"C:\\Program Files\\Git\\bin\\bash.exe" -c "pnpm test"', start: NOW - 30_000, memory: 4_194_304, cwd: "C:\\w\\app\\" },

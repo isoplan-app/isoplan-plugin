@@ -30,8 +30,10 @@ export interface Proc {
 }
 
 // A process's working folder on Windows, as a 64-bit process reads another's: PEB+0x20 is its
-// ProcessParameters, and ProcessParameters+0x38 its CurrentDirectory, a UNICODE_STRING. Null when the
-// process can't be opened or read.
+// ProcessParameters, and ProcessParameters+0x38 its CurrentDirectory, a UNICODE_STRING. A 32-bit
+// (WOW64) process keeps its current folder in its 32-bit PEB, which ProcessWow64Information (26)
+// names: PEB32+0x10 is its ProcessParameters, and ProcessParameters+0x24 its CurrentDirectory, a
+// 32-bit UNICODE_STRING. Null when the process can't be opened or read.
 const CWD_HELPER = [
   "using System; using System.Runtime.InteropServices;",
   "public static class IsoplanCwd {",
@@ -40,15 +42,20 @@ const CWD_HELPER = [
   '[DllImport("kernel32.dll")] static extern bool ReadProcessMemory(IntPtr h, IntPtr at, byte[] buffer, IntPtr size, out IntPtr read);',
   '[DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr h, int kind, IntPtr[] info, int size, out int length);',
   "static byte[] Read(IntPtr h, long at, int n) { var b = new byte[n]; IntPtr r; return ReadProcessMemory(h, new IntPtr(at), b, new IntPtr(n), out r) && r.ToInt64() == n ? b : null; }",
+  "static string Text(IntPtr h, int n, long at) { if (n == 0) return null; var s = Read(h, at, n); return s == null ? null : System.Text.Encoding.Unicode.GetString(s); }",
   "public static string Of(int pid) {",
   "if (IntPtr.Size != 8) return null;",
   "IntPtr h = OpenProcess(0x0410, false, pid); if (h == IntPtr.Zero) return null;",
   "try {",
-  "var info = new IntPtr[6]; int length; if (NtQueryInformationProcess(h, 0, info, 48, out length) != 0) return null;",
+  "var info = new IntPtr[6]; int length;",
+  "if (NtQueryInformationProcess(h, 26, info, 8, out length) == 0 && info[0] != IntPtr.Zero) {",
+  "var p32 = Read(h, info[0].ToInt64() + 0x10, 4); if (p32 == null) return null;",
+  "var u32 = Read(h, (long)BitConverter.ToUInt32(p32, 0) + 0x24, 8); if (u32 == null) return null;",
+  "return Text(h, BitConverter.ToUInt16(u32, 0), BitConverter.ToUInt32(u32, 4)); }",
+  "if (NtQueryInformationProcess(h, 0, info, 48, out length) != 0) return null;",
   "var p = Read(h, info[1].ToInt64() + 0x20, 8); if (p == null) return null;",
   "var u = Read(h, BitConverter.ToInt64(p, 0) + 0x38, 16); if (u == null) return null;",
-  "int n = BitConverter.ToUInt16(u, 0); if (n == 0) return null;",
-  "var s = Read(h, BitConverter.ToInt64(u, 8), n); return s == null ? null : System.Text.Encoding.Unicode.GetString(s);",
+  "return Text(h, BitConverter.ToUInt16(u, 0), BitConverter.ToInt64(u, 8));",
   "} finally { CloseHandle(h); } } }",
 ].join(" ");
 

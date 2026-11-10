@@ -3,7 +3,11 @@ import { expect, test } from "vitest";
 import type { RunnerStatus } from "../../../mod/src/runner/status.js";
 import type { Proc } from "./processes.ts";
 import { askAgainMs } from "../shared/ask-again.ts";
-import { commandPaths, parseClaudeSession, runningView, workTreeFinder, type RunningInput } from "./running.ts";
+import { commandPaths, parseClaudeSession, patternsProblemLine, runningView, workTreeFinder, type RunningInput } from "./running.ts";
+import { loadPatterns } from "../../../mod/src/runner/scan.js";
+const modDir = path.resolve(import.meta.dirname, "..", "..", "..", "mod");
+import fs from "node:fs/promises";
+import os from "node:os";
 
 const T = Date.parse("2026-11-10T12:00:00Z");
 const MB = 1024 * 1024;
@@ -156,6 +160,8 @@ test("what's running: paths are read from a command line quoted or not, and afte
   expect(commandPaths(line, "darwin")).toEqual(["/usr/bin/env"]);
   // On Windows cmd's flags aren't paths, and Git Bash's /c/... is C:/...
   expect(commandPaths('cmd.exe /d /s /c "bash /c/w/app/run.sh"', "win32")).toEqual(["C:/w/app/run.sh"]);
+  // A quoted command that starts with a path is read word by word as well.
+  expect(commandPaths('"C:\\tools\\bash.exe -c C:\\w\\app\\x"', "win32")).toEqual(["C:\\tools\\bash.exe -c C:\\w\\app\\x", "C:\\w\\app\\x"]);
   expect(parseClaudeSession(JSON.stringify({ pid: 7, sessionId: "u", startedAt: 1, status: "idle", cwd: "C:\\w" }))).toEqual({ pid: 7, sessionId: "u", startedAt: 1, status: "idle" });
   expect(parseClaudeSession("{}")).toBeNull();
   expect(parseClaudeSession("nope")).toBeNull();
@@ -165,4 +171,19 @@ test("what's running: the window asks again at the answer's pace, else after its
   expect(askAgainMs(5000, 15000)).toBe(5000);
   for (const bad of [Number.NaN, null, undefined, 0, -1, Infinity]) expect(askAgainMs(bad, 15000)).toBe(15000);
   expect(askAgainMs(1e13, 15000)).toBe(2 ** 31 - 1);
+});
+
+test("what's running: secret patterns the window can't use are logged as what they mean for the window, not for answers and briefs", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "running-patterns-"));
+  const owner = path.join(dir, "secret-patterns.json");
+  await fs.writeFile(owner, "{ not json");
+  const reasons: string[] = [];
+  expect(await loadPatterns(path.join(modDir, "secret-patterns.json"), owner, (t) => reasons.push(t))).toBeNull();
+  const line = patternsProblemLine(reasons);
+  expect(line).toMatch(/^the window of what's running shows no command, as the secret patterns can't be read: /);
+  expect(line).toContain(owner);
+  expect(line).not.toMatch(/answer|brief|report/);
+  expect(line.match(/can't be/g)).toHaveLength(2);
+  expect(patternsProblemLine([])).toBe("");
+  await fs.rm(dir, { recursive: true, force: true });
 });

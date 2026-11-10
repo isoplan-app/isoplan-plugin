@@ -107,6 +107,16 @@ export function howItRuns(s: SessionSeen): string {
   return "in a terminal or the Claude app";
 }
 
+/**
+ * The log line for secret patterns the window can't use, from loadPatterns' reasons; "" when there are
+ * none. The scan's own line says what it means for answers, briefs and reports, so that part is cut.
+ */
+export function patternsProblemLine(reasons: string[]): string {
+  if (!reasons.length) return "";
+  const why = reasons.map((r) => r.replace(", so every answer, brief and report is held", "")).join("; ");
+  return `the window of what's running shows no command, as the secret patterns can't be read: ${why}`;
+}
+
 const STATE: Record<string, string> = { busy: "working", idle: "idle" };
 
 /**
@@ -123,9 +133,10 @@ export function commandPaths(command: string, platform: NodeJS.Platform = proces
   const out: string[] = [];
   for (const m of command.matchAll(/(?:"[^"]*"|'[^']*'|[^\s"'])+/g)) {
     const token = m[0].replace(/["']/g, "");
-    // A quoted path keeps its spaces; a quoted command (cmd /c "...") is read word by word.
+    // A quoted path keeps its spaces; a quoted command (cmd /c "...") is read word by word, and so are
+    // the words after the first of one that starts with a path ("C:\tools\bash.exe -c C:\w\x").
     const whole = asPath(token) !== null || asPath(token.slice(token.indexOf("=") + 1)) !== null;
-    const words = whole ? [token] : token.split(/\s+/);
+    const words = whole ? [token, ...token.split(/\s+/).slice(1)] : token.split(/\s+/);
     for (const word of words) {
       for (const t of [word, word.slice(word.indexOf("=") + 1)]) {
         const p = asPath(t);
