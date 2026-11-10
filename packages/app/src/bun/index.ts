@@ -6,10 +6,14 @@
 // doesn't pass arguments on, so startRunner sets the variable (packages/mod/src/runner/start.ts).
 // It logs to <claude dir>/isoplan/logs/app.log; the worker logs to runner.log as before.
 //
+// Show what's running… opens the window of this user's processes by folder (running.ts), which reads
+// them only while it is open, and ends none.
+//
 // Its Sessions submenu lists what the worker writes into status.json; Close on a headless one asks the
 // worker over its pipe (src/pipe), whose address and token it reads with the runner's own code.
 
 import { BrowserView, BrowserWindow, Tray, Utils } from "electrobun/main";
+import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -18,12 +22,16 @@ import { loadSettings } from "../../../mod/src/data-layer/config.js";
 import { nodeIo } from "../../../mod/src/data-layer/io.js";
 import { LOCK_REFRESH_MS } from "../../../mod/src/runner/start.js";
 import { readStatus, statusPath, type RunnerStatus } from "../../../mod/src/runner/status.js";
+import { cut, loadPatterns } from "../../../mod/src/runner/scan.js";
 import { closeSession } from "../../../mod/src/pipe/pipe.js";
 import { menuCloseWaitMs } from "../../../mod/src/runner/session.js";
 import { alive } from "../../../mod/src/wake/lock.js";
 import type { PairingRPC } from "../shared/pairing-rpc.ts";
+import type { RunningRPC } from "../shared/running-rpc.ts";
 import { startEngine } from "./engine.ts";
 import { closing, currentStatus, pairingView, trayMenu, type MenuInput } from "./menu.ts";
+import { listProcesses } from "./processes.ts";
+import { parseClaudeSession, runningView, workTreeFinder, type ClaudeSessionRecord, type RunningView } from "./running.ts";
 import pkg from "../../package.json" with { type: "json" };
 
 const LOG_CAP_BYTES = 256 * 1024;
@@ -48,7 +56,7 @@ if (process.platform === "darwin") Utils.setDockIconVisible(false);
 
 // The tray's settings, as the runner reads its own: its copy's runner.json, then the person's. One
 // that can't be read keeps the last that could.
-type TraySettings = { trayRefreshSeconds: number; officeUnreachableSeconds: number; drivenCloseSeconds: number };
+type TraySettings = { trayRefreshSeconds: number; officeUnreachableSeconds: number; drivenCloseSeconds: number; processRefreshSeconds: number };
 let good: TraySettings | null = null;
 async function settings(): Promise<TraySettings> {
   try {
@@ -69,6 +77,7 @@ function problem(err: unknown): void {
 
 let tray: Tray | null = null;
 let pairing: BrowserWindow | null = null;
+let running: BrowserWindow | null = null;
 let shown = "";
 let status: RunnerStatus | null = null;
 
@@ -98,6 +107,7 @@ async function update(): Promise<void> {
 
 async function act(action: string): Promise<void> {
   if (action === "pairing") openPairing();
+  else if (action === "running") openRunning();
   else if (action.startsWith("close:") || action.startsWith("remove:")) {
     const asked = closing(action, (await input()).status);
     if (asked) await close(asked.close, asked.remove);
@@ -140,6 +150,33 @@ function openPairing(): void {
   });
   pairing = new BrowserWindow({ title: "Pair this computer", url: "views://pairing/index.html", frame: { width: 440, height: 380, x: 240, y: 160 }, rpc });
   pairing.on("close", () => (pairing = null));
+}
+
+// Claude Code's own records of its running sessions, <claude dir>/sessions/<pid>.json, which name each
+// session's process; only those files, never the others beside them.
+async function claudeSessions(): Promise<ClaudeSessionRecord[]> {
+  const dir = path.join(claudeDir, "sessions");
+  const names = (await fs.readdir(dir).catch(() => [] as string[])).filter((name) => /^\d+\.json$/.test(name));
+  const records = await Promise.all(names.map((name) => fs.readFile(path.join(dir, name), "utf8").then(parseClaudeSession, () => null)));
+  return records.filter((r) => r !== null);
+}
+
+// What the window of what's running shows now: read only when the open window asks.
+async function runningNow(): Promise<RunningView> {
+  const s = await settings();
+  const status = engine.state() === "running" ? currentStatus(await readStatus(statusPath(claudeDir)), alive) : null;
+  const appDir = path.join(isoplanDir, "runner", "app");
+  const patterns = await loadPatterns(path.join(appDir, "secret-patterns.json"), path.join(isoplanDir, "secret-patterns.json"), log).catch((err: Error) => (log(`the secret patterns can't be read, so the window of what's running shows no command: ${err.message}`), null));
+  const [processes, claude] = await Promise.all([listProcesses(), claudeSessions()]);
+  return runningView({ status, processes, claudeSessions: claude, workTree: workTreeFinder(existsSync, path), cut: (command) => cut(command, patterns), refreshMs: s.processRefreshSeconds * 1000 });
+}
+
+// Only ever from a person's click on the menu item.
+function openRunning(): void {
+  if (running) return void running.focus();
+  const rpc = BrowserView.defineRPC<RunningRPC>({ maxRequestTime: 15000, handlers: { requests: { view: () => runningNow() }, messages: {} } });
+  running = new BrowserWindow({ title: "What's running", url: "views://running/index.html", frame: { width: 900, height: 620, x: 200, y: 120 }, rpc });
+  running.on("close", () => (running = null));
 }
 
 // The menu follows the runner every trayRefreshSeconds; until the settings can first be read, it

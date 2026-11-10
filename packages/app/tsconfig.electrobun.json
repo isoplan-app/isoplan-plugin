@@ -16,5 +16,5 @@
       "electrobun/view": ["./.hutch/devkit/api/browser/index.ts"]
     }
   },
-  "include": ["src/bun/index.ts", "src/shared", "src/pairing/main.ts", "src/pairing/vue.d.ts", "electrobun.config.ts", "vite.config.ts"]
+  "include": ["src/bun/index.ts", "src/shared", "src/pairing/main.ts", "src/pairing/vue.d.ts", "src/running/main.ts", "electrobun.config.ts", "vite.config.ts"]
 }
