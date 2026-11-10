@@ -250,7 +250,7 @@ async function worker(): Promise<number> {
     ask: (request) => askFromMachine({ ...request, appDir, scan: scanText }),
     close: (close, remove) => closeFor(close, remove),
   }).catch((err: Error) => (log(`the runner couldn't open its pipe for the sessions' hooks modules: ${err.message}`), null));
-  // Each session's title as its report last gave it to the offices, by bare id, for the desktop app's
+  // Each session's title as its latest report pass worked out for the offices, by bare id, for the desktop app's
   // menu (status.ts sessionsSeen); in memory only.
   const titles = new Map<string, string>();
   const reporting = watchSessions<Hooked>({

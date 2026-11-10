@@ -29,7 +29,7 @@ export interface OfficeSeen {
 
 /** A session on this machine, as the app's Sessions menu lists it. */
 export interface SessionSeen {
-  /** The name a driven session was given, else the title its report last gave the offices, else its folder's name. */
+  /** The name a driven session was given, else the title its latest report pass worked out for the offices, else its folder's name. */
   name: string;
   /** A process the runner started (driven from the floor, a fork, a take's first turn, or a `claude --bg` session), not a terminal or the Claude app. */
   headless: boolean;
@@ -138,8 +138,8 @@ const uuidOf = (session: string) => session.slice(session.indexOf(":") + 1);
  * ids) is headless with no close. A session in a terminal or the Claude app has no close.
  * `background` is the worker's memory alone: after the runner restarts, a `claude --bg` session it
  * started before is listed as one in a terminal or the Claude app, and one a person has since attached
- * to from a terminal is still listed as headless. Each goes by its driven name, else the title its
- * report last gave the offices (`titles`, bare ids, the worker's memory too), else its folder's name.
+ * to from a terminal is still listed as headless. Each goes by its driven name, else the title its latest
+ * report pass worked out for the offices (`titles`, bare ids, the worker's memory too), else its folder's name.
  */
 export function sessionsSeen(
   reported: { session: string; cwd: string }[],

@@ -18612,8 +18612,8 @@ const uuidOf = (session) => session.slice(session.indexOf(":") + 1);
 * ids) is headless with no close. A session in a terminal or the Claude app has no close.
 * `background` is the worker's memory alone: after the runner restarts, a `claude --bg` session it
 * started before is listed as one in a terminal or the Claude app, and one a person has since attached
-* to from a terminal is still listed as headless. Each goes by its driven name, else the title its
-* report last gave the offices (`titles`, bare ids, the worker's memory too), else its folder's name.
+* to from a terminal is still listed as headless. Each goes by its driven name, else the title its latest
+* report pass worked out for the offices (`titles`, bare ids, the worker's memory too), else its folder's name.
 */
 function sessionsSeen(reported, records, background = /* @__PURE__ */ new Set(), titles = /* @__PURE__ */ new Map()) {
 	const closeOf = (r) => r.kind === "driven" ? r.session : `pid:${r.pid}`;

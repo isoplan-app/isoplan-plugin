@@ -193,7 +193,7 @@ export interface ReportSessionOptions {
   notWanted?: Record<string, number>;
   /** The runner's own pairing and list of repos for an office, shared by every session it reports. */
   shared?: (office: Office) => { pairing: Pairing; approved: Approved } | null;
-  /** The session's title as each pass gives it to the offices, for the desktop app's menu (runner/status.ts). */
+  /** The session's title as each pass works it out for the offices, sent or not, for the desktop app's menu (runner/status.ts). */
   titled?: (title: string) => void;
 }
 
