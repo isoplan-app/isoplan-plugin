@@ -8,7 +8,7 @@
 // only that session's lines. One connection is registered per session: of two, the one from the
 // newer version of the plugin keeps it, and of one version the later window's (`since`); the other
 // is told it is `superseded` and closed, as a data layer was when another took its session, and its
-// hooks module tries again a minute later. An ask (the ask_room script) is answered only with the
+// hooks module tries again a minute later. An ask (the ask_earlier_session script) is answered only with the
 // token, and only for a session whose hooks module is registered now, as that hooks module's
 // session: in its folder, whatever folder the ask names. The token is the worker's alone, not the
 // session's, so it is the user's own processes that can ask, and only for a session that is open.
@@ -63,7 +63,7 @@ export interface PipeServer {
 }
 
 const SESSION = /^[\w-]{1,200}$/;
-const NOT_CONNECTED = "The room can't be asked from here: this session isn't connected to Isoplan's runner. Carry on without the answer.";
+const NOT_CONNECTED = "The earlier session can't be asked from here: this session isn't connected to Isoplan's runner. Carry on without the answer.";
 
 /** Of two hooks modules for one session, the one that keeps it: a newer version's, then the later window's. */
 export function keeps(a: Pick<Hooked, "version" | "since">, b: Pick<Hooked, "version" | "since">): boolean {
@@ -132,7 +132,7 @@ export async function createPipeServer(o: PipeServerOptions): Promise<PipeServer
 
   const answer = async (socket: Socket, request: PipeAsk) => {
     const hooked = registered.get(request.session);
-    const text = hooked ? await o.ask({ ...request, cwd: hooked.cwd }).catch((err: unknown) => `The room couldn't be asked: ${String((err as Error)?.message ?? err)}. Carry on without the answer.`) : NOT_CONNECTED;
+    const text = hooked ? await o.ask({ ...request, cwd: hooked.cwd }).catch((err: unknown) => `The earlier session couldn't be asked: ${String((err as Error)?.message ?? err)}. Carry on without the answer.`) : NOT_CONNECTED;
     writeLine(socket, { type: "answer", text });
     socket.end();
   };

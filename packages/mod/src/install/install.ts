@@ -323,7 +323,7 @@ export async function uninstall(paths: Paths, { optOut = false, settleMs = 0, co
   if (!(await isStillGone())) return stopped(reinstalled);
   // Read before the runner's folder, which records it, goes.
   const appDir = await recordedAppDir(paths.claudeDir);
-  if (await stopOurRunner(paths.claudeDir, runner)) changes.push("stopped the runner, which answered for this machine's rooms");
+  if (await stopOurRunner(paths.claudeDir, runner)) changes.push("stopped the runner, which answered for this machine's sessions");
   // The desktop app (app.ts), stopped with the runner it is, or switched off. Its launcher lets its
   // files go a moment after the app exits, so this tries for a while; an app folder left behind
   // doesn't stop the rest.

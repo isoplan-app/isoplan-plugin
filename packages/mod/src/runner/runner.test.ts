@@ -392,7 +392,7 @@ test("runner: without the handoff's push, a brief is refused before the fork run
   t.runner.take(brief("b1"));
   await t.runner.settled();
   expect(t.asks).toEqual([]);
-  expect(t.sent).toEqual([{ type: "refusal", v: PROTOCOL_VERSION, id: "b1", reason: "unavailable", detail: "this plugin version can't hand a room over from the floor yet" }]);
+  expect(t.sent).toEqual([{ type: "refusal", v: PROTOCOL_VERSION, id: "b1", reason: "unavailable", detail: "this plugin version can't hand the work over from the floor yet" }]);
 });
 
 test("runner: a session whose worktree was deleted is refused with the reason; its path stays in the local log", async () => {

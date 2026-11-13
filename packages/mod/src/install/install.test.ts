@@ -199,7 +199,7 @@ test("uninstall: stops the runner, and one with a stale lock only when its comma
   await s.install();
   writeLock(0);
   living = true;
-  expect((await uninstall(s.paths, { runner: options(null) })).changes).toContain("stopped the runner, which answered for this machine's rooms");
+  expect((await uninstall(s.paths, { runner: options(null) })).changes).toContain("stopped the runner, which answered for this machine's sessions");
 });
 
 test("uninstall with optOut: wake.json stays, marked, so the plugin's data layer leaves the hook out; the install script puts it back", async () => {

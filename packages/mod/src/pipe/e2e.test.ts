@@ -2,7 +2,7 @@
 // office server, in a throwaway config folder: the runner's pipe (server.ts), its reporting
 // (src/runner/reporting.ts, report-session.ts) put together as the runner's worker puts them, and a
 // hooks module's end of the pipe (client.ts) in this process, its lines read as the hooks module
-// reads them. The status line, an answer and a message from the floor, and ask_room (dist/ask.js,
+// reads them. The status line, an answer and a message from the floor, and ask_earlier_session (dist/ask.js,
 // rebuilt with every change) all go through the runner; a runner started again mid-session has the
 // session back on the floor, on one link at a time.
 
@@ -154,7 +154,7 @@ const askScript = (claudeDir: string, repo: string, url: string, question: strin
     child.stdin!.end(question);
   });
 
-test("through the runner: the status line, a floor answer and a floor message reach the hooks module, and its ask_room question the room; the runner started again has the session back on one link, and messages still reach it", async () => {
+test("through the runner: the status line, a floor answer and a floor message reach the hooks module, and its ask_earlier_session question the earlier session; the runner started again has the session back on one link, and messages still reach it", async () => {
   const o = await office();
   const { claudeDir, repo } = machine(o.url);
   const first = await runner(claudeDir);
@@ -188,7 +188,7 @@ test("through the runner: the status line, a floor answer and a floor message re
   await until(() => link!.messages.some((m) => m.id === "m1"));
   expect(link!.messages.find((m) => m.id === "m1")).toEqual({ type: "reply", v: 1, id: "m1", kind: "owner-message" });
 
-  // ask_room, as the hooks module runs it, asks the room through the runner.
+  // ask_earlier_session, as the hooks module runs it, asks the earlier session through the runner.
   const said = await askScript(claudeDir, repo, o.url, "Why was the migration split?");
   expect(said).toContain("> Because the tests needed it.");
   const side = o.connections.find((c) => c.messages.some((m) => m.type === "ask-room"))!;

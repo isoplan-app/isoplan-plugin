@@ -1,4 +1,4 @@
-// The ask_room tool's script, which the hooks module runs for the session's agent (#49):
+// The ask_earlier_session tool's script, which the hooks module runs for the session's agent (#49):
 //
 //   node dist/ask.js --session <id> --cwd <folder> [--server <address>]... [--key <id>]   the question on stdin; prints what the agent is told
 //   node dist/ask.js --session <id> --cwd <folder> [--server <address>] --ack <question>  the agent was shown that question's end
@@ -21,7 +21,7 @@ const flag = (argv: string[], name: string) => {
 const flags = (argv: string[], name: string) => argv.flatMap((arg, i) => (arg === name && argv[i + 1] !== undefined ? [argv[i + 1]!] : []));
 
 // No pipe.json, a pipe that didn't answer or prove it is the runner, or a runner that stopped mid-ask.
-const UNREACHABLE = "The room can't be asked right now: this session can't reach Isoplan's runner on this machine. Carry on without the answer.";
+const UNREACHABLE = "The earlier session can't be asked right now: this session can't reach Isoplan's runner on this machine. Carry on without the answer.";
 
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
@@ -54,6 +54,6 @@ async function main(argv: string[]): Promise<string> {
 try {
   process.stdout.write((await main(process.argv.slice(2))) + "\n");
 } catch (err) {
-  process.stdout.write(`The room couldn't be asked: ${(err as Error)?.message ?? String(err)}. Carry on without the answer.\n`);
+  process.stdout.write(`The earlier session couldn't be asked: ${(err as Error)?.message ?? String(err)}. Carry on without the answer.\n`);
 }
 process.exit();

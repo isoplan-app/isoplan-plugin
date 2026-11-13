@@ -132,7 +132,7 @@ test("what's running: on macOS a process's working folder places it; how each ki
   expect(view.folders.map((f) => f.folder)).toEqual(["/w/api"]);
   expect(view.folders[0]!.sessions.map((s) => [s.key, s.name, s.how, s.found])).toEqual([
     ["u-l:0", "api", "from the floor", false],
-    ["u-l:12", "api", "a fork answering for its room", true],
+    ["u-l:12", "api", "a fork answering for its session", true],
     ["u-b", "bg", "headless", false],
     ["u-k", "take", "a take's first turn", false],
   ]);

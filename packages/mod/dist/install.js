@@ -1709,7 +1709,7 @@ async function uninstall$1(paths, { optOut = false, settleMs = 0, confirm, runne
 	const reinstalled = "stopped: Claude Code lists the plugin as installed again";
 	if (!await isStillGone()) return stopped(reinstalled);
 	const appDir = await recordedAppDir(paths.claudeDir);
-	if (await stopOurRunner(paths.claudeDir, runner)) changes.push("stopped the runner, which answered for this machine's rooms");
+	if (await stopOurRunner(paths.claudeDir, runner)) changes.push("stopped the runner, which answered for this machine's sessions");
 	if (appDir && await exists(appDir)) await fs.rm(appDir, {
 		recursive: true,
 		force: true,
@@ -1993,7 +1993,7 @@ try {
 	for (const change of changes) console.log(change);
 	if (!changes.length) console.log(uninstall ? "Nothing of Isoplan's was installed; nothing to remove." : "The wake hook is already installed; nothing changed.");
 	if (!uninstall) {
-		if (!await fs.stat(claudeBinaryPath(claudeDir)).catch(() => null)) console.log("Couldn't find the claude binary, so the runner can't answer for this machine's rooms; set its path in " + claudeBinaryPath(claudeDir) + " as { \"path\": \"...\" }.");
+		if (!await fs.stat(claudeBinaryPath(claudeDir)).catch(() => null)) console.log("Couldn't find the claude binary, so the runner can't answer for this machine's sessions; set its path in " + claudeBinaryPath(claudeDir) + " as { \"path\": \"...\" }.");
 		if (await recordEnv(claudeDir, process.env)) console.log(`recorded the runner's environment in ${runnerEnvPath(claudeDir)}`);
 		for (const change of (await installApp({
 			claudeDir,
@@ -2008,7 +2008,7 @@ try {
 			spawn: start
 		});
 		console.log({
-			started: "Started the runner, which answers for this machine's rooms.",
+			started: "Started the runner, which answers for this machine's sessions.",
 			running: "The runner is already running.",
 			"held-off": `The runner is holding off for now (the office server didn't want it, or it kept crashing); see ${path.join(claudeDir, "isoplan", "logs", "runner.log")}.`,
 			"not-installed": "The runner wasn't started: its copy isn't in place."

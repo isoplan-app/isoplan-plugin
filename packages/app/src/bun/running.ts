@@ -100,7 +100,7 @@ export interface RunningInput {
 
 /** How a session runs, as the window says it. */
 export function howItRuns(s: SessionSeen): string {
-  if (s.fork) return "a fork answering for its room";
+  if (s.fork) return "a fork answering for its session";
   if (s.close?.startsWith("pid:")) return "a take's first turn";
   if (s.close) return "from the floor";
   if (s.headless) return "headless";

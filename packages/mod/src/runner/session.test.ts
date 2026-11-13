@@ -478,7 +478,7 @@ test("start: no folder of the room's sessions here is no-folder, a person other 
   await t.until(() => t.sent.length === 2);
   expect(t.of("refused")).toEqual(
     expect.arrayContaining([
-      expect.objectContaining({ id: "d1", reason: "no-folder", detail: expect.stringContaining("no folder for this room") }),
+      expect.objectContaining({ id: "d1", reason: "no-folder", detail: expect.stringContaining("no folder for this session") }),
       { type: "driven", v: 1, kind: "refused", id: "d2", reason: "not-owner" },
     ]),
   );

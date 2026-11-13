@@ -624,7 +624,7 @@ export async function takeHandoff(message: Pick<HandoffMessage, "handoff" | "mod
   if (driven) {
     const problem = o.driven ? o.driven.problem(message.by) : "This computer's Isoplan can't run sessions from the floor yet, so nothing was made: take it again another way.";
     if (problem || !message.session || !message.room) {
-      await fail("open", problem ?? "The office server didn't say which session and room to open, so none was opened: take it again from the floor.");
+      await fail("open", problem ?? "The office server didn't say which session to open, so none was opened: take it again from the floor.");
       return done();
     }
   }

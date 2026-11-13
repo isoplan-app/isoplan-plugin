@@ -1,6 +1,6 @@
 // The runner's pipe (ADR 0007 step 2) on a real pipe: a named pipe with a name of its own for each
 // test on Windows (a Unix socket elsewhere), in a throwaway config folder. The hooks module's end
-// (client.ts) against the runner's (server.ts), and the ask_room script (dist/ask.js, rebuilt with
+// (client.ts) against the runner's (server.ts), and the ask_earlier_session script (dist/ask.js, rebuilt with
 // every change) against the runner's.
 
 import { execFile } from "node:child_process";
@@ -252,9 +252,9 @@ const askScript = (claudeDir: string, question: string, cwd = "C:/w/repo") =>
     child.stdin!.end(question);
   });
 
-test("pipe: the ask_room script asks through the runner only for a session whose hooks module is connected; with no runner it says to carry on", async () => {
+test("pipe: the ask_earlier_session script asks through the runner only for a session whose hooks module is connected; with no runner it says to carry on", async () => {
   const { claudeDir, server, asked } = await runnerEnd();
-  expect(await askScript(claudeDir, "Why?")).toBe("The room can't be asked from here: this session isn't connected to Isoplan's runner. Carry on without the answer.");
+  expect(await askScript(claudeDir, "Why?")).toBe("The earlier session can't be asked from here: this session isn't connected to Isoplan's runner. Carry on without the answer.");
   expect(asked).toEqual([]);
   hooksEnd(claudeDir);
   await until(() => !!server.hooked("s1"));
@@ -264,7 +264,7 @@ test("pipe: the ask_room script asks through the runner only for a session whose
   expect(await askScript(claudeDir, "Where?", "C:/elsewhere")).toBe("answered: Where?");
   expect(asked.at(-1)).toMatchObject({ cwd: "C:/w/repo" });
   await server.close();
-  expect(await askScript(claudeDir, "Why?")).toBe("The room can't be asked right now: this session can't reach Isoplan's runner on this machine. Carry on without the answer.");
+  expect(await askScript(claudeDir, "Why?")).toBe("The earlier session can't be asked right now: this session can't reach Isoplan's runner on this machine. Carry on without the answer.");
 });
 
 test("pipe: the desktop app's close, and its end and remove, reach the runner only with the token, and are told whether the session closed; with no runner it is told nothing", async () => {

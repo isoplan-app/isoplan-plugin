@@ -194,7 +194,7 @@ export function createRunner({ answerer, ledger, settings, prompts, scan, send, 
       return unavailable(id, "the session's folder is gone, so its lead can't be asked");
     }
     if (lead.working) return unavailable(id, "the session's lead is mid-turn; ask again once its turn ends");
-    if (request.kind === "write-brief" && !push) return unavailable(id, "this plugin version can't hand a room over from the floor yet");
+    if (request.kind === "write-brief" && !push) return unavailable(id, "this plugin version can't hand the work over from the floor yet");
 
     const s = await settings();
     const p = await prompts();
@@ -210,7 +210,7 @@ export function createRunner({ answerer, ledger, settings, prompts, scan, send, 
     }
     // A brief the fork can't write still goes, as the runner's note alone, for the server to fill in.
     const fallback = (why: string) => {
-      log(`${id}: the fork didn't write the brief (${why}), so the server writes it from the room's feed`);
+      log(`${id}: the fork didn't write the brief (${why}), so the server writes it from the session's feed`);
       return `No brief was written by the session: ${why}.${brief.note ? `\n\n${brief.note}` : ""}`;
     };
     const expected = estimate(lead.context, s);

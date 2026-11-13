@@ -1,4 +1,4 @@
-// Asking the room (#49), as the receiver's agent does it through the plugin's ask_room tool: the
+// Asking the room (#49), as the receiver's agent does it through the plugin's ask_earlier_session tool: the
 // question goes to the office server on the session's short link, and the answer comes back from
 // the fork of the room's lead on its owner's machine. It never blocks the session for long (#45):
 // it polls askPolls times, askPollSeconds apart (runner.json, with the caps), and the server's own
@@ -33,8 +33,8 @@ export class TokenExpired extends Error {}
 
 /** What the agent is told when the office server won't let this session in (pairing, #23). */
 export const REFUSED: Record<string, string> = {
-  "not-paired": "This machine isn't paired with the office yet, so the room can't be asked from here. Isoplan shows a link to pair it in Claude Code's status line; once the person approves it on the floor, ask again.",
-  "pairing-ended": "This machine's pairing with the office has ended (it was revoked, or the machine was away too long), so the room can't be asked from here. Isoplan shows a link to pair it again in Claude Code's status line.",
+  "not-paired": "This machine isn't paired with the office yet, so the earlier session can't be asked from here. Isoplan shows a link to pair it in Claude Code's status line; once the person approves it on the floor, ask again.",
+  "pairing-ended": "This machine's pairing with the office has ended (it was revoked, or the machine was away too long), so the earlier session can't be asked from here. Isoplan shows a link to pair it again in Claude Code's status line.",
   "forged-hello": "The office server refused this session: it belongs to someone else's machine in the office, so it can't ask from here.",
 };
 
@@ -51,7 +51,7 @@ export async function askRoom(link: SideLink, question: string, s: AskSettings, 
   if (first.type === "error") {
     if (first.code === "token-expired") throw new TokenExpired(first.message);
     const refused = REFUSED[first.code];
-    return refused ? `${refused} Carry on without the answer.` : `The room can't be asked: ${first.message}`;
+    return refused ? `${refused} Carry on without the answer.` : `The earlier session can't be asked: ${first.message}`;
   }
   let latest: AskedMessage = first;
   const id = latest.question;

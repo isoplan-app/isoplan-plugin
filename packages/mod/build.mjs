@@ -2,7 +2,7 @@
 // file with protocol and zod inlined, so the plugin runs from a git checkout with no install step,
 // plus dist/data-layer.js (kept for older code: src/data-layer/main.ts), the
 // wake hook (which install copies into the config folder), the install script, the runner, the
-// handoff commands' script, the ask_room tool's script, the isoplan:// link handler (src/connect) and /isoplan:repos's script.
+// handoff commands' script, the ask_earlier_session tool's script, the isoplan:// link handler (src/connect) and /isoplan:repos's script.
 // dist/ is committed: rebuild it with every change to src/.
 
 import { build } from "rolldown";

@@ -1,4 +1,4 @@
-// Asking the room for a session, as the runner does it when the session's ask_room script asks
+// Asking the room for a session, as the runner does it when the session's ask_earlier_session script asks
 // through the runner's pipe (main.ts, src/pipe/server.ts): it asks in the office the session took
 // its handoff through (handoff/taken-office.ts) when that is one of those that gave the session its
 // rights (`servers`, #105), else in the first of them in config.json's order whose list takes the
@@ -55,15 +55,15 @@ export async function askFromMachine(a: MachineAsk): Promise<string> {
   const { session, cwd, ack } = a;
   const key = a.key || undefined;
   const question = ack ? "" : (a.question ?? "").trim();
-  if (!ack && !question) return "Give the question to ask the room.";
-  if (question.length > MAX_QUESTION_LENGTH) return `That question is too long to ask the room: keep it under ${MAX_QUESTION_LENGTH} characters.`;
+  if (!ack && !question) return "Give the question to ask the earlier session.";
+  if (question.length > MAX_QUESTION_LENGTH) return `That question is too long to ask the earlier session: keep it under ${MAX_QUESTION_LENGTH} characters.`;
   // Nothing leaves the machine without the secret scan (runner/scan.ts).
   const hit = question ? await a.scan(question) : null;
   if (hit) return `The question wasn't sent: it looks like it holds a secret (it matches the secret pattern ${hit}). Ask it again without that, or carry on without the answer.`;
   const settings = await loadSettings<AskSettings>(io, path.join(a.appDir, "runner.json"), path.join(isoplanDir, "runner.json"));
   const config = await loadConfig(io, path.join(a.appDir, "config.json"), path.join(isoplanDir, "config.json"));
   const offices = askOffices(officesOf(config), a.servers, await takenOffice(claudeDir, session));
-  if (!offices.length) return `The room can't be asked: ${a.servers.join(", ")} isn't one of the office servers in config.json. Carry on without the answer.`;
+  if (!offices.length) return `The earlier session can't be asked: ${a.servers.join(", ")} isn't one of the office servers in config.json. Carry on without the answer.`;
   // Nothing of a repo the office doesn't take is sent, its id included (#91).
   let found: Awaited<ReturnType<typeof commandHome>> = { refused: "" };
   let office = offices[0]!;
@@ -74,7 +74,7 @@ export async function askFromMachine(a: MachineAsk): Promise<string> {
     office = each;
     if ("home" in found) break;
   }
-  if ("refused" in found) return `The room can't be asked: ${found.refused} Carry on without the answer.`;
+  if ("refused" in found) return `The earlier session can't be asked: ${found.refused} Carry on without the answer.`;
   const { server } = office;
   const pairing = await machinePairing(office, config.allowPlainWs, claudeDir, claudeJson, io);
   // One bound for the whole wait, a retry after an expired token included.
