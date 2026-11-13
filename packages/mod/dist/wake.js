@@ -827,7 +827,7 @@ async function uninstall(paths, { optOut = false, settleMs = 0, confirm, runner 
 	const reinstalled = "stopped: Claude Code lists the plugin as installed again";
 	if (!await isStillGone()) return stopped(reinstalled);
 	const appDir = await recordedAppDir(paths.claudeDir);
-	if (await stopOurRunner(paths.claudeDir, runner)) changes.push("stopped the runner, which answered for this machine's rooms");
+	if (await stopOurRunner(paths.claudeDir, runner)) changes.push("stopped the runner, which answered for this machine's sessions");
 	if (appDir && await exists(appDir)) await fs.rm(appDir, {
 		recursive: true,
 		force: true,

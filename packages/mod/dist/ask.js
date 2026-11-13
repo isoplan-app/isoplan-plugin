@@ -6874,7 +6874,7 @@ const flag = (argv, name) => {
 	return i >= 0 && argv[i + 1] !== void 0 ? argv[i + 1] : null;
 };
 const flags = (argv, name) => argv.flatMap((arg, i) => arg === name && argv[i + 1] !== void 0 ? [argv[i + 1]] : []);
-const UNREACHABLE = "The room can't be asked right now: this session can't reach Isoplan's runner on this machine. Carry on without the answer.";
+const UNREACHABLE = "The earlier session can't be asked right now: this session can't reach Isoplan's runner on this machine. Carry on without the answer.";
 async function readStdin() {
 	const chunks = [];
 	for await (const chunk of process.stdin) chunks.push(chunk);
@@ -6913,7 +6913,7 @@ async function main(argv) {
 try {
 	process.stdout.write(await main(process.argv.slice(2)) + "\n");
 } catch (err) {
-	process.stdout.write(`The room couldn't be asked: ${err?.message ?? String(err)}. Carry on without the answer.\n`);
+	process.stdout.write(`The earlier session couldn't be asked: ${err?.message ?? String(err)}. Carry on without the answer.\n`);
 }
 process.exit();
 //#endregion

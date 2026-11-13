@@ -9127,10 +9127,10 @@ async function takeCommand(argv) {
 		}, process.platform, timeoutMs) : null;
 		const setupNote = setup ? [`The repo's worktree setup script has NOT been run here: \`${setup}\` (from isoplan.json). Run it only if this folder isn't set up yet.`] : [];
 		if (handoff.task) return [
-			`You have taken Isoplan spin-off ${handoff.id}: a new task of your own, and this session is in its room now.`,
+			`You have taken Isoplan spin-off ${handoff.id}: a new task of your own, and this session has it now.`,
 			checkout,
 			...setupNote,
-			"To ask the session it came from a question, use the Isoplan ask_room tool; it carries on with its own work.",
+			"To ask the session it came from a question, use the Isoplan ask_earlier_session tool (ask_room in older Isoplan plugins); it carries on with its own work.",
 			"",
 			"Your task:",
 			"",
@@ -9141,10 +9141,10 @@ async function takeCommand(argv) {
 			handoff.brief
 		].join("\n");
 		return [
-			`You have taken Isoplan handoff ${handoff.id}, and this session is in its room now.`,
+			`You have taken Isoplan handoff ${handoff.id}, and this session has the work now.`,
 			checkout,
 			...setupNote,
-			"To ask the session it came from a question, use the Isoplan ask_room tool.",
+			"To ask the session it came from a question, use the Isoplan ask_earlier_session tool (ask_room in older Isoplan plugins).",
 			"",
 			"The brief:",
 			"",

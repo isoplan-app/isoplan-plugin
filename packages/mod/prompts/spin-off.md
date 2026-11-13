@@ -6,4 +6,4 @@ Write the brief for that task, not a summary of all of this work. Cover what the
 
 The tracked changes go over in a commit on the handoff's own branch; untracked files stay behind. {{untracked}}
 
-End the brief with this line, as it is: "If something here is unclear, ask this session with the Isoplan ask_room tool; it answers from the original conversation."
+End the brief with this line, as it is: "If something here is unclear, ask this session with the Isoplan ask_earlier_session tool (ask_room in older Isoplan plugins); it answers from the original conversation."

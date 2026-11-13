@@ -356,7 +356,7 @@ const KILL_WAIT_MS = 10000;
 export const menuCloseWaitMs = (drivenCloseSeconds: number) => 2 * Math.max(drivenCloseSeconds * 1000, KILL_WAIT_MS);
 
 const NO_CLAUDE = "Claude Code for the terminal isn't installed on this computer, so no session can run here.";
-const NO_FOLDER = "This computer has no folder for this room: open Claude Code once in the room's repo here, then try again.";
+const NO_FOLDER = "This computer has no folder for this session: open Claude Code once in the session's repo here, then try again.";
 const NOT_LISTED = "That folder isn't one this computer offers for this repo any more, so nothing was started. Pick one of the folders it offers now.";
 const BRANCH_NOT_LISTED = "That branch isn't one this computer offers for this repo any more, so nothing was started. Pick one of the branches it offers now.";
 const NO_WORKTREE = "A separate folder for that branch couldn't be made on this computer, so nothing was started. Its runner log says why.";

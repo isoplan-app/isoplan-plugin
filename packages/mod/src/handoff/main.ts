@@ -385,9 +385,9 @@ async function takeCommand(argv: string[]): Promise<string> {
     const setup = remote ? await setupCommand(run, { dir, remote }, process.platform, timeoutMs) : null;
     const setupNote = setup ? [`The repo's worktree setup script has NOT been run here: \`${setup}\` (from isoplan.json). Run it only if this folder isn't set up yet.`] : [];
     if (handoff.task) {
-      return [`You have taken Isoplan spin-off ${handoff.id}: a new task of your own, and this session is in its room now.`, checkout, ...setupNote, "To ask the session it came from a question, use the Isoplan ask_room tool; it carries on with its own work.", "", "Your task:", "", handoff.task, "", "The brief, written for that task:", "", handoff.brief].join("\n");
+      return [`You have taken Isoplan spin-off ${handoff.id}: a new task of your own, and this session has it now.`, checkout, ...setupNote, "To ask the session it came from a question, use the Isoplan ask_earlier_session tool (ask_room in older Isoplan plugins); it carries on with its own work.", "", "Your task:", "", handoff.task, "", "The brief, written for that task:", "", handoff.brief].join("\n");
     }
-    return [`You have taken Isoplan handoff ${handoff.id}, and this session is in its room now.`, checkout, ...setupNote, "To ask the session it came from a question, use the Isoplan ask_room tool.", "", "The brief:", "", handoff.brief].join("\n");
+    return [`You have taken Isoplan handoff ${handoff.id}, and this session has the work now.`, checkout, ...setupNote, "To ask the session it came from a question, use the Isoplan ask_earlier_session tool (ask_room in older Isoplan plugins).", "", "The brief:", "", handoff.brief].join("\n");
   } finally {
     await link.close();
   }

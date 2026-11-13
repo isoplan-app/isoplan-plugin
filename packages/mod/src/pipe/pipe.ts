@@ -14,7 +14,7 @@
 // client drops a pipe that doesn't (openPipe).
 //
 // Each side writes one JSON object per line. A hooks module's end (client.ts, `dist/pipe.js`) says
-// hello for its session and is sent that session's lines (src/lines.ts); the ask_room script
+// hello for its session and is sent that session's lines (src/lines.ts); the ask_earlier_session script
 // (src/ask/main.ts) asks once and is sent the answer; the desktop app (packages/app) asks the runner
 // to close one of its own headless sessions (`close`, closeSession), and with `remove` to remove it
 // too (#129), and is told whether it did. A runner from before `remove` ignores it and only closes.
@@ -45,7 +45,7 @@ export interface PipeHello {
   env?: Record<string, string>;
 }
 
-/** What the ask_room script sends: a question for the room, or that the agent was shown one's end (`ack`). */
+/** What the ask_earlier_session script sends: a question for the room, or that the agent was shown one's end (`ack`). */
 export interface PipeAsk {
   type: "ask";
   v: 1;

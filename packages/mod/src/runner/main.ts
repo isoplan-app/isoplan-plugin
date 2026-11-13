@@ -35,7 +35,7 @@
 // The worker reports every Claude Code session on the machine (reporting.ts, ADR 0007): headless
 // ones, those it drives, those without the plugin, and those whose hooks module is connected to its
 // pipe (src/pipe/server.ts), each on a link of its own to each office, sharing the runner's pairing
-// and list. A hooks module gets its session's lines down the pipe, and the ask_room script asks the
+// and list. A hooks module gets its session's lines down the pipe, and the ask_earlier_session script asks the
 // room through it (src/ask/machine.ts), only for a session whose hooks module is connected. Its
 // address and token are in <claude dir>/isoplan/runner/pipe.json, which the worker writes as it starts.
 // Each office's link, and the links waiting to pair the machine, go to <claude dir>/isoplan/runner/status.json
@@ -166,7 +166,7 @@ async function supervisor(): Promise<number> {
     // Unpaired, it doesn't hold off: the sessions' links pair the machine again, and the next
     // start, from one of them, the wake hook or the login item, picks up the new credential. While
     // the worker reports sessions it doesn't end, and their shared pairing pairs the machine again.
-    log(`runner ${process.pid} stopped: ${stopped === "done" ? "no room on this machine is lit" : "the office server says this machine's pairing has ended"}`);
+    log(`runner ${process.pid} stopped: ${stopped === "done" ? "no session on this machine is lit" : "the office server says this machine's pairing has ended"}`);
     await releaseLock(lock, process.pid).catch(() => {});
   } else {
     // Neither goes away by starting again: it holds off, which a newer version ends for a crash loop.
@@ -203,7 +203,7 @@ async function worker(): Promise<number> {
     if (line.type === "log") log(line.text);
     else if (line.type === "error") log(`the office server at ${server} says: ${line.message} (${line.code})`);
     else if (line.type === "pair") {
-      log(`to answer for this machine's rooms through ${line.server}, pair it: click ${line.url} on this computer and approve it in the office (it works until ${line.expires})`);
+      log(`to answer for this machine's sessions through ${line.server}, pair it: click ${line.url} on this computer and approve it in the office (it works until ${line.expires})`);
       // The machine's one pairing: its link is in the status line of each session waiting for it.
       const label = offices.find((o) => o.server === line.server)?.label;
       pairLinks.pair({ ...line, ...(label && { label }) });
