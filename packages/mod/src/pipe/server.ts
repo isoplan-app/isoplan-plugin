@@ -21,7 +21,7 @@
 import { timingSafeEqual } from "node:crypto";
 import net, { type Socket } from "node:net";
 import type { DataLayerLine } from "../lines.js";
-import { newToken, pipeAddress, preparePipe, proofOf, readLines, sessionEnv, writeLine, writePipeInfo, type PipeAsk, type PipeClose, type PipeHello, type PipeHi } from "./pipe.js";
+import { newToken, pipeAddress, preparePipe, proofOf, readLines, sessionEnv, writeLine, writePipeInfo, type PipeAsk, type PipeClose, type PipeHello, type PipeHi, type Told } from "./pipe.js";
 
 /** A session's registered hooks module, as the runner reports for it. */
 export interface Hooked {
@@ -46,7 +46,7 @@ export interface PipeServerOptions {
   /** The address to listen on, in place of a new one (pipeAddress). */
   address?: string;
   /** Answers an ask from a session whose hooks module is registered: what the agent is told. */
-  ask(request: PipeAsk): Promise<string>;
+  ask(request: PipeAsk): Promise<Told>;
   /** Closes the runner's headless session that status.json names by `close`, and with `remove` removes it too: whether its process has ended. */
   close?(close: string, remove: boolean): Promise<boolean>;
   onChange(session: string): void;
@@ -132,8 +132,10 @@ export async function createPipeServer(o: PipeServerOptions): Promise<PipeServer
 
   const answer = async (socket: Socket, request: PipeAsk) => {
     const hooked = registered.get(request.session);
-    const text = hooked ? await o.ask({ ...request, cwd: hooked.cwd }).catch((err: unknown) => `The earlier session couldn't be asked: ${String((err as Error)?.message ?? err)}. Carry on without the answer.`) : NOT_CONNECTED;
-    writeLine(socket, { type: "answer", text });
+    const told: Told = hooked
+      ? await o.ask({ ...request, cwd: hooked.cwd }).catch((err: unknown) => ({ text: `The earlier session couldn't be asked: ${String((err as Error)?.message ?? err)}. Carry on without the answer.`, failed: true as const }))
+      : { text: NOT_CONNECTED, failed: true };
+    writeLine(socket, { type: "answer", ...told });
     socket.end();
   };
 

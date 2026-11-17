@@ -33,7 +33,7 @@ async function until(check: () => boolean, ms = 10000) {
 async function runnerEnd(claudeDir = path.join(tempRoot(), "claude")) {
   const changes: string[] = [];
   const asked: unknown[] = [];
-  const server = await createPipeServer({ claudeDir, log: () => {}, onChange: (s) => void changes.push(s), ask: async (request) => (asked.push(request), `answered: ${request.question}`) });
+  const server = await createPipeServer({ claudeDir, log: () => {}, onChange: (s) => void changes.push(s), ask: async (request) => (asked.push(request), { text: `answered: ${request.question}` }) });
   closing.push(() => server.close());
   return { claudeDir, server, changes, asked };
 }
@@ -246,31 +246,38 @@ test("pipe: when the runner goes, the hooks module's end says so once, starts it
 });
 
 /** dist/ask.js run as the hooks module runs it, for session s1, in the config folder `claudeDir`. */
+let lastExit: number | null = null;
 const askScript = (claudeDir: string, question: string, cwd = "C:/w/repo") =>
   new Promise<string>((resolve) => {
-    const child = execFile(process.execPath, [path.join(modDir, "dist", "ask.js"), "--session", "s1", "--cwd", cwd, "--server", "ws://office/data-layer", "--key", "toolu_1"], { env: { ...process.env, CLAUDE_CONFIG_DIR: claudeDir }, windowsHide: true }, (_err, stdout) => resolve(stdout.trim()));
+    const child = execFile(process.execPath, [path.join(modDir, "dist", "ask.js"), "--session", "s1", "--cwd", cwd, "--server", "ws://office/data-layer", "--key", "toolu_1"], { env: { ...process.env, CLAUDE_CONFIG_DIR: claudeDir }, windowsHide: true }, (err, stdout) => {
+      lastExit = err ? Number((err as { code?: number }).code) : 0;
+      resolve(stdout.trim());
+    });
     child.stdin!.end(question);
   });
 
 test("pipe: the ask_earlier_session script asks through the runner only for a session whose hooks module is connected; with no runner it says to carry on", async () => {
   const { claudeDir, server, asked } = await runnerEnd();
   expect(await askScript(claudeDir, "Why?")).toBe("The earlier session can't be asked from here: this session isn't connected to Isoplan's runner. Carry on without the answer.");
+  expect(lastExit).toBe(2);
   expect(asked).toEqual([]);
   hooksEnd(claudeDir);
   await until(() => !!server.hooked("s1"));
   expect(await askScript(claudeDir, "Why?")).toBe("answered: Why?");
+  expect(lastExit).toBe(0);
   expect(asked).toEqual([{ type: "ask", v: 1, token: (await readPipeInfo(claudeDir))!.token, session: "s1", cwd: "C:/w/repo", servers: ["ws://office/data-layer"], key: "toolu_1", question: "Why?" }]);
   // Asked as the session its hooks module registered, in that session's folder, whatever folder the ask names.
   expect(await askScript(claudeDir, "Where?", "C:/elsewhere")).toBe("answered: Where?");
   expect(asked.at(-1)).toMatchObject({ cwd: "C:/w/repo" });
   await server.close();
   expect(await askScript(claudeDir, "Why?")).toBe("The earlier session can't be asked right now: this session can't reach Isoplan's runner on this machine. Carry on without the answer.");
+  expect(lastExit).toBe(2);
 });
 
 test("pipe: the desktop app's close, and its end and remove, reach the runner only with the token, and are told whether the session closed; with no runner it is told nothing", async () => {
   const claudeDir = path.join(tempRoot(), "claude");
   const asked: string[] = [];
-  const server = await createPipeServer({ claudeDir, log: () => {}, onChange: () => {}, ask: async () => "", close: async (id, remove) => (asked.push(remove ? `remove ${id}` : id), id === "claude-code:1") });
+  const server = await createPipeServer({ claudeDir, log: () => {}, onChange: () => {}, ask: async () => ({ text: "" }), close: async (id, remove) => (asked.push(remove ? `remove ${id}` : id), id === "claude-code:1") });
   closing.push(() => server.close());
   expect(await closeSession(claudeDir, "claude-code:1", 5000)).toBe(true);
   expect(await closeSession(claudeDir, "claude-code:1", 5000, true)).toBe(true);
@@ -284,7 +291,7 @@ test("pipe: the desktop app's close, and its end and remove, reach the runner on
 
 test("pipe: a close the runner takes but never answers ends after the wait, as no answer", async () => {
   const claudeDir = path.join(tempRoot(), "claude");
-  const server = await createPipeServer({ claudeDir, log: () => {}, onChange: () => {}, ask: async () => "", close: () => new Promise<boolean>(() => {}) });
+  const server = await createPipeServer({ claudeDir, log: () => {}, onChange: () => {}, ask: async () => ({ text: "" }), close: () => new Promise<boolean>(() => {}) });
   closing.push(() => server.close());
   expect(await closeSession(claudeDir, "claude-code:1", 300)).toBe("no answer");
 });

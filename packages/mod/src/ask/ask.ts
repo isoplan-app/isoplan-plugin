@@ -13,6 +13,7 @@
 
 import { PROTOCOL_VERSION, type AskedMessage, type OfficeServerMessage } from "@isoplan/protocol";
 import type { SideLink } from "../handoff/connection.js";
+import type { Told } from "../pipe/pipe.js";
 import { endText, MAX_WAIT_MS, waitText } from "./text.js";
 
 export { MAX_WAIT_MS };
@@ -42,16 +43,20 @@ export const REFUSED: Record<string, string> = {
 export const UNCONFIRMED =
   "The office server didn't confirm the question in time. It may have been logged all the same, and if so its answer reaches you later as a note on one of your next tool results. Carry on without it, and don't ask it again.";
 
-/** What the agent is told: the answer, or why there is none and that it should carry on. */
-export async function askRoom(link: SideLink, question: string, s: AskSettings, { key, deadline = Date.now() + MAX_WAIT_MS, now = Date.now, me }: { key?: string; deadline?: number; now?: () => number; me?: string } = {}): Promise<string> {
+/**
+ * What the agent is told: the answer, or why there is none and that it should carry on. It is
+ * `failed` when the question was refused or dropped; a question still queued, or one the server
+ * didn't confirm, isn't a failure, as its answer may still come.
+ */
+export async function askRoom(link: SideLink, question: string, s: AskSettings, { key, deadline = Date.now() + MAX_WAIT_MS, now = Date.now, me }: { key?: string; deadline?: number; now?: () => number; me?: string } = {}): Promise<Told> {
   const left = () => deadline - now();
   link.send({ type: "ask-room", v: PROTOCOL_VERSION, question, ...(key ? { key } : {}) });
   const first = left() > 0 ? await link.next(isAsked(null), Math.min(ANSWER_MS, left())).catch(() => null) : null;
-  if (!first) return UNCONFIRMED;
+  if (!first) return { text: UNCONFIRMED };
   if (first.type === "error") {
     if (first.code === "token-expired") throw new TokenExpired(first.message);
     const refused = REFUSED[first.code];
-    return refused ? `${refused} Carry on without the answer.` : `The earlier session can't be asked: ${first.message}`;
+    return { text: refused ? `${refused} Carry on without the answer.` : `The earlier session can't be asked: ${first.message}`, failed: true };
   }
   let latest: AskedMessage = first;
   const id = latest.question;
@@ -76,7 +81,9 @@ export async function askRoom(link: SideLink, question: string, s: AskSettings, 
     // The link went, or the last check ran out of time: what the server knows stands, and the end
     // still arrives as a note.
   }
-  return over(latest) ? endText(latest, false, me) : waitText(latest);
+  if (!over(latest)) return { text: waitText(latest) };
+  const text = endText(latest, false, me);
+  return latest.state === "dropped" ? { text, failed: true } : { text };
 }
 
 const over = (m: AskedMessage) => m.state === "answered" || m.state === "dropped";

@@ -18141,7 +18141,11 @@ const REFUSED = {
 };
 /** What the agent is told when the server didn't confirm the ask: it may have been logged. */
 const UNCONFIRMED = "The office server didn't confirm the question in time. It may have been logged all the same, and if so its answer reaches you later as a note on one of your next tool results. Carry on without it, and don't ask it again.";
-/** What the agent is told: the answer, or why there is none and that it should carry on. */
+/**
+* What the agent is told: the answer, or why there is none and that it should carry on. It is
+* `failed` when the question was refused or dropped; a question still queued, or one the server
+* didn't confirm, isn't a failure, as its answer may still come.
+*/
 async function askRoom(link, question, s, { key, deadline = Date.now() + MAX_WAIT_MS, now = Date.now, me } = {}) {
 	const left = () => deadline - now();
 	link.send({
@@ -18151,11 +18155,14 @@ async function askRoom(link, question, s, { key, deadline = Date.now() + MAX_WAI
 		...key ? { key } : {}
 	});
 	const first = left() > 0 ? await link.next(isAsked(null), Math.min(ANSWER_MS, left())).catch(() => null) : null;
-	if (!first) return UNCONFIRMED;
+	if (!first) return { text: UNCONFIRMED };
 	if (first.type === "error") {
 		if (first.code === "token-expired") throw new TokenExpired(first.message);
 		const refused = REFUSED[first.code];
-		return refused ? `${refused} Carry on without the answer.` : `The earlier session can't be asked: ${first.message}`;
+		return {
+			text: refused ? `${refused} Carry on without the answer.` : `The earlier session can't be asked: ${first.message}`,
+			failed: true
+		};
 	}
 	let latest = first;
 	const id = latest.question;
@@ -18184,7 +18191,12 @@ async function askRoom(link, question, s, { key, deadline = Date.now() + MAX_WAI
 			question: id
 		});
 	} catch {}
-	return over(latest) ? endText(latest, false, me) : waitText(latest);
+	if (!over(latest)) return { text: waitText(latest) };
+	const text = endText(latest, false, me);
+	return latest.state === "dropped" ? {
+		text,
+		failed: true
+	} : { text };
 }
 const over = (m) => m.state === "answered" || m.state === "dropped";
 /**
@@ -18201,7 +18213,7 @@ function askOffices(offices, granted, taken) {
 //#region src/ask/machine.ts
 const CONNECT_MS = 2e4;
 const readText = (p) => fs.readFile(p, "utf8").catch(() => null);
-/** What the agent is told. */
+/** What the agent is told, `failed` when the question couldn't be asked. */
 async function askFromMachine(a) {
 	const { dir: claudeDir, json: claudeJson } = claudePaths(process.env, os.homedir());
 	const isoplanDir = path.join(claudeDir, "isoplan");
@@ -18209,14 +18221,26 @@ async function askFromMachine(a) {
 	const { session, cwd, ack } = a;
 	const key = a.key || void 0;
 	const question = ack ? "" : (a.question ?? "").trim();
-	if (!ack && !question) return "Give the question to ask the earlier session.";
-	if (question.length > 4e3) return `That question is too long to ask the earlier session: keep it under ${MAX_QUESTION_LENGTH} characters.`;
+	if (!ack && !question) return {
+		text: "Give the question to ask the earlier session.",
+		failed: true
+	};
+	if (question.length > 4e3) return {
+		text: `That question is too long to ask the earlier session: keep it under ${MAX_QUESTION_LENGTH} characters.`,
+		failed: true
+	};
 	const hit = question ? await a.scan(question) : null;
-	if (hit) return `The question wasn't sent: it looks like it holds a secret (it matches the secret pattern ${hit}). Ask it again without that, or carry on without the answer.`;
+	if (hit) return {
+		text: `The question wasn't sent: it looks like it holds a secret (it matches the secret pattern ${hit}). Ask it again without that, or carry on without the answer.`,
+		failed: true
+	};
 	const settings = await loadSettings(io, path.join(a.appDir, "runner.json"), path.join(isoplanDir, "runner.json"));
 	const config = await loadConfig(io, path.join(a.appDir, "config.json"), path.join(isoplanDir, "config.json"));
 	const offices = askOffices(officesOf(config), a.servers, await takenOffice(claudeDir, session));
-	if (!offices.length) return `The earlier session can't be asked: ${a.servers.join(", ")} isn't one of the office servers in config.json. Carry on without the answer.`;
+	if (!offices.length) return {
+		text: `The earlier session can't be asked: ${a.servers.join(", ")} isn't one of the office servers in config.json. Carry on without the answer.`,
+		failed: true
+	};
 	let found = { refused: "" };
 	let office = offices[0];
 	for (const each of offices) {
@@ -18228,7 +18252,10 @@ async function askFromMachine(a) {
 		office = each;
 		if ("home" in found) break;
 	}
-	if ("refused" in found) return `The earlier session can't be asked: ${found.refused} Carry on without the answer.`;
+	if ("refused" in found) return {
+		text: `The earlier session can't be asked: ${found.refused} Carry on without the answer.`,
+		failed: true
+	};
 	const { server } = office;
 	const pairing = await machinePairing(office, config.allowPlainWs, claudeDir, claudeJson, io);
 	const deadline = Date.now() + MAX_WAIT_MS;
@@ -18244,7 +18271,7 @@ async function askFromMachine(a) {
 						v: 1,
 						question: ack
 					});
-					return `acked ${ack}`;
+					return { text: `acked ${ack}` };
 				}
 				return await askRoom(link, question, settings, {
 					key,
@@ -18373,13 +18400,19 @@ async function createPipeServer(o) {
 	};
 	const answer = async (socket, request) => {
 		const hooked = registered.get(request.session);
-		const text = hooked ? await o.ask({
+		const told = hooked ? await o.ask({
 			...request,
 			cwd: hooked.cwd
-		}).catch((err) => `The earlier session couldn't be asked: ${String(err?.message ?? err)}. Carry on without the answer.`) : NOT_CONNECTED;
+		}).catch((err) => ({
+			text: `The earlier session couldn't be asked: ${String(err?.message ?? err)}. Carry on without the answer.`,
+			failed: true
+		})) : {
+			text: NOT_CONNECTED,
+			failed: true
+		};
 		writeLine(socket, {
 			type: "answer",
-			text
+			...told
 		});
 		socket.end();
 	};

@@ -365,7 +365,10 @@ test("hooks: the ask_earlier_session tool is added only once the server says the
   expect(next).toHaveBeenCalledTimes(1);
   expect(r).toEqual({ result: "The earlier session answered your question (q-1):\n\nBecause." });
   expect(h.ran).toEqual([{ argv: ["node", "C:/plugins/isoplan/dist/ask.js", "--session", "s1", "--cwd", "C:/w/repo", "--key", "toolu_01"], stdin: "Why skip archived rows?" }]);
-  expect(await hooks["tool.call"]!(h.$, { tool: ASK, tool_use_id: "t" }, next)).toEqual({ result: "Give the question to ask the earlier session as `question`." });
+  expect(await hooks["tool.call"]!(h.$, { tool: ASK, tool_use_id: "t" }, next)).toEqual({ result: "Give the question to ask the earlier session as `question`.", isError: true });
+  // An ask the script says failed (it exits non-zero) reaches the agent as an error, with its words.
+  h.$.process.run = async () => ({ exitCode: 2, stdout: "The earlier session can't be asked: Only a handoff gives the right to ask a room.\n", stderr: "" });
+  expect(await hooks["tool.call"]!(h.$, { tool: ASK, tool_use_id: "toolu_02", question: "Why?" }, next)).toEqual({ result: "The earlier session can't be asked: Only a handoff gives the right to ask a room.", isError: true });
 });
 
 test("hooks: with several offices, the room is asked, and a late reply acked, through the office that gave the rights", async () => {
@@ -413,7 +416,7 @@ test("hooks: once the rights go, the tool answers that asking is off and runs no
   await vi.waitFor(() => expect(off.tools).toEqual(["ask_earlier_session"]));
   await new Promise((r) => setTimeout(r, 10));
   const next = vi.fn(async () => ({ result: "not this" }));
-  expect(await hooks["tool.call"]!(off.$, { tool: ASK, tool_use_id: "t1", question: "Why?" }, next)).toEqual({ result: expect.stringContaining("Asking the earlier session is off now") });
+  expect(await hooks["tool.call"]!(off.$, { tool: ASK, tool_use_id: "t1", question: "Why?" }, next)).toEqual({ result: expect.stringContaining("Asking the earlier session is off now"), isError: true });
   expect(off.ran).toEqual([]);
 
   vi.resetModules();
