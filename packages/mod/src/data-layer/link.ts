@@ -31,6 +31,9 @@
 // through `sendLive`, only while the link is up: they never wait in the outbox. `onOpen` is told
 // after every hello and `onClose` at every drop, so the runner forgets the connection's drive-policy
 // and sends no driven message on the new one until its first drive-policy has come (runner/session.ts).
+// A runner that hosts experts (protocol 0.13.0) is told which of them the server lists (`hosting`,
+// to `onHosting`), and sends its listing (`experts`) through `sendLive` as well: it is live-only.
+// A session's link passes the experts it may ask (`expert-rights`) on as a line, as `ask-rights`.
 //
 // Given `onError`, a throw in the link's socket handlers or its pacing timer (in `filter`, say) goes
 // to it, and that handler sends nothing more; without it, the throw reaches the process as before.
@@ -42,7 +45,9 @@ import {
   type DriveMessage,
   type DrivenMessage,
   type DrivePolicyMessage,
+  type ExpertsMessage,
   type Facts,
+  type HostingMessage,
   type DropMessage,
   type HandoffMessage,
   type HelloMessage,
@@ -87,6 +92,8 @@ export interface LinkOptions {
   onMessage?: (message: ServerAsk) => void;
   /** Takes the server's drive requests and drive-policy; without it they are logged as not handled. */
   onDrive?: (message: DriveMessage | DrivePolicyMessage) => void;
+  /** Takes the server's word on which of this runner's experts it lists; without it, logged as not handled. */
+  onHosting?: (message: HostingMessage) => void;
   /** Told after every hello, once what waited in the outbox has gone. */
   onOpen?: () => void;
   /** Told each time the connection drops or is closed, before any reconnect. */
@@ -118,8 +125,8 @@ export interface Link {
   update(facts: Facts): void;
   /** A reply, refusal or taken, first sent at `at` (now, unless it waited elsewhere first). One sent while the link is down goes out after the next hello, unless it is older than OUTBOX_MAX_AGE_MS by then. */
   send(message: Outgoing, at?: number): void;
-  /** A driven message, sent now if the link is up; false when it is down, and the message is dropped. */
-  sendLive(message: DrivenMessage): boolean;
+  /** A driven message or an expert listing, sent now if the link is up; false when it is down, and the message is dropped. */
+  sendLive(message: DrivenMessage | ExpertsMessage): boolean;
   /**
    * The projects the office holds, from this connection's welcome; null before one, and from a
    * server too old to send one, which would read another repo's files as the session's own (#74).
@@ -141,6 +148,7 @@ export function createLink({
   onPairingEnded,
   onMessage,
   onDrive,
+  onHosting,
   onOpen,
   onClose,
   filter = (facts) => facts,
@@ -367,7 +375,7 @@ export function createLink({
     } else if (message.type === "error" && message.code === "forged-hello") {
       isTaken = true;
       emit(message);
-    } else if (message.type === "conflict" || message.type === "error" || message.type === "asked" || message.type === "ask-rights") {
+    } else if (message.type === "conflict" || message.type === "error" || message.type === "asked" || message.type === "ask-rights" || message.type === "expert-rights") {
       emit(message);
       if (message.type === "error" && message.code === "not-wanted") {
         isUnwanted = true;
@@ -377,6 +385,8 @@ export function createLink({
       onMessage(message);
     } else if (onDrive && (message.type === "drive" || message.type === "drive-policy")) {
       onDrive(message);
+    } else if (onHosting && message.type === "hosting") {
+      onHosting(message);
     } else {
       emit({ type: "log", text: `the office server sent a ${message.type} message, which this data layer doesn't handle yet` });
     }

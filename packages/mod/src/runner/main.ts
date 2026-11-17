@@ -52,13 +52,18 @@
 // is verifiably Isoplan's, keeping driven sessions to open again. It doesn't stop for lights-off
 // while a driven session's process runs, or while `startAtLogin` is on: then a person who works only
 // on the floor keeps a runner up.
+//
+// It hosts the machine's experts (experts.ts), one for each file in <claude dir>/isoplan/experts, and
+// says so in its hello (`experts`): each office is told which of them it may list (expert-link.ts),
+// and the office's questions to them come as `answer-expert` requests. Their trunks are never
+// reported, and while it hosts any it stays up, lit or not, so they can answer.
 
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { PROTOCOL_VERSION, type DrivenMessage, type RefusalMessage, type ReplyMessage, type TakenMessage } from "@isoplan/protocol";
+import { PROTOCOL_VERSION, type DrivenMessage, type ExpertsMessage, type RefusalMessage, type ReplyMessage, type TakenMessage } from "@isoplan/protocol";
 import { loadConfig, loadSettings, officesOf, type Office } from "../data-layer/config.js";
 import { approvedPath, createApproved } from "../data-layer/approved.js";
 import { approvedHome, machineHomeIo, takesFrom } from "../data-layer/home.js";
@@ -92,6 +97,9 @@ import { managedDir, pluginDirsOf, pluginsDir } from "../install/state.js";
 import { recordedState } from "../install/install.js";
 import { reportSession, sessionLog } from "../data-layer/report-session.js";
 import { askFromMachine } from "../ask/machine.js";
+import { askExpertFromMachine } from "../ask/expert-machine.js";
+import { hostExperts } from "./expert-link.js";
+import { createExperts, expertIgnored, forOffice, type Experts } from "./experts.js";
 import { createPipeServer, type Hooked } from "../pipe/server.js";
 import { createPairLinks } from "./pair-links.js";
 import { startPlaces, startWhere } from "./start-where.js";
@@ -186,7 +194,7 @@ async function worker(): Promise<number> {
   });
   const io = nodeIo();
   const config = () => loadConfig(io, path.join(appDir, "config.json"), path.join(isoplanDir, "config.json"));
-  const settings = () => loadSettings<RunnerSettings & TakeSettings & DriveSettings & NamingSettings & { claudeModel: string; repoSearchDepth: number; startAtLogin: boolean; trayRefreshSeconds: number }>(io, path.join(appDir, "runner.json"), path.join(isoplanDir, "runner.json"));
+  const settings = () => loadSettings<RunnerSettings & TakeSettings & DriveSettings & NamingSettings & { claudeModel: string; repoSearchDepth: number; startAtLogin: boolean; trayRefreshSeconds: number; expertJudgeModel: string; expertWaitSeconds: number }>(io, path.join(appDir, "runner.json"), path.join(isoplanDir, "runner.json"));
   const first = await config();
   // Plain ws:// to another machine would send the machine's credential unencrypted.
   const offices = officesOf(first);
@@ -248,17 +256,24 @@ async function worker(): Promise<number> {
     log,
     onChange: (session) => rehook(session),
     ask: (request) => askFromMachine({ ...request, appDir, scan: scanText }),
+    askExpert: (request) => askExpertFromMachine({ ...request, appDir, scan: scanText }),
     close: (close, remove) => closeFor(close, remove),
   }).catch((err: Error) => (log(`the runner couldn't open its pipe for the sessions' hooks modules: ${err.message}`), null));
   // Each session's title as its latest report pass worked out for the offices, by bare id, for the desktop app's
   // menu (status.ts sessionsSeen); in memory only.
   const titles = new Map<string, string>();
+  // The experts this machine hosts (experts.ts), made once git is; declared here because the first
+  // look below runs before that, and must not read a const declared after it. Their trunks are
+  // never reported: each one's folder is under expertsDir, which keeps them out from the first look.
+  const expertsDir = path.join(isoplanDir, "experts");
+  let experts: Experts | null = null;
   const reporting = watchSessions<Hooked>({
     claudeDir,
     io,
     config,
     isOff,
     log,
+    ignored: expertIgnored(expertsDir, () => experts),
     hooked: (id) => pipe?.hooked(id) ?? null,
     removedFile: path.join(isoplanDir, "runner", "removed.json"),
     held: (id, hooks) => {
@@ -282,6 +297,7 @@ async function worker(): Promise<number> {
             env: hooks.env,
             takesMessages: hooks.messages,
             endsTurns: hooks.endsTurns,
+            asksExperts: hooks.experts,
             emit: (line) => {
               said.emit(line);
               hooks.send(line);
@@ -327,9 +343,26 @@ async function worker(): Promise<number> {
     answerer.close();
     namer.close();
     driver?.close();
+    experts?.close();
   });
   const git = createRunGit();
   const gitMs = async () => (await settings()).gitTimeoutSeconds * 1000;
+  // Ready once the expert files and their states are read; checkouts and groundings go on in the background.
+  const hosted = createExperts({
+    expertsDir,
+    logsDir: path.join(isoplanDir, "logs"),
+    projectsDir: path.join(claudeDir, "projects"),
+    appDir,
+    binary,
+    settings,
+    scan: scanText,
+    git,
+    gitTimeoutMs: gitMs,
+    track: registry.track,
+    log,
+  });
+  experts = hosted;
+  await hosted.start();
   // A git failure is told by its kind; git's own words stay in the log.
   const told = (err: unknown) => {
     if (!(err instanceof HandoffGitError)) throw err;
@@ -367,7 +400,7 @@ async function worker(): Promise<number> {
   // One fork cap for the machine, whichever office asks.
   const forks = createForkSlots();
   let send = (_index: number): Parameters<typeof createRunner>[0]["send"] => () => {};
-  let live = (_index: number) => (_message: DrivenMessage): boolean => false;
+  let live = (_index: number) => (_message: DrivenMessage | ExpertsMessage): boolean => false;
   const isDir = (p: string) => fs.stat(p).then((s) => s.isDirectory(), () => false);
   const drives: DriveOffice[] = [];
   // What each transcript says its folder is, read once, for every office's list of folders.
@@ -410,7 +443,8 @@ async function worker(): Promise<number> {
       // The repos of the folders Claude Code sessions here ran in, within cloneSearchDays, gone or not, and those of the sessions driven from here.
       repoFolders: async () => {
         const since = Date.now() - (await settings()).cloneSearchDays * 86400000;
-        const seen = await sessionFolders(io, path.join(claudeDir, "projects"), since, transcriptFolders, { gone: true });
+        // Never an expert trunk's: its repo isn't one a person worked in here.
+        const seen = (await sessionFolders(io, path.join(claudeDir, "projects"), since, transcriptFolders, { gone: true })).filter((s) => !hosted.isExpertFolder(s.folder));
         for (const r of registry.list()) if (r.kind === "driven" && r.folder) seen.push({ folder: r.folder, at: Date.parse(r.lastActivity) || 0 });
         const repos = await repoFolders(seen, {
           checkout: checkouts.of,
@@ -437,13 +471,22 @@ async function worker(): Promise<number> {
       send: (message) => send(index)(message),
       log,
       isDir,
+      // Only experts whose repo this office takes answer it, as only those are listed to it.
+      experts: forOffice(
+        hosted,
+        async (folder) => {
+          await approved.refresh();
+          return approvedHome(folder, homeIo, approved.repos());
+        },
+        log,
+      ),
       // Only the rooms the data layer would report: inside the askable window, and not held off, as
       // the runner holds a session off when the server doesn't want its project (or git can't place
       // its folder) (reporting.ts). And only in a repo the office takes (#91), as the data layer
-      // would report it.
+      // would report it. Never an expert's trunk, which isn't reported at all.
       isReported: async (session, lead) => {
         const id = forkableId(session);
-        if (!id || reporting.heldOff(id)) return false;
+        if (!id || reporting.heldOff(id) || hosted.isExpertSession(id)) return false;
         if (Date.now() - lead.lastActive > askableMs(await config().catch(() => first))) return false;
         await approved.refresh();
         return (await approvedHome(lead.cwd, homeIo, approved.repos())) !== null;
@@ -500,6 +543,19 @@ async function worker(): Promise<number> {
     return { pairing, runner };
   };
   const answerers = answering.map(runnerFor);
+  // Each office is told which of the machine's experts it may list, over that office's link alone.
+  const hosts = answering.map((office, index) =>
+    hostExperts({
+      experts: hosted,
+      approved: shared.get(office.server)!.approved,
+      home: (folder, repos) => approvedHome(folder, homeIo, repos),
+      scan: scanText,
+      log,
+      send: (m) => live(index)(m),
+      server: office.server,
+      checkMs: first.approvedRefreshMinutes * 60000,
+    }),
+  );
   const drive: Driver = createDriver({
     claudeDir,
     account,
@@ -571,11 +627,12 @@ async function worker(): Promise<number> {
 
   // The supervisor holds stdin open; it closes when the supervisor has gone.
   const gone = new Promise<void>((resolve) => process.stdin.on("end", resolve).on("error", resolve).resume());
-  const links = answerOffices<Office, ReplyMessage | RefusalMessage | TakenMessage, DrivenMessage>({
+  const links = answerOffices<Office, ReplyMessage | RefusalMessage | TakenMessage, DrivenMessage | ExpertsMessage>({
     offices: answering,
     name: (office) => office.server,
     open: (office, said) => {
       const { pairing, runner } = answerers[answering.indexOf(office)]!;
+      const host = hosts[answering.indexOf(office)]!;
       log(`the runner's worker ${process.pid} is answering for this machine through ${office.server}`);
       status.opening(office.server);
       return createLink({
@@ -584,14 +641,16 @@ async function worker(): Promise<number> {
         pairing,
         onMessage: (message) => runner.take(message),
         onDrive: (message) => drive.take(office.server, message),
+        onHosting: host.onHosting,
         // At every hello and every drop, this office's drive-policy no longer holds; nothing driven goes on the new connection until its first one, which `holding` follows.
         onOpen: () => {
           status.opened(office.server);
           drive.linked(office.server);
+          host.onOpen();
           // The renewal before this hello kept the email the office named, if it did.
           void readPairing(pairingPath(claudeDir)).then((all) => status.email(office.server, pairingEntry(all, office.server, account.id)?.email));
         },
-        onClose: () => (status.closed(office.server), drive.unlinked(office.server)),
+        onClose: () => (status.closed(office.server), drive.unlinked(office.server), host.onClose()),
         onNotWanted: () => (status.stopped(office.server, "not-wanted"), said.notWanted()),
         // A revoked or lapsed pairing closes this link: the sessions' links pair the machine again.
         onPairingEnded: () => (status.stopped(office.server, "unpaired"), said.unpaired()),
@@ -603,6 +662,7 @@ async function worker(): Promise<number> {
           ...(hasOrca ? { orca: true } : {}),
           ...(hasDesktop ? { desktop: true } : {}),
           drive: true,
+          experts: true,
           claude: claude.state(),
           starts: startPlaces(process.platform, hasOrca, hasDesktop),
         },
@@ -610,9 +670,10 @@ async function worker(): Promise<number> {
     },
     paired: async (office) => !!pairingEntry(await readPairing(pairingPath(claudeDir)), office.server, account.id)?.credential,
     // Nor while it reports sessions: their links, and the pairing they share, would end with it.
-    idle: () => answerers.every((a) => a.runner.idle()) && reporting.reporting().length === 0 && !pipe?.all().length,
+    idle: () => answerers.every((a) => a.runner.idle()) && reporting.reporting().length === 0 && !pipe?.all().length && hosted.idle(),
     lit: async () => anyRoomSince(io, path.join(claudeDir, "projects"), Date.now() - askableMs(await config().catch(() => first))),
-    keep: async () => drive.held() > 0 || (await settings()).startAtLogin,
+    // An expert's host stays up to answer it.
+    keep: async () => drive.held() > 0 || hosted.hosted().length > 0 || (await settings()).startAtLogin,
     gone,
     log,
     checkMs: CHECK_MS,
@@ -621,6 +682,7 @@ async function worker(): Promise<number> {
   send = links.sender;
   live = links.live;
   const ended = await links.ended;
+  for (const host of hosts) host.stop();
   // Each session's link closes, and its log says so, before the worker exits; one stuck in a pass is left after STOP_WAIT_MS (reporting.ts).
   await reporting.stop();
   await pipe?.close();

@@ -1,7 +1,7 @@
 // The runner's pipe (ADR 0007 step 2) on a real pipe: a named pipe with a name of its own for each
 // test on Windows (a Unix socket elsewhere), in a throwaway config folder. The hooks module's end
 // (client.ts) against the runner's (server.ts), and the ask_earlier_session script (dist/ask.js, rebuilt with
-// every change) against the runner's.
+// every change) against the runner's, and the ask_expert script's runAskExpert, in this process.
 
 import { execFile } from "node:child_process";
 import fs from "node:fs";
@@ -10,6 +10,7 @@ import path from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
 import type { DataLayerLine } from "../lines.js";
 import { modDir, tempRoot } from "../data-layer/fixture.js";
+import { runAskExpert } from "../ask/expert-main.js";
 import { relay } from "./client.js";
 import { closeSession, openPipe, pipeAddress, pipeInfoPath, preparePipe, proofOf, readLines, readPipeInfo, writeLine, writePipeInfo } from "./pipe.js";
 import { createPipeServer, keeps, type PipeServer } from "./server.js";
@@ -272,6 +273,40 @@ test("pipe: the ask_earlier_session script asks through the runner only for a se
   await server.close();
   expect(await askScript(claudeDir, "Why?")).toBe("The earlier session can't be asked right now: this session can't reach Isoplan's runner on this machine. Carry on without the answer.");
   expect(lastExit).toBe(2);
+});
+
+test("pipe: a question for an expert is answered only for a session whose hooks module is connected, in its folder; a malformed one, or one to a runner without experts, closes the connection", async () => {
+  const claudeDir = path.join(tempRoot(), "claude");
+  const asked: unknown[] = [];
+  const server = await createPipeServer({ claudeDir, log: () => {}, onChange: () => {}, ask: async () => ({ text: "" }), askExpert: async (request) => (asked.push(request), { text: `answered: ${request.question}` }) });
+  closing.push(() => server.close());
+  vi.stubEnv("CLAUDE_CONFIG_DIR", claudeDir);
+  closing.push(async () => vi.unstubAllEnvs());
+  const argv = ["--session", "s1", "--cwd", "C:/elsewhere", "--expert", "reporting", "--key", "k1", "--server", "ws://office/data-layer"];
+  expect(await runAskExpert(argv, "How?")).toEqual({ text: "Expert reporting, question k1: Isoplan's runner can't be reached on this machine: this session isn't connected to it, so nothing was sent. Explore this yourself (EXPERT_RUNNER_UNREACHABLE)", code: 2 });
+  expect(asked).toEqual([]);
+
+  const { token } = (await readPipeInfo(claudeDir))!;
+  const hooks = rawClient(server.address, { type: "hello", v: 1, token, session: "s1", cwd: "C:/w/repo", since: 1, messages: true, experts: true, root: "C:/p", version: "0.14.0" });
+  await until(() => !!server.hooked("s1"));
+  expect(server.hooked("s1")!.experts).toBe(true);
+  expect(await runAskExpert(argv, "How?")).toEqual({ text: "answered: How?", code: 0 });
+  expect(asked).toEqual([{ type: "ask-expert", v: 1, token, session: "s1", cwd: "C:/w/repo", servers: ["ws://office/data-layer"], expert: "reporting", question: "How?", blocking: false, key: "k1" }]);
+
+  const malformed = rawClient(server.address, { type: "ask-expert", v: 1, token, session: "s1", cwd: "C:/w", servers: [], expert: "reporting", question: "How?", key: "k2" });
+  await malformed.closed;
+  expect(malformed.got).toEqual([]);
+  expect(asked).toHaveLength(1);
+  hooks.socket.destroy();
+
+  // A runner from before experts: the question goes nowhere, and a hooks module's hello without `experts` says it has none.
+  const older = await runnerEnd();
+  hooksEnd(older.claudeDir);
+  await until(() => !!older.server.hooked("s1"));
+  expect(older.server.hooked("s1")!.experts).toBe(false);
+  const ask = rawClient(older.server.address, { type: "ask-expert", v: 1, token: (await readPipeInfo(older.claudeDir))!.token, session: "s1", cwd: "C:/w", servers: [], expert: "reporting", question: "How?", blocking: true, key: "k3" });
+  await ask.closed;
+  expect(ask.got).toEqual([]);
 });
 
 test("pipe: the desktop app's close, and its end and remove, reach the runner only with the token, and are told whether the session closed; with no runner it is told nothing", async () => {

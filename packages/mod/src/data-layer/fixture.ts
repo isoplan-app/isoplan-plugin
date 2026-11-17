@@ -19,8 +19,10 @@ export const NOW = Date.parse("2026-10-09T12:00:00Z");
 
 // Every temp root made in a test file is removed when that file's tests are done.
 const roots: string[] = [];
-afterAll(() => {
-  for (const root of roots) fs.rmSync(root, { recursive: true, force: true });
+afterAll(async () => {
+  // A write still finishing as the tests end (a session's log, say) holds its folder on Windows for a
+  // moment. The async rm, because rmSync doesn't retry an EPERM (Node 24).
+  await Promise.all(roots.map((root) => fs.promises.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })));
 });
 
 export function tempRoot(): string {

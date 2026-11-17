@@ -12,6 +12,8 @@
 // token, and only for a session whose hooks module is registered now, as that hooks module's
 // session: in its folder, whatever folder the ask names. The token is the worker's alone, not the
 // session's, so it is the user's own processes that can ask, and only for a session that is open.
+// A question for an expert (the ask_expert script, protocol 0.13.0) is answered the same way, by a
+// runner given `askExpert`; one without closes the connection, as for any message it doesn't know.
 // A close (the desktop app's menu) is answered only with the token too: whether the runner closed
 // the headless session it names.
 //
@@ -20,8 +22,9 @@
 
 import { timingSafeEqual } from "node:crypto";
 import net, { type Socket } from "node:net";
+import { expertText } from "../ask/expert-text.js";
 import type { DataLayerLine } from "../lines.js";
-import { newToken, pipeAddress, preparePipe, proofOf, readLines, sessionEnv, writeLine, writePipeInfo, type PipeAsk, type PipeClose, type PipeHello, type PipeHi, type Told } from "./pipe.js";
+import { newToken, pipeAddress, preparePipe, proofOf, readLines, sessionEnv, writeLine, writePipeInfo, type PipeAsk, type PipeAskExpert, type PipeClose, type PipeHello, type PipeHi, type Told } from "./pipe.js";
 
 /** A session's registered hooks module, as the runner reports for it. */
 export interface Hooked {
@@ -30,6 +33,8 @@ export interface Hooked {
   since: number;
   messages: boolean;
   endsTurns: boolean;
+  /** It gives its agent ask_expert once the server says whom it may ask. */
+  experts: boolean;
   root: string;
   version: string;
   /** The variables of the session's own environment it passed on (pipe.ts SESSION_ENV). */
@@ -47,6 +52,8 @@ export interface PipeServerOptions {
   address?: string;
   /** Answers an ask from a session whose hooks module is registered: what the agent is told. */
   ask(request: PipeAsk): Promise<Told>;
+  /** Answers a question for an expert from a session whose hooks module is registered: what the agent is told. */
+  askExpert?(request: PipeAskExpert): Promise<Told>;
   /** Closes the runner's headless session that status.json names by `close`, and with `remove` removes it too: whether its process has ended. */
   close?(close: string, remove: boolean): Promise<boolean>;
   onChange(session: string): void;
@@ -85,6 +92,19 @@ const isClose = (m: Partial<PipeClose>): m is PipeClose => m.type === "close" &&
 
 const isAsk = (m: Partial<PipeAsk>): m is PipeAsk => m.type === "ask" && typeof m.session === "string" && typeof m.cwd === "string" && Array.isArray(m.servers) && m.servers.every((s) => typeof s === "string");
 
+const isAskExpert = (m: Partial<PipeAskExpert>): m is PipeAskExpert =>
+  m.type === "ask-expert" &&
+  typeof m.session === "string" &&
+  typeof m.cwd === "string" &&
+  Array.isArray(m.servers) &&
+  m.servers.every((s) => typeof s === "string") &&
+  typeof m.expert === "string" &&
+  typeof m.question === "string" &&
+  typeof m.blocking === "boolean" &&
+  typeof m.key === "string" &&
+  m.key.length > 0 &&
+  m.key.length <= 100;
+
 export async function createPipeServer(o: PipeServerOptions): Promise<PipeServer> {
   const platform = o.platform ?? process.platform;
   const address = o.address ?? pipeAddress(o.claudeDir, platform);
@@ -104,6 +124,7 @@ export async function createPipeServer(o: PipeServerOptions): Promise<PipeServer
       since: hello.since,
       messages: hello.messages === true,
       endsTurns: hello.endsTurns === true,
+      experts: hello.experts === true,
       root: hello.root,
       version: hello.version,
       env: hello.env && typeof hello.env === "object" ? sessionEnv(hello.env) : {},
@@ -139,6 +160,16 @@ export async function createPipeServer(o: PipeServerOptions): Promise<PipeServer
     socket.end();
   };
 
+  const answerExpert = async (socket: Socket, request: PipeAskExpert, askExpert: NonNullable<PipeServerOptions["askExpert"]>) => {
+    const hooked = registered.get(request.session);
+    const unreachable = (why: string): Told => ({ text: expertText("EXPERT_RUNNER_UNREACHABLE", { expert: request.expert, id: request.key, words: why }), failed: true, code: "EXPERT_RUNNER_UNREACHABLE" });
+    const told: Told = hooked
+      ? await askExpert({ ...request, cwd: hooked.cwd }).catch((err: unknown) => unreachable(String((err as Error)?.message ?? err)))
+      : unreachable("this session isn't connected to it");
+    writeLine(socket, { type: "answer", ...told });
+    socket.end();
+  };
+
   const close = async (socket: Socket, request: PipeClose) => {
     const closed = o.close ? await o.close(request.close, request.remove === true).catch((err: unknown) => (o.log(`couldn't close ${request.close}: ${String((err as Error)?.message ?? err)}`), false)) : false;
     writeLine(socket, { type: "closed", closed });
@@ -151,7 +182,7 @@ export async function createPipeServer(o: PipeServerOptions): Promise<PipeServer
     let said = false;
     let greeted = false;
     readLines(socket, (value) => {
-      const m = (value ?? {}) as Partial<PipeHello & PipeAsk>;
+      const m = (value ?? {}) as Partial<PipeHello & PipeAsk> & Partial<PipeAskExpert>;
       const hi = m as Partial<PipeHi>;
       if (!said && !greeted && hi.type === "hi" && typeof hi.nonce === "string" && hi.nonce.length <= 200) {
         greeted = true;
@@ -162,6 +193,7 @@ export async function createPipeServer(o: PipeServerOptions): Promise<PipeServer
       said = true;
       if (isHello(m)) return register(socket, m);
       if (isAsk(m)) return void answer(socket, m);
+      if (o.askExpert && isAskExpert(m)) return void answerExpert(socket, m, o.askExpert);
       if (isClose(m)) return void close(socket, m);
       socket.destroy();
     });

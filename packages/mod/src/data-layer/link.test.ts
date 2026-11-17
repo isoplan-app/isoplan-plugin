@@ -1,5 +1,5 @@
 import type { AddressInfo } from "node:net";
-import { PROTOCOL_VERSION, type Facts, type HelloMessage, type RunnerHelloMessage } from "@isoplan/protocol";
+import { PROTOCOL_VERSION, type ExpertsMessage, type Facts, type HelloMessage, type RunnerHelloMessage } from "@isoplan/protocol";
 import { afterEach, expect, test } from "vitest";
 import { WebSocketServer, type WebSocket as ServerSocket } from "ws";
 import type { DataLayerLine } from "../lines.js";
@@ -243,6 +243,35 @@ test("link: a runner's link passes drive requests and drive-policy to onDrive, t
   await new Promise((r) => setTimeout(r, 50));
   // The one sent while it was down is gone, not sent after the next hello.
   expect(types(s.got)).toEqual(["runner", "driven", "runner"]);
+});
+
+test("link: a session's link passes the experts it may ask on as a line; a runner's passes hosting to onHosting, and sends its listing only while up", async () => {
+  const s = await server();
+  const { link: session, lines } = link(s.url, { minIntervalMs: 0 });
+  session.update(facts("active"));
+  await until(() => s.got.length === 2);
+  const rights = { type: "expert-rights", v: PROTOCOL_VERSION, experts: [{ name: "reporting", subject: "What leaves a machine.", repo: "isoplan-app", host: "Ada" }] };
+  s.sockets[0]!.send(JSON.stringify(rights));
+  await until(() => lines.some((l) => l.type === "expert-rights"));
+  expect(lines.find((l) => l.type === "expert-rights")).toEqual(rights);
+
+  const runner = await server();
+  const runnerHello: RunnerHelloMessage = { type: "runner", v: PROTOCOL_VERSION, account: hello.account, machine: hello.machine, experts: true };
+  const hosting: unknown[] = [];
+  const { link: l, lines: runnerLines } = link(runner.url, { hello: runnerHello, onHosting: (m) => hosting.push(m) });
+  await until(() => runner.got.length === 1);
+  expect(runner.got[0]).toMatchObject({ type: "runner", experts: true });
+  const listed = { type: "hosting", v: PROTOCOL_VERSION, listed: ["reporting"] };
+  runner.sockets[0]!.send(JSON.stringify(listed));
+  await until(() => hosting.length === 1);
+  expect(hosting).toEqual([listed]);
+  const listing: ExpertsMessage = { type: "experts", v: PROTOCOL_VERSION, experts: [{ name: "reporting", project: { id: "github.com/ada/isoplan-app", name: "isoplan-app" }, subject: "What leaves a machine.", state: "ready" }] };
+  expect(l.sendLive(listing)).toBe(true);
+  await until(() => runner.got.length === 2);
+  expect(runner.got[1]).toMatchObject(listing);
+  runner.sockets[0]!.terminate();
+  await until(() => runnerLines.some((x) => x.type === "status" && x.state === "disconnected"));
+  expect(l.sendLive(listing)).toBe(false);
 });
 
 test("link: replies kept while down are bounded, the oldest dropped first", async () => {

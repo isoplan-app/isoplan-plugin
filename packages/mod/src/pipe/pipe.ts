@@ -15,7 +15,9 @@
 //
 // Each side writes one JSON object per line. A hooks module's end (client.ts, `dist/pipe.js`) says
 // hello for its session and is sent that session's lines (src/lines.ts); the ask_earlier_session script
-// (src/ask/main.ts) asks once and is sent the answer; the desktop app (packages/app) asks the runner
+// (src/ask/main.ts) asks once and is sent the answer, and so does the ask_expert script
+// (src/ask/expert-main.ts, protocol 0.13.0), whose connection a runner from before experts closes,
+// as it does on any message it doesn't know; the desktop app (packages/app) asks the runner
 // to close one of its own headless sessions (`close`, closeSession), and with `remove` to remove it
 // too (#129), and is told whether it did. A runner from before `remove` ignores it and only closes.
 
@@ -23,6 +25,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import fs from "node:fs/promises";
 import net, { type Socket } from "node:net";
 import path from "node:path";
+import type { ExpertCode } from "@isoplan/protocol";
 
 /** What a hooks module's end says as it connects: the session it is for, and how its hooks module runs. */
 export interface PipeHello {
@@ -38,6 +41,8 @@ export interface PipeHello {
   messages: boolean;
   /** The hooks module can end the running turn; absent from an earlier version's. */
   endsTurns?: boolean;
+  /** The hooks module gives its agent ask_expert once the server says whom it may ask; absent from an earlier version's. */
+  experts?: true;
   /** The plugin's folder the hooks module runs from, and its version. */
   root: string;
   version: string;
@@ -57,6 +62,23 @@ export interface PipeAsk {
   key?: string;
   question?: string;
   ack?: string;
+}
+
+/** What the ask_expert script sends: a question for one of the office's experts. */
+export interface PipeAskExpert {
+  type: "ask-expert";
+  v: 1;
+  token: string;
+  session: string;
+  cwd: string;
+  /** The office servers whose rights list the expert. */
+  servers: string[];
+  expert: string;
+  question: string;
+  /** Wait for the answer, up to the runner's expertWaitSeconds, rather than return once it is asked. */
+  blocking: boolean;
+  /** The tool call's id: asked again under it, it is the same question. */
+  key: string;
 }
 
 /** What the desktop app sends: close the runner's headless session that status.json names by `close`. */
@@ -88,11 +110,12 @@ export interface PipeProof {
   proof: string;
 }
 
-/** The runner's one answer to an ask: what the agent is told, and `failed` when the ask failed, so the tool reports an error. */
+/** The runner's one answer to an ask: what the agent is told, and `failed` when the ask failed, so the tool reports an error; an expert ask's says where it stands by `code`. */
 export interface PipeAnswer {
   type: "answer";
   text: string;
   failed?: true;
+  code?: ExpertCode;
 }
 
 /** What the agent is told by an ask, as the runner works it out. */

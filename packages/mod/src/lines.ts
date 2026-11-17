@@ -4,7 +4,7 @@
 // anything it sends back goes through a file the line names, which the runner reads. "The data
 // layer" below is the runner reporting the session (src/data-layer/report-session.ts).
 
-import type { AskedMessage, AskRightsMessage, ConflictMessage, ErrorMessage } from "@isoplan/protocol";
+import type { AskedMessage, AskRightsMessage, ConflictMessage, ErrorMessage, ExpertRightsMessage } from "@isoplan/protocol";
 
 /**
  * The link to the office server. `waiting`: nothing to report yet, so not connected.
@@ -190,9 +190,11 @@ export interface TitleReply {
  * Office server messages are passed on as the server sent them (repair is the data layer's own); an
  * `asked` is the end of a question the session's agent asked the room, arriving after it stopped
  * waiting, and `ask-rights` whether the session may ask its room (#49), each with the office server
- * it came from (#105), which the room is asked through.
+ * it came from (#105), which the room is asked through. An `asked` with `expert` is the end of a
+ * question the agent asked an expert, and `expert-rights` the experts the session may ask through
+ * that office (protocol 0.13.0).
  */
-export type DataLayerLine = StatusLine | TitleAskLine | PairLine | WaitsLine | WindowLine | OwnerAnswerLine | UpdatedLine | SupersededLine | RunnerLine | OwnerMessageLine | LogLine | ConflictMessage | ErrorMessage | FromOffice<AskedMessage> | FromOffice<AskRightsMessage>;
+export type DataLayerLine = StatusLine | TitleAskLine | PairLine | WaitsLine | WindowLine | OwnerAnswerLine | UpdatedLine | SupersededLine | RunnerLine | OwnerMessageLine | LogLine | ConflictMessage | ErrorMessage | FromOffice<AskedMessage> | FromOffice<AskRightsMessage> | FromOffice<ExpertRightsMessage>;
 
 /** A server's message, with the data-layer address of the office server that sent it; none from a data layer before #105. */
 export type FromOffice<M> = M & { server?: string };

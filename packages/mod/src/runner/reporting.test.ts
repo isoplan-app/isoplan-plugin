@@ -64,7 +64,7 @@ function machine(settings: Partial<Config> = {}) {
 type Hooks = { cwd: string; name: string; root?: string; since?: number; env?: Record<string, string> };
 
 /** watchSessions with a stand-in report: each session it starts is kept, and ends when told (or when the runner stops). */
-function watch(m: ReturnType<typeof machine>, o: { isOff?: (folder: string) => Promise<boolean>; isAlive?: (pid: number) => boolean; gapMs?: number; io?: NodeIo; hooked?: Map<string, Hooks>; recheckMs?: number; removedFile?: string } = {}) {
+function watch(m: ReturnType<typeof machine>, o: { isOff?: (folder: string) => Promise<boolean>; isAlive?: (pid: number) => boolean; gapMs?: number; io?: NodeIo; hooked?: Map<string, Hooks>; recheckMs?: number; removedFile?: string; ignored?: (id: string, cwd: string | null) => boolean } = {}) {
   // The hooks modules told an earlier version's data layer reports their session.
   const told: { id: string; name: string }[] = [];
   const started: { id: string; notWanted: Record<string, number>; hooks?: Hooks; cwd: string; end: (ended?: Ended) => void; stoppedFor?: string }[] = [];
@@ -74,7 +74,7 @@ function watch(m: ReturnType<typeof machine>, o: { isOff?: (folder: string) => P
       started.push(entry);
       void s.closed.then((why) => ((entry.stoppedFor = why), resolve({ why: "stopped" })));
     });
-  const w = watchSessions({ claudeDir: m.claudeDir, io: o.io ?? nodeIo(), config: async () => m.config, report, isOff: o.isOff ?? (async () => false), log: () => {}, gapMs: o.gapMs ?? 0, ...(o.recheckMs !== undefined && { recheckMs: o.recheckMs }), ...(o.removedFile && { removedFile: o.removedFile }), ...(o.isAlive && { isAlive: o.isAlive }), ...(o.hooked && { hooked: (id: string) => o.hooked!.get(id) ?? null }), held: (id, hooks) => void told.push({ id, name: hooks.name }) });
+  const w = watchSessions({ claudeDir: m.claudeDir, io: o.io ?? nodeIo(), config: async () => m.config, report, isOff: o.isOff ?? (async () => false), log: () => {}, gapMs: o.gapMs ?? 0, ...(o.recheckMs !== undefined && { recheckMs: o.recheckMs }), ...(o.removedFile && { removedFile: o.removedFile }), ...(o.isAlive && { isAlive: o.isAlive }), ...(o.ignored && { ignored: o.ignored }), ...(o.hooked && { hooked: (id: string) => o.hooked!.get(id) ?? null }), held: (id, hooks) => void told.push({ id, name: hooks.name }) });
   watching.push(w);
   return { w, started, told, ids: () => started.map((s) => s.id) };
 }
@@ -521,6 +521,28 @@ test("quiet past idleMinutes, the folder gone, or the plugin off for the folder:
   await until(() => ids().includes("on"));
   await w.look();
   expect(ids()).toEqual(["on"]);
+});
+
+test("a session `ignored` says no to is never reported: by its id before its folder is known, and by its folder once it is; with a hooks module too", async () => {
+  const m = machine();
+  const experts = path.join(m.repo, "..", "experts");
+  fs.mkdirSync(experts);
+  const hooked = new Map<string, Hooks>([["hooked-trunk", { cwd: experts, name: "trunk's" }]]);
+  const asked: [string, string | null][] = [];
+  m.write("trunk", null);
+  m.write("in-experts", experts);
+  m.write("hooked-trunk", experts);
+  m.write("on");
+  const ignored = (id: string, cwd: string | null) => (asked.push([id, cwd]), id === "trunk" || id === "hooked-trunk" || cwd === experts);
+  const { w, ids } = watch(m, { hooked, ignored });
+  await until(() => ids().includes("on"));
+  m.write("trunk", experts);
+  await w.look();
+  await w.look();
+  expect(ids()).toEqual(["on"]);
+  // Asked by id first, with no folder; then again once the transcript named one.
+  expect(asked).toContainEqual(["in-experts", null]);
+  expect(asked).toContainEqual(["in-experts", experts]);
 });
 
 test("a runner started again reports each live session at its first look, and then, one at a time, those quiet within lightsOffHours", async () => {

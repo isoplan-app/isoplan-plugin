@@ -4,7 +4,7 @@ import { expect, test } from "vitest";
 import type { Exec } from "../connect/dialog.js";
 import { tempRoot } from "../data-layer/fixture.js";
 import { hiddenLauncher, launcherPaths, wscriptPath } from "./hidden-launch.js";
-import { installWake, uninstall, wakeScriptPath } from "./install.js";
+import { installWake, RUNNER_FILES, uninstall, wakeScriptPath } from "./install.js";
 import { autostartEntry, autostartPath, launchAgentLabel, launchAgentPath, launchAgentPlist, loginLauncherPath, registerLoginItem, runValueName, unregisterLoginItem, windowsLoginCommand } from "./login-item.js";
 
 const RUN_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -157,7 +157,8 @@ test("install adds the login item by default and takes it out while runner.json'
   const root = tempRoot();
   const claudeDir = path.join(root, ".claude");
   const plugin = path.join(root, "plugin");
-  for (const file of ["config.json", "secret-patterns.json", "prompts/instructions.md", "prompts/question.md", "prompts/brief.md", "prompts/spin-off.md", "prompts/naming.md", "dist/connect.js", "dist/runner.js", "dist/wake.js", "dist/data-layer.js"]) {
+  // runner.json is written empty here, then copied over below.
+  for (const file of [...RUNNER_FILES, "dist/wake.js", "dist/data-layer.js"]) {
     fs.mkdirSync(path.dirname(path.join(plugin, file)), { recursive: true });
     fs.writeFileSync(path.join(plugin, file), "");
   }

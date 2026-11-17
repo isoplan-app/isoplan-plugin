@@ -49,6 +49,10 @@
 // `removedFile` with its transcript's write time, so a runner started again doesn't report it again on
 // its first look either; it is reported again once its transcript is written after that (resumed in a
 // terminal, say), or its hooks module connects.
+//
+// A session `ignored` says no to is never reported, with or without a hooks module: an expert's
+// trunks, which run under the experts folder and never leave this machine. It is asked first by id
+// (the folder may not be known yet), and again once the transcript names a folder.
 
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -100,6 +104,8 @@ export interface ReportingOptions<H extends HookedSession = HookedSession> {
   held?: (sessionId: string, hooks: H) => void;
   /** Whether Claude Code lists the plugin as uninstalled or disabled for a folder. */
   isOff: (folder: string) => Promise<boolean>;
+  /** Whether a session is never reported (an expert's trunk); `cwd` is null while its transcript names no folder yet. */
+  ignored?: (sessionId: string, cwd: string | null) => boolean;
   log: (text: string) => void;
   isAlive?: (pid: number) => boolean;
   /** This process's pid, which its sessions' locks name. */
@@ -287,6 +293,7 @@ export function watchSessions<H extends HookedSession>(o: ReportingOptions<H>): 
         const id = entry.name.slice(0, -".jsonl".length);
         // The id names a file in the live folder, so it must be a plain name.
         if (entry.isDir || !entry.name.endsWith(".jsonl") || !/^[\w-]+$/.test(id)) continue;
+        if (o.ignored?.(id, seen.get(id)?.cwd ?? null)) continue;
         const file = path.join(projectsDir, dir.name, entry.name);
         const st = await io.stat(file);
         if (!st) continue;
@@ -358,6 +365,10 @@ export function watchSessions<H extends HookedSession>(o: ReportingOptions<H>): 
         if (s.toldAt !== null && now - s.toldAt < recheckMs + 2 * config.runnerRetrySeconds * 1000) continue;
         s.cwd ??= await cwdOf(io, file, st.size);
         if (!s.cwd) continue; // nothing in it names a folder yet: looked at again next time
+        if (o.ignored?.(id, s.cwd)) {
+          s.endedAt = st.mtimeMs;
+          continue;
+        }
         if (!(await fs.stat(s.cwd).then((d) => d.isDirectory(), () => false)) || (await o.isOff(s.cwd))) {
           s.endedAt = st.mtimeMs;
           continue;

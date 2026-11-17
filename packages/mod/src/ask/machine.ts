@@ -16,7 +16,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { MAX_QUESTION_LENGTH, PROTOCOL_VERSION, type HelloMessage, type Project } from "@isoplan/protocol";
-import { loadConfig, loadSettings, officesOf, type Office } from "../data-layer/config.js";
+import { loadConfig, loadSettings, officesOf, type Config, type Office } from "../data-layer/config.js";
 import { approvedPath } from "../data-layer/approved.js";
 import { commandHome, machineHomeIo } from "../data-layer/home.js";
 import { cachedRemoteNames } from "../data-layer/remote-names.js";
@@ -28,7 +28,7 @@ import { takenOffice } from "../handoff/taken-office.js";
 import type { Told } from "../pipe/pipe.js";
 import { askOffices, askRoom, MAX_WAIT_MS, TokenExpired, type AskSettings } from "./ask.js";
 
-const CONNECT_MS = 20000;
+export const CONNECT_MS = 20000;
 
 export interface MachineAsk {
   session: string;
@@ -63,19 +63,10 @@ export async function askFromMachine(a: MachineAsk): Promise<Told> {
   if (hit) return { text: `The question wasn't sent: it looks like it holds a secret (it matches the secret pattern ${hit}). Ask it again without that, or carry on without the answer.`, failed: true };
   const settings = await loadSettings<AskSettings>(io, path.join(a.appDir, "runner.json"), path.join(isoplanDir, "runner.json"));
   const config = await loadConfig(io, path.join(a.appDir, "config.json"), path.join(isoplanDir, "config.json"));
-  const offices = askOffices(officesOf(config), a.servers, await takenOffice(claudeDir, session));
-  if (!offices.length) return { text: `The earlier session can't be asked: ${a.servers.join(", ")} isn't one of the office servers in config.json. Carry on without the answer.`, failed: true };
-  // Nothing of a repo the office doesn't take is sent, its id included (#91).
-  let found: Awaited<ReturnType<typeof commandHome>> = { refused: "" };
-  let office = offices[0]!;
-  for (const each of offices) {
-    found = each.plainRefused
-      ? { refused: `config.json's server ${each.server} is plain ws:// to another machine.` }
-      : await commandHome(cwd, machineHomeIo(config.workspaceRepos, cachedRemoteNames(claudeDir)), { file: approvedPath(claudeDir, each.server), server: each.server, maxAgeMs: config.approvedMaxAgeMinutes * 60000 });
-    office = each;
-    if ("home" in found) break;
-  }
+  const found = await askIn(config, a.servers, session, cwd, claudeDir);
+  if (!found) return { text: `The earlier session can't be asked: ${a.servers.join(", ")} isn't one of the office servers in config.json. Carry on without the answer.`, failed: true };
   if ("refused" in found) return { text: `The earlier session can't be asked: ${found.refused} Carry on without the answer.`, failed: true };
+  const { office } = found;
   const { server } = office;
   const pairing = await machinePairing(office, config.allowPlainWs, claudeDir, claudeJson, io);
   // One bound for the whole wait, a retry after an expired token included.
@@ -104,8 +95,27 @@ export async function askFromMachine(a: MachineAsk): Promise<Told> {
   }
 }
 
-// The session's hello, as its own link says it, with the machine's token when it has one.
-async function hello(session: string, cwd: string, token: string | undefined, project: Project, claudeJson: string, io: ReturnType<typeof nodeIo>): Promise<HelloMessage> {
+/**
+ * The office to ask in, of those `servers` names (askOffices), with the session's project there: the
+ * first whose list takes the session's repo. Why none does, the last one's reason; null when none of
+ * `servers` is in config.json.
+ */
+export async function askIn(config: Config, servers: readonly string[], session: string, cwd: string, claudeDir: string): Promise<{ office: Office; home: Project } | { refused: string } | null> {
+  const offices = askOffices(officesOf(config), servers, await takenOffice(claudeDir, session));
+  if (!offices.length) return null;
+  // Nothing of a repo the office doesn't take is sent, its id included (#91).
+  let found: Awaited<ReturnType<typeof commandHome>> = { refused: "" };
+  for (const each of offices) {
+    found = each.plainRefused
+      ? { refused: `config.json's server ${each.server} is plain ws:// to another machine.` }
+      : await commandHome(cwd, machineHomeIo(config.workspaceRepos, cachedRemoteNames(claudeDir)), { file: approvedPath(claudeDir, each.server), server: each.server, maxAgeMs: config.approvedMaxAgeMinutes * 60000 });
+    if ("home" in found) return { office: each, home: found.home };
+  }
+  return found;
+}
+
+/** The session's hello, as its own link says it, with the machine's token when it has one. */
+export async function hello(session: string, cwd: string, token: string | undefined, project: Project, claudeJson: string, io: ReturnType<typeof nodeIo>): Promise<HelloMessage> {
   return {
     type: "hello",
     v: PROTOCOL_VERSION,
@@ -118,8 +128,8 @@ async function hello(session: string, cwd: string, token: string | undefined, pr
   };
 }
 
-// This machine's pairing with `server`, under the machine's Claude account.
-async function machinePairing(office: Office, allowPlainWs: boolean, claudeDir: string, claudeJson: string, io: ReturnType<typeof nodeIo>) {
+/** This machine's pairing with `server`, under the machine's Claude account. */
+export async function machinePairing(office: Office, allowPlainWs: boolean, claudeDir: string, claudeJson: string, io: ReturnType<typeof nodeIo>) {
   const { server } = office;
   const account = await accountOf({ readText, run: io.run }, claudeJson, os.homedir());
   const file = pairingPath(claudeDir);
