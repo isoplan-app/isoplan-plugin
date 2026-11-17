@@ -209,6 +209,8 @@ export const HelloMessageSchema = z.object({
  * runner can open them, and `orca` and `desktop` only where `orca` and `desktop` are said. The server
  * sends a start with a `mode` only to a runner that says `starts`, and only one of its places: a
  * runner from before 0.10.0 drops the field it doesn't know and would run the session from the floor.
+ * `experts` (protocol 0.13.0): this runner hosts experts. It answers `hosting` with `experts`, and
+ * takes `answer-expert` requests; the server sends neither to a runner that didn't say it.
  */
 export const RunnerHelloMessageSchema = z.object({
   type: z.literal("runner"),
@@ -221,6 +223,7 @@ export const RunnerHelloMessageSchema = z.object({
   drive: z.boolean().optional(),
   claude: ClaudeCliSchema.optional(),
   starts: z.array(StartModeSchema).max(4).optional(),
+  experts: z.literal(true).optional(),
 });
 
 /** All of the session's facts. Sent on connect and on repair. */
@@ -253,6 +256,61 @@ export const MAX_OWNER_MESSAGE_LENGTH = 20000;
  */
 export const OwnerMessageRefusalSchema = z.enum(["not-owner", "detached", "no-submit", "ended", "dropped", "no-answer"]);
 
+// Experts (protocol 0.13.0): read-only agents a machine's runner hosts, each grounded in one repo,
+// which any session in an office that holds that repo may ask (ask_expert), from any machine,
+// through the office server. These shared pieces come before the reply, refusal and request schemas,
+// which use them.
+
+/** The most experts a runner lists, or a session is told it may ask (protocol 0.13.0). */
+export const MAX_EXPERTS = 20;
+/** The longest subject an expert lists: what to ask it about, and before which changes. */
+export const MAX_EXPERT_SUBJECT_LENGTH = 1000;
+/**
+ * The longest answer an expert's reply carries, citation block included: the hooks' ANSWER_MAX (mod
+ * ask/text.ts), so quote() never cuts it. The runner cuts the answer's body to fit, never the block.
+ */
+export const MAX_EXPERT_ANSWER_LENGTH = 8000;
+
+/** An expert's name, as its file is named: `~/.claude/isoplan/experts/<name>.json`. */
+export const ExpertNameSchema = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/, "lowercase letters, digits and dashes, at most 63");
+/** A full commit hash, as a handoff repo's. */
+const Commit = z.string().regex(/^([0-9a-f]{40}|[0-9a-f]{64})$/, "a full commit hash");
+const Subject = z.string().trim().min(1).max(MAX_EXPERT_SUBJECT_LENGTH);
+
+/** Every situation ask_expert tells its agent about, by a stable code. */
+export const ExpertCodeSchema = z.enum([
+  "EXPERT_RUNNER_UNREACHABLE",
+  "EXPERT_UNKNOWN",
+  "EXPERT_CAP",
+  "EXPERT_QUESTION_HELD",
+  "EXPERT_PLUGIN_OLD",
+  "EXPERT_QUEUED",
+  "EXPERT_STARTING",
+  "EXPERT_FORK_FAILED",
+  "EXPERT_ANSWER_WITHHELD",
+  "EXPERT_DROPPED",
+]);
+/** `starting`: no generation of it has passed its proof question yet; `ready`: its junior answers; `failed`: its last grounding failed and none answers. */
+export const ExpertStateSchema = z.enum(["starting", "ready", "failed"]);
+/** The host's caps, from the expert file: questions per asking session per day, open questions per asking session, the expert's daily token budget. */
+export const ExpertCapSchema = z.enum(["asker-day", "asker-open", "expert-tokens"]);
+
+/** One expert a runner hosts, as it lists it to an office server whose list takes its repo. */
+export const ExpertListingSchema = z.object({ name: ExpertNameSchema, project: ProjectSchema, subject: Subject, state: ExpertStateSchema });
+/** One expert a session may ask: `repo` is its project's short name, `host` the hosting person's name. */
+export const ExpertRightSchema = z.object({ name: ExpertNameSchema, subject: Subject, repo: z.string().min(1), host: z.string() });
+
+/**
+ * Why the host's runner won't answer an expert question, beside an `unavailable` refusal's `detail`:
+ * one of the expert file's caps is reached (`frees`, when it frees), the fork couldn't answer, or this
+ * machine hosts no expert by that name now.
+ */
+export const ExpertRefusalSchema = z.discriminatedUnion("code", [
+  z.object({ code: z.literal("EXPERT_CAP"), cap: ExpertCapSchema, limit: z.number().int().positive(), frees: z.iso.datetime({ offset: true }).optional() }),
+  z.object({ code: z.literal("EXPERT_FORK_FAILED") }),
+  z.object({ code: z.literal("EXPERT_UNKNOWN") }),
+]);
+
 /** A cap on the answers a machine gives: a room's per hour, the owner's per day, or the owner's tokens per day. */
 export const CapSchema = z.enum(["room-hour", "owner-day", "owner-tokens"]);
 
@@ -274,6 +332,9 @@ export const ReplyMessageSchema = z.discriminatedUnion("kind", [
   z.object({ type: z.literal("reply"), v: Version, id: RequestId, kind: z.literal("owner-message"), queued: z.literal(true).optional() }),
   // The handoff's session is in front in Orca now (protocol 0.3.8); one that couldn't be is refused `unavailable`.
   z.object({ type: z.literal("reply"), v: Version, id: RequestId, kind: z.literal("focus") }),
+  // The expert's answer (protocol 0.13.0), its citation block and changed-since marks already in
+  // `answer`; `commit` and `branch` are what the answer describes: the expert's read checkout then.
+  z.object({ type: z.literal("reply"), v: Version, id: RequestId, kind: z.literal("answer-expert"), answer: z.string().min(1).max(MAX_EXPERT_ANSWER_LENGTH), commit: Commit, branch: BranchName }),
 ]);
 
 /**
@@ -305,7 +366,9 @@ export const RefusalMessageSchema = z.discriminatedUnion("reason", [
     unchecked: z.array(z.string().min(1)).optional(),
   }),
   // `code` (protocol 0.8.0 on): on an owner-message's refusal, why, for the floor to tell apart.
-  z.object({ type: z.literal("refusal"), v: Version, id: RequestId, reason: z.literal("unavailable"), detail: z.string().min(1), code: OwnerMessageRefusalSchema.optional() }),
+  // `expert` (protocol 0.13.0 on): on an answer-expert's refusal, why the host won't answer it, which
+  // ends the question; without it, the server asks again later.
+  z.object({ type: z.literal("refusal"), v: Version, id: RequestId, reason: z.literal("unavailable"), detail: z.string().min(1), code: OwnerMessageRefusalSchema.optional(), expert: ExpertRefusalSchema.optional() }),
 ]);
 
 /**
@@ -391,6 +454,47 @@ export const AskedAckMessageSchema = z.object({
   type: z.literal("asked-ack"),
   v: Version,
   question: RequestId,
+});
+
+/**
+ * The experts this runner hosts (protocol 0.13.0), as it lists them to this office server, each one
+ * whose repo the server's approved list takes. Sent only by a runner that said `experts`, only while
+ * its link is up (never through the reply outbox), and never on a connection before that
+ * connection's first `hosting`. The runner works the listing out again on every `hosting`, on every
+ * change to its experts and every few minutes, and sends it when it differs from the last one it
+ * sent on the connection; the first on a connection is always sent, even an empty one. It sends none
+ * while it has no approved list. Each one replaces the last. Names are unique.
+ */
+export const ExpertsMessageSchema = z
+  .object({
+    type: z.literal("experts"),
+    v: Version,
+    experts: z.array(ExpertListingSchema).max(MAX_EXPERTS),
+  })
+  .superRefine((message, context) => {
+    const seen = new Set<string>();
+    message.experts.forEach((expert, i) => {
+      if (seen.has(expert.name)) context.addIssue({ code: "custom", path: ["experts", i, "name"], message: `the name ${expert.name} is listed once only` });
+      seen.add(expert.name);
+    });
+  });
+
+/**
+ * A session asks an expert a question (protocol 0.13.0), on its own short link with the session's
+ * hello, as ask-room is. `key` is the tool call's id: asked again under it, it is the same question.
+ * `blocking`: the agent waits a few seconds for the answer. The server answers `asked`, or an error
+ * whose code is `EXPERT_UNKNOWN`, `EXPERT_CAP` or `EXPERT_PLUGIN_OLD` (or `ask-refused` and the
+ * pairing codes, as for ask-room). It is a message of its own, not an ask-room with an expert, so a
+ * server from before experts refuses it rather than asking a room. The session then polls it with
+ * ask-check and acks its end with asked-ack, as for a room question.
+ */
+export const AskExpertMessageSchema = z.object({
+  type: z.literal("ask-expert"),
+  v: Version,
+  expert: ExpertNameSchema,
+  question: z.string().trim().min(1).max(MAX_QUESTION_LENGTH),
+  blocking: z.boolean(),
+  key: z.string().min(1).max(100),
 });
 
 const driven = { type: z.literal("driven"), v: Version };
@@ -563,6 +667,8 @@ export const DataLayerMessageSchema = z.discriminatedUnion("type", [
   AskCheckMessageSchema,
   AskedAckMessageSchema,
   DrivenMessageSchema,
+  ExpertsMessageSchema,
+  AskExpertMessageSchema,
 ]);
 
 // Office server → data layer.
@@ -675,6 +781,22 @@ export const RequestMessageSchema = z.discriminatedUnion("kind", [
     kind: z.literal("focus"),
     handoff: HandoffId,
   }),
+  // A session asks one of this runner's experts (protocol 0.13.0), sent only to a runner that said
+  // `experts`. `questionId` is the server's id for the question: the same across every request sent
+  // for it, so the host answers it once, and the id its health log names. `asker` is the asking
+  // session's id, which the expert file's caps count by; `from` is the asking person.
+  z.object({
+    type: z.literal("request"),
+    v: Version,
+    id: RequestId,
+    kind: z.literal("answer-expert"),
+    expert: ExpertNameSchema,
+    questionId: RequestId,
+    question: z.string().trim().min(1).max(MAX_QUESTION_LENGTH),
+    blocking: z.boolean(),
+    from: Account,
+    asker: z.string().min(1),
+  }),
 ]);
 
 /**
@@ -755,6 +877,9 @@ export const HandedOverMessageSchema = z.object({
  * `text` is the question as it was asked, `owner` the name of the person whose session answers, and
  * `key` the ask's own key.
  * An answered or dropped question is sent again down the session's own link until it is acked.
+ * A question asked of an expert (protocol 0.13.0) has `expert`, and `owner` is the host's name; its
+ * `code` says where it stands for ask_expert, and an answered one has the `commit` and `branch` its
+ * answer describes.
  */
 export const AskedMessageSchema = z.object({
   type: z.literal("asked"),
@@ -767,6 +892,10 @@ export const AskedMessageSchema = z.object({
   owner: z.string().optional(),
   /** The `key` the question was asked under, so the asking side knows which of its asks it was. */
   key: z.string().min(1).max(100).optional(),
+  expert: ExpertNameSchema.optional(),
+  code: ExpertCodeSchema.optional(),
+  commit: Commit.optional(),
+  branch: BranchName.optional(),
 });
 
 /**
@@ -780,6 +909,30 @@ export const AskRightsMessageSchema = z.object({
   room: z.string().min(1),
   owner: Account,
   granted: z.boolean(),
+});
+
+/**
+ * The experts this session may ask now (protocol 0.13.0), the whole list each time, sorted by name:
+ * sent down the session's own link after its `full`, and whenever the list changes, only to a session
+ * whose fact says `asksExperts`. An empty list means none.
+ */
+export const ExpertRightsMessageSchema = z.object({
+  type: z.literal("expert-rights"),
+  v: Version,
+  experts: z.array(ExpertRightSchema).max(MAX_EXPERTS),
+});
+
+/**
+ * Which of this runner's experts the server shows in at least one office (protocol 0.13.0), sent only
+ * to a runner that said `experts`: once its hello is let in (as the server last kept them, or none),
+ * after each `experts` message, and whenever the offices change. The runner sends no `experts` on a
+ * connection before that connection's first `hosting`, so a server from before experts, which sends
+ * none, is never sent one.
+ */
+export const HostingMessageSchema = z.object({
+  type: z.literal("hosting"),
+  v: Version,
+  listed: z.array(ExpertNameSchema).max(MAX_EXPERTS),
 });
 
 const drive = { type: z.literal("drive"), v: Version, id: DriveId, by: Account };
@@ -909,6 +1062,8 @@ export const OfficeServerMessageSchema = z.discriminatedUnion("type", [
   AskRightsMessageSchema,
   DriveMessageSchema,
   DrivePolicyMessageSchema,
+  ExpertRightsMessageSchema,
+  HostingMessageSchema,
 ]);
 
 export type HandoffRepo = z.infer<typeof HandoffRepoSchema>;
@@ -952,6 +1107,16 @@ export type DrivenMessage = z.infer<typeof DrivenMessageSchema>;
 export type DrivenKind = DrivenMessage["kind"];
 export type DriveRefusal = Extract<DrivenMessage, { kind: "refused" }>;
 export type DriveRefusalReason = DriveRefusal["reason"];
+export type ExpertListing = z.infer<typeof ExpertListingSchema>;
+export type ExpertRight = z.infer<typeof ExpertRightSchema>;
+export type ExpertCode = z.infer<typeof ExpertCodeSchema>;
+export type ExpertState = z.infer<typeof ExpertStateSchema>;
+export type ExpertCap = z.infer<typeof ExpertCapSchema>;
+export type ExpertRefusal = z.infer<typeof ExpertRefusalSchema>;
+export type ExpertsMessage = z.infer<typeof ExpertsMessageSchema>;
+export type AskExpertMessage = z.infer<typeof AskExpertMessageSchema>;
+export type ExpertRightsMessage = z.infer<typeof ExpertRightsMessageSchema>;
+export type HostingMessage = z.infer<typeof HostingMessageSchema>;
 /**
  * The reasons the floor shows for a refused drive request: a runner's, and `offline`, the server's
  * own, for a request it refused at once because the owner's runner isn't linked (nothing is queued).

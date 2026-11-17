@@ -3,6 +3,9 @@ import {
   MAX_BRANCH_LENGTH,
   MAX_DETAIL_LENGTH,
   MAX_DRIVE_ID_LENGTH,
+  MAX_EXPERT_ANSWER_LENGTH,
+  MAX_EXPERT_SUBJECT_LENGTH,
+  MAX_EXPERTS,
   MAX_FOLDER_LENGTH,
   MAX_FOLDER_REPOS,
   MAX_HOLDING,
@@ -10,6 +13,7 @@ import {
   MAX_OWNER_MESSAGE_LENGTH,
   MAX_OUTPUT_LENGTH,
   MAX_PROMPT_LENGTH,
+  MAX_QUESTION_LENGTH,
   MAX_REPLY_LENGTH,
   MAX_REPO_BRANCHES,
   MAX_REPO_FOLDERS,
@@ -126,6 +130,8 @@ const handoff: Handoff = {
 const room = "room:claude-code:s1";
 const driving = "claude-code:0b5c4d3e-0000-4000-8000-000000000001";
 const isoplan = { id: "github.com/isoplan-app/isoplan", name: "isoplan" };
+const commit = "0123456789abcdef0123456789abcdef01234567";
+const expertListing = { name: "adr-0004", project: isoplan, subject: "What session text may leave a machine (ADR 0004). Ask before you send data off one.", state: "ready" };
 
 const valid = {
   hello: {
@@ -244,6 +250,15 @@ const valid = {
   "driven claude installing": { type: "driven", v, kind: "claude", claude: "missing", doing: "installing", progress: "Downloading Claude Code...", id: "c1" },
   "driven claude signing in": { type: "driven", v, kind: "claude", claude: "signed-out", doing: "signing-in", url: "https://claude.ai/oauth/authorize?code=true", id: "c2" },
   "driven claude failed": { type: "driven", v, kind: "claude", claude: "missing", failed: "The installer stopped with code 1.", id: "c1" },
+  "runner that hosts experts": { type: "runner", v, account: adam, machine: { name: "sevengill" }, experts: true },
+  experts: { type: "experts", v, experts: [expertListing] },
+  hosting: { type: "hosting", v, listed: ["adr-0004"] },
+  "expert-rights": { type: "expert-rights", v, experts: [{ name: "adr-0004", subject: expertListing.subject, repo: "isoplan", host: "Adam" }] },
+  "ask-expert": { type: "ask-expert", v, expert: "adr-0004", question: "May a session's title leave the machine?", blocking: true, key: "toolu_02" },
+  "request answer-expert": { type: "request", v, id: "expert-x-0123456789-a1b2c3", kind: "answer-expert", expert: "adr-0004", questionId: "x-0123456789", question: "May a session's title leave the machine?", blocking: false, from: sam, asker: "claude-code:s2" },
+  "reply answer-expert": { type: "reply", v, id: "expert-x-0123456789-a1b2c3", kind: "answer-expert", answer: "Yes: the title is a fact.\n\nCited, on main at 0123456:\n- docs/adr/0004-what-leaves-a-machine.md", commit, branch: "main" },
+  "refusal of an answer-expert": { type: "refusal", v, id: "expert-x-0123456789-a1b2c3", reason: "unavailable", detail: "Over this expert's cap.", expert: { code: "EXPERT_CAP", cap: "asker-day", limit: 30, frees: "2026-11-18T09:00:00.000Z" } },
+  "asked of an expert": { type: "asked", v, question: "x-0123456789", text: "May a session's title leave the machine?", state: "answered", answer: "Yes.", owner: "Adam", key: "toolu_02", expert: "adr-0004", commit, branch: "main" },
 };
 
 const parsers = {
@@ -338,6 +353,15 @@ const parsers = {
   "driven claude installing": parseDataLayerMessage,
   "driven claude signing in": parseDataLayerMessage,
   "driven claude failed": parseDataLayerMessage,
+  "runner that hosts experts": parseDataLayerMessage,
+  experts: parseDataLayerMessage,
+  hosting: parseOfficeServerMessage,
+  "expert-rights": parseOfficeServerMessage,
+  "ask-expert": parseDataLayerMessage,
+  "request answer-expert": parseOfficeServerMessage,
+  "reply answer-expert": parseDataLayerMessage,
+  "refusal of an answer-expert": parseDataLayerMessage,
+  "asked of an expert": parseOfficeServerMessage,
 } satisfies Record<keyof typeof valid, (value: unknown) => ParseResult<unknown>>;
 
 // Each message with one field made wrong, and the path the error should name.
@@ -433,6 +457,15 @@ const broken: Record<keyof typeof valid, [unknown, string]> = {
   "driven claude installing": [{ ...valid["driven claude installing"], doing: "updating" }, "doing"],
   "driven claude signing in": [{ ...valid["driven claude signing in"], url: "http://claude.ai/oauth/authorize" }, "url"],
   "driven claude failed": [{ ...valid["driven claude failed"], claude: "gone" }, "claude"],
+  "runner that hosts experts": [{ ...valid["runner that hosts experts"], experts: false }, "experts"],
+  experts: [{ ...valid.experts, experts: [{ ...expertListing, state: "busy" }] }, "experts[0].state"],
+  hosting: [{ ...valid.hosting, listed: ["ADR 0004"] }, "listed[0]"],
+  "expert-rights": [{ ...valid["expert-rights"], experts: [{ ...valid["expert-rights"].experts[0], repo: "" }] }, "experts[0].repo"],
+  "ask-expert": [{ ...valid["ask-expert"], blocking: "yes" }, "blocking"],
+  "request answer-expert": [{ ...valid["request answer-expert"], questionId: "" }, "questionId"],
+  "reply answer-expert": [{ ...valid["reply answer-expert"], commit: "0123456" }, "commit"],
+  "refusal of an answer-expert": [{ ...valid["refusal of an answer-expert"], expert: { code: "EXPERT_CAP", cap: "asker-week", limit: 30 } }, "expert.cap"],
+  "asked of an expert": [{ ...valid["asked of an expert"], code: "EXPERT_LOST" }, "code"],
 };
 
 describe.each(Object.keys(valid) as (keyof typeof valid)[])("%s", (type) => {
@@ -863,5 +896,94 @@ describe("driven sessions", () => {
       expect(result).toMatchObject({ ok: false, kind: "invalid" });
       expect(!result.ok && result.error).toContain("kind");
     }
+  });
+});
+
+describe("experts", () => {
+  const listing = (experts: unknown[]) => parseDataLayerMessage({ ...valid.experts, experts });
+  const rights = (experts: unknown[]) => parseOfficeServerMessage({ ...valid["expert-rights"], experts });
+
+  test("an expert's name is lowercase letters, digits and dashes, starting with a letter or digit, at most 63", () => {
+    for (const name of ["a", "adr-0004", "0-day", "a".repeat(63)]) expect(listing([{ ...expertListing, name }])).toMatchObject({ ok: true });
+    for (const name of ["", "-adr", "ADR", "adr_0004", "adr 0004", "a".repeat(64)]) expect(listing([{ ...expertListing, name }])).toMatchObject({ ok: false, kind: "invalid" });
+    expect(parseDataLayerMessage({ ...valid["ask-expert"], expert: "Adr" })).toMatchObject({ ok: false, kind: "invalid" });
+    expect(parseOfficeServerMessage({ ...valid.hosting, listed: ["a".repeat(64)] })).toMatchObject({ ok: false, kind: "invalid" });
+  });
+
+  test("a subject is 1 to MAX_EXPERT_SUBJECT_LENGTH characters once trimmed, in a listing and in rights", () => {
+    const right = valid["expert-rights"].experts[0]!;
+    expect(listing([{ ...expertListing, subject: "x".repeat(MAX_EXPERT_SUBJECT_LENGTH) }])).toMatchObject({ ok: true });
+    expect(rights([{ ...right, subject: "x".repeat(MAX_EXPERT_SUBJECT_LENGTH) }])).toMatchObject({ ok: true });
+    for (const subject of ["   ", "x".repeat(MAX_EXPERT_SUBJECT_LENGTH + 1)]) {
+      expect(listing([{ ...expertListing, subject }])).toMatchObject({ ok: false, kind: "invalid" });
+      expect(rights([{ ...right, subject }])).toMatchObject({ ok: false, kind: "invalid" });
+    }
+  });
+
+  test("a listing names each expert once, and lists at most MAX_EXPERTS", () => {
+    const result = listing([expertListing, { ...expertListing, state: "starting" }]);
+    expect(result).toMatchObject({ ok: false, kind: "invalid" });
+    expect(!result.ok && result.error).toContain("experts[1].name");
+    const many = Array.from({ length: MAX_EXPERTS + 1 }, (_, i) => ({ ...expertListing, name: `expert-${i}` }));
+    expect(listing(many.slice(0, MAX_EXPERTS))).toMatchObject({ ok: true });
+    expect(listing(many)).toMatchObject({ ok: false, kind: "invalid" });
+    expect(rights(many.map(({ name }) => ({ ...valid["expert-rights"].experts[0], name })))).toMatchObject({ ok: false, kind: "invalid" });
+  });
+
+  test("a runner with no experts, and a session that may ask none, say so with empty lists", () => {
+    for (const [message, parse] of [
+      [{ ...valid.experts, experts: [] }, parseDataLayerMessage],
+      [{ ...valid["expert-rights"], experts: [] }, parseOfficeServerMessage],
+      [{ ...valid.hosting, listed: [] }, parseOfficeServerMessage],
+    ] as const)
+      expect(parse(message)).toEqual({ ok: true, message });
+  });
+
+  test("an expert's answer is 1 to MAX_EXPERT_ANSWER_LENGTH characters, with a full commit hash and a branch", () => {
+    const reply = valid["reply answer-expert"];
+    expect(parseDataLayerMessage({ ...reply, answer: "x".repeat(MAX_EXPERT_ANSWER_LENGTH) })).toMatchObject({ ok: true });
+    for (const wrong of [{ answer: "" }, { answer: "x".repeat(MAX_EXPERT_ANSWER_LENGTH + 1) }, { commit: undefined }, { branch: "" }]) {
+      expect(parseDataLayerMessage({ ...reply, ...wrong })).toMatchObject({ ok: false, kind: "invalid" });
+    }
+  });
+
+  test("an expert question is 1 to MAX_QUESTION_LENGTH characters once trimmed, always with a key and whether it blocks", () => {
+    const ask = valid["ask-expert"];
+    const request = valid["request answer-expert"];
+    expect(parseDataLayerMessage({ ...ask, question: "x".repeat(MAX_QUESTION_LENGTH) })).toMatchObject({ ok: true });
+    for (const question of ["   ", "x".repeat(MAX_QUESTION_LENGTH + 1)]) {
+      expect(parseDataLayerMessage({ ...ask, question })).toMatchObject({ ok: false, kind: "invalid" });
+      expect(parseOfficeServerMessage({ ...request, question })).toMatchObject({ ok: false, kind: "invalid" });
+    }
+    for (const wrong of [{ key: undefined }, { key: "" }, { key: "x".repeat(101) }, { blocking: undefined }]) {
+      expect(parseDataLayerMessage({ ...ask, ...wrong })).toMatchObject({ ok: false, kind: "invalid" });
+    }
+    for (const wrong of [{ asker: "" }, { blocking: undefined }, { from: { name: "Sam" } }]) {
+      expect(parseOfficeServerMessage({ ...request, ...wrong })).toMatchObject({ ok: false, kind: "invalid" });
+    }
+  });
+
+  test("an answer-expert refusal names why the host won't answer, and a cap's limit is above 0", () => {
+    const refusal = valid["refusal of an answer-expert"];
+    for (const expert of [{ code: "EXPERT_FORK_FAILED" }, { code: "EXPERT_UNKNOWN" }, { code: "EXPERT_CAP", cap: "asker-open", limit: 3 }, { code: "EXPERT_CAP", cap: "expert-tokens", limit: 2000000, frees: "2026-11-18T10:00:00+01:00" }]) {
+      expect(parseDataLayerMessage({ ...refusal, expert })).toEqual({ ok: true, message: { ...refusal, expert } });
+    }
+    for (const expert of [{ code: "EXPERT_DROPPED" }, { code: "EXPERT_CAP", cap: "asker-day" }, { code: "EXPERT_CAP", cap: "asker-day", limit: 0 }, { code: "EXPERT_CAP", cap: "asker-day", limit: 3, frees: "tomorrow" }]) {
+      expect(parseDataLayerMessage({ ...refusal, expert })).toMatchObject({ ok: false, kind: "invalid" });
+    }
+  });
+
+  test("an asked parses with and without the expert fields, each checked when present", () => {
+    expect(parseOfficeServerMessage(valid.asked)).toEqual({ ok: true, message: valid.asked });
+    const queued = { ...valid["asked of an expert"], state: "queued", answer: undefined, commit: undefined, branch: undefined, code: "EXPERT_QUEUED", note: "Queued: Adam's machine isn't connected." };
+    expect(parseOfficeServerMessage(queued)).toMatchObject({ ok: true });
+    for (const wrong of [{ expert: "ADR" }, { commit: "0123456" }, { branch: "" }]) {
+      expect(parseOfficeServerMessage({ ...valid["asked of an expert"], ...wrong })).toMatchObject({ ok: false, kind: "invalid" });
+    }
+  });
+
+  test("a session that asks experts says so with true, and never with false", () => {
+    expect(parseDataLayerMessage({ ...valid.full, facts: { ...facts, session: { ...facts.session, asksExperts: true } } })).toMatchObject({ ok: true });
+    expect(parseDataLayerMessage({ ...valid.full, facts: { ...facts, session: { ...facts.session, asksExperts: false } } })).toMatchObject({ ok: false, kind: "invalid" });
   });
 });
