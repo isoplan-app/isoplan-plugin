@@ -88,11 +88,15 @@ export interface PipeProof {
   proof: string;
 }
 
-/** The runner's one answer to an ask: what the agent is told. */
+/** The runner's one answer to an ask: what the agent is told, and `failed` when the ask failed, so the tool reports an error. */
 export interface PipeAnswer {
   type: "answer";
   text: string;
+  failed?: true;
 }
+
+/** What the agent is told by an ask, as the runner works it out. */
+export type Told = Omit<PipeAnswer, "type">;
 
 /** Where the worker's pipe is, as pipe.json holds it. */
 export interface PipeInfo {

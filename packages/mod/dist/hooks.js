@@ -588,9 +588,15 @@ function addTool($) {
 }
 async function askRoom($, e) {
 	const granted = [...mayAsk].filter(([, may]) => may).map(([server]) => server);
-	if (!granted.length) return { result: "Asking the earlier session is off now: its owner turned it off, the handoff was dismissed, or this session took no handoff. Carry on without asking." };
+	if (!granted.length) return {
+		result: "Asking the earlier session is off now: its owner turned it off, the handoff was dismissed, or this session took no handoff. Carry on without asking.",
+		isError: true
+	};
 	const question = typeof e.question === "string" ? e.question.trim() : "";
-	if (!question) return { result: "Give the question to ask the earlier session as `question`." };
+	if (!question) return {
+		result: "Give the question to ask the earlier session as `question`.",
+		isError: true
+	};
 	askedBy.set(e.tool_use_id, e.agentId ?? null);
 	try {
 		const session = await $.session.id();
@@ -610,12 +616,21 @@ async function askRoom($, e) {
 			stdin: question,
 			timeoutMs: ASK_TIMEOUT_MS
 		});
-		if (r.stdout.trim()) return { result: r.stdout.trim() };
+		if (r.stdout.trim()) return r.exitCode === 0 ? { result: r.stdout.trim() } : {
+			result: r.stdout.trim(),
+			isError: true
+		};
 		$.ui.log("isoplan: ask_earlier_session: " + (r.stderr.trim() || `node exited with code ${r.exitCode}`), { to: "debug" });
-		return { result: "The earlier session couldn't be asked here. Carry on without the answer." };
+		return {
+			result: "The earlier session couldn't be asked here. Carry on without the answer.",
+			isError: true
+		};
 	} catch (err) {
 		$.ui.log("isoplan: ask_earlier_session couldn't run: " + message(err), { to: "debug" });
-		return { result: "The earlier session couldn't be asked here (Node.js is needed on PATH). Carry on without the answer." };
+		return {
+			result: "The earlier session couldn't be asked here (Node.js is needed on PATH). Carry on without the answer.",
+			isError: true
+		};
 	}
 }
 function writeTitle($, ask) {

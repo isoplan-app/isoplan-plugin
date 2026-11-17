@@ -6880,15 +6880,22 @@ async function readStdin() {
 	for await (const chunk of process.stdin) chunks.push(chunk);
 	return Buffer.concat(chunks).toString("utf8");
 }
+const unreachable = {
+	text: UNREACHABLE,
+	failed: true
+};
 async function main(argv) {
 	const session = flag(argv, "--session");
 	const cwd = flag(argv, "--cwd");
 	const ack = flag(argv, "--ack") ?? void 0;
-	if (!session || !cwd) return "usage: ask.js --session <id> --cwd <folder> [--key <id>], with the question on stdin; or --ack <question>";
+	if (!session || !cwd) return {
+		text: "usage: ask.js --session <id> --cwd <folder> [--key <id>], with the question on stdin; or --ack <question>",
+		failed: true
+	};
 	const question = ack ? void 0 : await readStdin();
 	const { dir: claudeDir } = claudePaths(process.env, os.homedir());
 	const info = await readPipeInfo(claudeDir);
-	if (!info) return UNREACHABLE;
+	if (!info) return unreachable;
 	const request = {
 		type: "ask",
 		v: 1,
@@ -6902,19 +6909,27 @@ async function main(argv) {
 	let said = null;
 	const socket = await openPipe(info, (value) => {
 		const answer = value;
-		if (answer?.type === "answer" && typeof answer.text === "string") said = answer.text;
+		if (answer?.type === "answer" && typeof answer.text === "string") said = answer.failed === true ? {
+			text: answer.text,
+			failed: true
+		} : { text: answer.text };
 	});
-	if (!socket) return UNREACHABLE;
+	if (!socket) return unreachable;
 	return new Promise((resolve) => {
-		socket.on("close", () => resolve(said ?? UNREACHABLE));
+		socket.on("close", () => resolve(said ?? unreachable));
 		writeLine(socket, request);
 	});
 }
+let told;
 try {
-	process.stdout.write(await main(process.argv.slice(2)) + "\n");
+	told = await main(process.argv.slice(2));
 } catch (err) {
-	process.stdout.write(`The earlier session couldn't be asked: ${err?.message ?? String(err)}. Carry on without the answer.\n`);
+	told = {
+		text: `The earlier session couldn't be asked: ${err?.message ?? String(err)}. Carry on without the answer.`,
+		failed: true
+	};
 }
-process.exit();
+process.stdout.write(told.text + "\n");
+process.exit(told.failed ? 2 : 0);
 //#endregion
 export {};

@@ -12,7 +12,7 @@
 
 import os from "node:os";
 import { claudePaths } from "../data-layer/identity.js";
-import { openPipe, readPipeInfo, writeLine, type PipeAnswer, type PipeAsk } from "../pipe/pipe.js";
+import { openPipe, readPipeInfo, writeLine, type PipeAnswer, type PipeAsk, type Told } from "../pipe/pipe.js";
 
 const flag = (argv: string[], name: string) => {
   const i = argv.indexOf(name);
@@ -29,31 +29,36 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-async function main(argv: string[]): Promise<string> {
+const unreachable: Told = { text: UNREACHABLE, failed: true };
+
+async function main(argv: string[]): Promise<Told> {
   const session = flag(argv, "--session");
   const cwd = flag(argv, "--cwd");
   const ack = flag(argv, "--ack") ?? undefined;
-  if (!session || !cwd) return "usage: ask.js --session <id> --cwd <folder> [--key <id>], with the question on stdin; or --ack <question>";
+  if (!session || !cwd) return { text: "usage: ask.js --session <id> --cwd <folder> [--key <id>], with the question on stdin; or --ack <question>", failed: true };
   const question = ack ? undefined : await readStdin();
   const { dir: claudeDir } = claudePaths(process.env, os.homedir());
   const info = await readPipeInfo(claudeDir);
-  if (!info) return UNREACHABLE;
+  if (!info) return unreachable;
   const request: PipeAsk = { type: "ask", v: 1, token: info.token, session, cwd, servers: flags(argv, "--server"), ...(flag(argv, "--key") ? { key: flag(argv, "--key")! } : {}), ...(ack ? { ack } : { question }) };
-  let said: string | null = null;
+  let said: Told | null = null;
   const socket = await openPipe(info, (value) => {
     const answer = value as Partial<PipeAnswer>;
-    if (answer?.type === "answer" && typeof answer.text === "string") said = answer.text;
+    if (answer?.type === "answer" && typeof answer.text === "string") said = answer.failed === true ? { text: answer.text, failed: true } : { text: answer.text };
   });
-  if (!socket) return UNREACHABLE;
+  if (!socket) return unreachable;
   return new Promise((resolve) => {
-    socket.on("close", () => resolve(said ?? UNREACHABLE));
+    socket.on("close", () => resolve(said ?? unreachable));
     writeLine(socket, request);
   });
 }
 
+// What the agent is told goes to stdout; an ask that failed exits 2, so the hooks module reports it as an error.
+let told: Told;
 try {
-  process.stdout.write((await main(process.argv.slice(2))) + "\n");
+  told = await main(process.argv.slice(2));
 } catch (err) {
-  process.stdout.write(`The earlier session couldn't be asked: ${(err as Error)?.message ?? String(err)}. Carry on without the answer.\n`);
+  told = { text: `The earlier session couldn't be asked: ${(err as Error)?.message ?? String(err)}. Carry on without the answer.`, failed: true };
 }
-process.exit();
+process.stdout.write(told.text + "\n");
+process.exit(told.failed ? 2 : 0);

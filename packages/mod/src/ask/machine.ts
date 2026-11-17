@@ -25,6 +25,7 @@ import { nodeIo } from "../data-layer/io.js";
 import { createPairing, pairingEntry, pairingLockPath, pairingPath, pairingWriteLockPath, postJson, readPairing } from "../data-layer/pairing.js";
 import { openSideLink } from "../handoff/connection.js";
 import { takenOffice } from "../handoff/taken-office.js";
+import type { Told } from "../pipe/pipe.js";
 import { askOffices, askRoom, MAX_WAIT_MS, TokenExpired, type AskSettings } from "./ask.js";
 
 const CONNECT_MS = 20000;
@@ -47,23 +48,23 @@ export interface MachineAsk {
 
 const readText = (p: string) => fs.readFile(p, "utf8").catch(() => null);
 
-/** What the agent is told. */
-export async function askFromMachine(a: MachineAsk): Promise<string> {
+/** What the agent is told, `failed` when the question couldn't be asked. */
+export async function askFromMachine(a: MachineAsk): Promise<Told> {
   const { dir: claudeDir, json: claudeJson } = claudePaths(process.env, os.homedir());
   const isoplanDir = path.join(claudeDir, "isoplan");
   const io = nodeIo();
   const { session, cwd, ack } = a;
   const key = a.key || undefined;
   const question = ack ? "" : (a.question ?? "").trim();
-  if (!ack && !question) return "Give the question to ask the earlier session.";
-  if (question.length > MAX_QUESTION_LENGTH) return `That question is too long to ask the earlier session: keep it under ${MAX_QUESTION_LENGTH} characters.`;
+  if (!ack && !question) return { text: "Give the question to ask the earlier session.", failed: true };
+  if (question.length > MAX_QUESTION_LENGTH) return { text: `That question is too long to ask the earlier session: keep it under ${MAX_QUESTION_LENGTH} characters.`, failed: true };
   // Nothing leaves the machine without the secret scan (runner/scan.ts).
   const hit = question ? await a.scan(question) : null;
-  if (hit) return `The question wasn't sent: it looks like it holds a secret (it matches the secret pattern ${hit}). Ask it again without that, or carry on without the answer.`;
+  if (hit) return { text: `The question wasn't sent: it looks like it holds a secret (it matches the secret pattern ${hit}). Ask it again without that, or carry on without the answer.`, failed: true };
   const settings = await loadSettings<AskSettings>(io, path.join(a.appDir, "runner.json"), path.join(isoplanDir, "runner.json"));
   const config = await loadConfig(io, path.join(a.appDir, "config.json"), path.join(isoplanDir, "config.json"));
   const offices = askOffices(officesOf(config), a.servers, await takenOffice(claudeDir, session));
-  if (!offices.length) return `The earlier session can't be asked: ${a.servers.join(", ")} isn't one of the office servers in config.json. Carry on without the answer.`;
+  if (!offices.length) return { text: `The earlier session can't be asked: ${a.servers.join(", ")} isn't one of the office servers in config.json. Carry on without the answer.`, failed: true };
   // Nothing of a repo the office doesn't take is sent, its id included (#91).
   let found: Awaited<ReturnType<typeof commandHome>> = { refused: "" };
   let office = offices[0]!;
@@ -74,7 +75,7 @@ export async function askFromMachine(a: MachineAsk): Promise<string> {
     office = each;
     if ("home" in found) break;
   }
-  if ("refused" in found) return `The earlier session can't be asked: ${found.refused} Carry on without the answer.`;
+  if ("refused" in found) return { text: `The earlier session can't be asked: ${found.refused} Carry on without the answer.`, failed: true };
   const { server } = office;
   const pairing = await machinePairing(office, config.allowPlainWs, claudeDir, claudeJson, io);
   // One bound for the whole wait, a retry after an expired token included.
@@ -87,7 +88,7 @@ export async function askFromMachine(a: MachineAsk): Promise<string> {
       try {
         if (ack) {
           link.send({ type: "asked-ack", v: PROTOCOL_VERSION, question: ack });
-          return `acked ${ack}`;
+          return { text: `acked ${ack}` };
         }
         // Named so an answer from this person's own session reads as that (#109).
         return await askRoom(link, question, settings, { key, deadline, me: said.account.name || undefined });
