@@ -4,7 +4,7 @@ import { expect, test, vi } from "vitest";
 import { tempRoot } from "../data-layer/fixture.js";
 import { git as gitIn, remoteAndClone } from "../handoff/fixture.js";
 import { createRunGit, type GitResult, type RunGit } from "../handoff/git.js";
-import { createExpertCheckout } from "./expert-checkout.js";
+import { cloneBorrowing, createExpertCheckout } from "./expert-checkout.js";
 
 // The empty folder git runs with as its hooks (handoff/take.ts noHooks) is made in the Claude folder: a temp one, never this machine's.
 vi.stubEnv("CLAUDE_CONFIG_DIR", path.join(tempRoot(), "claude"));
@@ -97,6 +97,17 @@ test("prepare: a clone cut short leaves no read/, and the half-made one is clear
   cut = false;
   expect(await t.checkout.prepare()).toEqual({ branch: "main", commit: MAIN });
   expect(fs.existsSync(path.join(t.read, "left-over"))).toBe(false);
+});
+
+test("cloneBorrowing: a clone that fails borrowing is made once more borrowing nothing, after its folder is emptied; one that works or takes too long isn't", async () => {
+  for (const [first, tries] of [[failed("unable to write file"), 2], [ok(), 1], [{ ...failed(), timedOut: true }, 1]] as const) {
+    const borrows: string[][] = [];
+    let cleaned = 0;
+    const r = await cloneBorrowing(async (borrow) => (borrows.push(borrow), borrows.length === 1 ? first : ok()), "C:/repo/.git", async () => cleaned++);
+    expect(borrows).toEqual([["--reference-if-able", "C:/repo/.git", "--dissociate"], ...(tries === 2 ? [[]] : [])]);
+    expect(cleaned).toBe(tries - 1);
+    expect(r.code).toBe(tries === 2 ? 0 : first.code);
+  }
 });
 
 test("prepare: a clone already there gets origin's current URL and a fetch by refspec; with origin unreachable, the default branch from origin/HEAD and the clone kept as it is", async () => {

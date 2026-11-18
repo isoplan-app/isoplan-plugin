@@ -9,7 +9,8 @@
 //   in it (core.longpaths, set as it is cloned, so the agent's git has it too).
 //   It is made as an expert's read/ is (expert-checkout.ts): from the origin of the person's
 //   checkout the start names, only one on the wire, never a local path, a file:// URL or a share;
-//   borrowing the checkout's objects while it is made (--reference-if-able, then --dissociate), and
+//   borrowing the checkout's objects while it is made (--reference-if-able, then --dissociate, or
+//   borrowing nothing when that fails, as in a folder too deep for the repack on Windows), and
 //   built in <name>.new, then renamed into place, so one cut short never looks finished.
 // - Unlike read/ it is a working clone: every branch, on origin's default branch as a branch of its
 //   own, not detached, with the repo's hooks and Git LFS as git has them. It is never reset or
@@ -28,7 +29,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { RunGit } from "../handoff/git.js";
 import { onTheWire } from "../handoff/take.js";
-import { borrowFrom, longPaths, renamed } from "./expert-checkout.js";
+import { borrowFrom, cloneBorrowing, longPaths, renamed } from "./expert-checkout.js";
 
 const NO_REMOTE = "This repo has no remote, so Isoplan can't keep a copy of its own and nothing was started.";
 const NOT_ON_WIRE = "This repo's remote is a folder or a share, not an https or ssh address, so Isoplan can't keep a copy of its own and nothing was started.";
@@ -113,7 +114,8 @@ export function createIsoplanClones({ git, claudeDir, clonesFolder = "", clonesF
     await fs.mkdir(root, { recursive: true });
     await fs.rm(staging, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     const long = longPaths(platform);
-    const made = await run(root, [...long.git, "clone", "-q", ...long.clone, "--reference-if-able", await borrowFrom(run, checkout), "--dissociate", "--", url, staging]);
+    const clean = () => fs.rm(staging, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    const made = await cloneBorrowing((borrow) => run(root, [...long.git, "clone", "-q", ...long.clone, ...borrow, "--", url, staging]), await borrowFrom(run, checkout), clean);
     if (made.code !== 0) {
       log(`couldn't clone ${project} into ${staging} for a hidden start (${why(made)})`);
       await fs.rm(staging, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => {});

@@ -9,7 +9,9 @@
 //   as it was first made (experts.ts readFolder). On Windows git takes long paths in it
 //   (core.longpaths, set as it is cloned).
 // - The clone borrows the person's repo's objects while it is made (--reference-if-able, then
-//   --dissociate, so it never depends on them after), and holds the default branch alone, no tags.
+//   --dissociate, so it never depends on them after; when that fails, as it does in a folder too deep
+//   for the repack on Windows, it is cloned again borrowing nothing), and holds the default branch
+//   alone, no tags.
 //   An origin that is a local path, a file:// URL or a \\server share is refused, as a handoff's is.
 //
 // The person's repo is only ever read: its origin URL and origin's default branch. Every git call
@@ -54,6 +56,19 @@ export const longPaths = (platform: NodeJS.Platform) =>
 export async function borrowFrom(run: (cwd: string, args: string[]) => Promise<GitResult>, repo: string): Promise<string> {
   const common = await run(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
   return common.code === 0 && common.stdout.trim() ? common.stdout.trim() : repo;
+}
+
+/**
+ * Clones borrowing `reference`'s objects (--reference-if-able, then --dissociate) and, when that
+ * fails other than by taking too long, once more borrowing nothing: on Windows the repack that
+ * --dissociate runs ignores core.longpaths, so in a deep folder only a clone that borrows nothing
+ * can be made. `clean` empties the folder the first one was made in.
+ */
+export async function cloneBorrowing(clone: (borrow: string[]) => Promise<GitResult>, reference: string, clean: () => Promise<unknown>): Promise<GitResult> {
+  const borrowed = await clone(["--reference-if-able", reference, "--dissociate"]);
+  if (borrowed.code === 0 || borrowed.timedOut) return borrowed;
+  await clean();
+  return clone([]);
 }
 
 export interface ExpertCheckoutOptions {
@@ -154,7 +169,10 @@ export function createExpertCheckout({ git, repo, dir, read = path.join(dir, "re
         await fs.rm(staging, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
         const reference = await borrowFrom(run, repo);
         const long = longPaths(platform);
-        await must(above, [...long.git, "clone", "-q", ...long.clone, "--no-checkout", "--reference-if-able", reference, "--dissociate", "--single-branch", "--branch", branch, "--no-tags", "--", url, staging], NO_LFS);
+        const on: string = branch;
+        const args = (borrow: string[]) => [...long.git, "clone", "-q", ...long.clone, "--no-checkout", ...borrow, "--single-branch", "--branch", on, "--no-tags", "--", url, staging];
+        const cloned = await cloneBorrowing((borrow) => run(above, args(borrow), NO_LFS), reference, () => fs.rm(staging, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+        if (cloned.code !== 0) throw new Error(`git ${args([]).join(" ")} failed${cloned.timedOut ? " (it took too long)" : ""}: ${cloned.stderr.trim()}`);
         await must(staging, ["checkout", "-q", "--detach", tracking()], NO_LFS);
         if (st) await fs.rmdir(read);
         await renamed(staging, read);

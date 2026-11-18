@@ -15123,6 +15123,22 @@ async function borrowFrom(run, repo) {
 	]);
 	return common.code === 0 && common.stdout.trim() ? common.stdout.trim() : repo;
 }
+/**
+* Clones borrowing `reference`'s objects (--reference-if-able, then --dissociate) and, when that
+* fails other than by taking too long, once more borrowing nothing: on Windows the repack that
+* --dissociate runs ignores core.longpaths, so in a deep folder only a clone that borrows nothing
+* can be made. `clean` empties the folder the first one was made in.
+*/
+async function cloneBorrowing(clone, reference, clean) {
+	const borrowed = await clone([
+		"--reference-if-able",
+		reference,
+		"--dissociate"
+	]);
+	if (borrowed.code === 0 || borrowed.timedOut) return borrowed;
+	await clean();
+	return clone([]);
+}
 function createExpertCheckout({ git, repo, dir, read = path.join(dir, "read"), name, timeoutMs, log, fetchSeconds = () => 60, now = Date.now, onFetchFailed, cloneFrom = onTheWire, platform = process.platform }) {
 	const staging = `${read}.new`;
 	const above = path.dirname(read);
@@ -15198,23 +15214,29 @@ function createExpertCheckout({ git, repo, dir, read = path.join(dir, "read"), n
 				});
 				const reference = await borrowFrom(run, repo);
 				const long = longPaths(platform);
-				await must(above, [
+				const on = branch;
+				const args = (borrow) => [
 					...long.git,
 					"clone",
 					"-q",
 					...long.clone,
 					"--no-checkout",
-					"--reference-if-able",
-					reference,
-					"--dissociate",
+					...borrow,
 					"--single-branch",
 					"--branch",
-					branch,
+					on,
 					"--no-tags",
 					"--",
 					url,
 					staging
-				], NO_LFS);
+				];
+				const cloned = await cloneBorrowing((borrow) => run(above, args(borrow), NO_LFS), reference, () => fs.rm(staging, {
+					recursive: true,
+					force: true,
+					maxRetries: 5,
+					retryDelay: 200
+				}));
+				if (cloned.code !== 0) throw new Error(`git ${args([]).join(" ")} failed${cloned.timedOut ? " (it took too long)" : ""}: ${cloned.stderr.trim()}`);
 				await must(staging, [
 					"checkout",
 					"-q",
@@ -15399,18 +15421,22 @@ function createIsoplanClones({ git, claudeDir, clonesFolder = "", clonesFolders 
 			retryDelay: 200
 		});
 		const long = longPaths(platform);
-		const made = await run(root, [
+		const clean = () => fs.rm(staging, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 200
+		});
+		const made = await cloneBorrowing((borrow) => run(root, [
 			...long.git,
 			"clone",
 			"-q",
 			...long.clone,
-			"--reference-if-able",
-			await borrowFrom(run, checkout),
-			"--dissociate",
+			...borrow,
 			"--",
 			url,
 			staging
-		]);
+		]), await borrowFrom(run, checkout), clean);
 		if (made.code !== 0) {
 			log(`couldn't clone ${project} into ${staging} for a hidden start (${why(made)})`);
 			await fs.rm(staging, {
