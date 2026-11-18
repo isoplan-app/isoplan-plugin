@@ -19,7 +19,7 @@ const settings = { ...JSON.parse(fs.readFileSync(path.join(modDir, "runner.json"
 // A stand-in for `claude`: it logs its argv and each turn, and answers each turn by the first rule
 // in FAKE_RULES (read again every turn) whose kind, text and trunk match: a reply with the context
 // its call had, Read calls of files in its folder, other tool calls, a compaction, a delay, a wait
-// for a file to be there, or none.
+// for a file to be there, an exit, or none.
 const FAKE = `
 const fs = require("node:fs");
 const path = require("node:path");
@@ -28,12 +28,13 @@ const kind = argv.includes("--session-id") ? "trunk" : argv.includes("--fork-ses
 const trunk = kind === "judge" ? null : argv[argv.indexOf(kind === "trunk" ? "--session-id" : "--resume") + 1];
 const log = (x) => fs.appendFileSync(process.env.FAKE_LOG, JSON.stringify(x) + "\\n");
 const out = (x) => process.stdout.write(JSON.stringify(x) + "\\n");
-log({ kind, trunk, argv, background: process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS ? "off" : "on" });
+log({ kind, trunk, argv, background: process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS ? "off" : "on", memory: process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY ? "off" : "on" });
 let turn = 0, buf = "";
 function respond(text) {
   const rules = JSON.parse(fs.readFileSync(process.env.FAKE_RULES, "utf8"));
   const rule = rules.find((r) => (!r.kind || r.kind === kind) && (!r.text || text.includes(r.text)) && (!r.trunk || r.trunk === trunk)) || { reply: "no rule" };
   if (turn === 1) out({ type: "system", subtype: "init", model: rule.model || "claude-sonnet-5-5", tools: ["Read", "Grep", "Glob", "Agent"] });
+  if (rule.exit) process.exit(1);
   if (rule.hang) return;
   if (rule.until && !fs.existsSync(rule.until)) {
     const wait = setInterval(() => fs.existsSync(rule.until) && (clearInterval(wait), reply(rule)), 20);
@@ -79,6 +80,8 @@ interface Rule {
   tools?: string[];
   compact?: boolean;
   hang?: boolean;
+  /** Exits at once, as a crash. */
+  exit?: boolean;
   delayMs?: number;
   /** A file the reply waits for. */
   until?: string;
@@ -190,7 +193,7 @@ async function setUp(o: SetUp = {}) {
     onTrunk: (t) => void trunks.push(t),
     minuteMs: o.minuteMs ?? 4000,
   });
-  const claude = () => fs.readFileSync(claudeLog, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as { kind: string; trunk: string | null; argv?: string[]; background?: string; turn?: number; text?: string });
+  const claude = () => fs.readFileSync(claudeLog, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as { kind: string; trunk: string | null; argv?: string[]; background?: string; memory?: string; turn?: number; text?: string });
   const health = () => (fs.existsSync(healthFile) ? fs.readFileSync(healthFile, "utf8") : "");
   const ask = (qid: string, o: Partial<AnswerExpertRequest> = {}) =>
     expert.answer({ type: "request", v: PROTOCOL_VERSION, id: `expert-${qid}-1`, kind: "answer-expert", expert: "adr", questionId: qid, question: `Where is it held? (${qid})`, blocking: true, from: { id: "claude:sam", name: "Sam" }, asker: "s-1", ...o }, (m) => void sent.push(m));
@@ -222,6 +225,8 @@ test("grounding: two trunk turns, recorded before the spawn, then the proof pass
   expect(trunk!.trunk).toBe(t.trunks[0]);
   // Background subagents would end a turn before their reports came in.
   expect(t.claude().filter((l) => l.argv).map((l) => l.background)).toEqual(["off", "off", "off"]);
+  // A memory Claude Code kept for the checkout would reach every fork outside its grounding.
+  expect(t.claude().filter((l) => l.argv).map((l) => l.memory)).toEqual(["off", "off", "off"]);
   const [first, second] = turns(t, "trunk");
   expect(first!.text).toContain("You are the expert named adr");
   expect(first!.text).toContain("**Relay**: what carries questions.");
@@ -371,6 +376,26 @@ test("promotion: not with no learned notes; at the threshold a new generation gr
   ]);
 });
 
+test("promotion deletes the retired generation's transcript, the folder beside it and its index, keeping its record", async () => {
+  const t = await setUp({
+    file: expertFile({ promoteAtTokens: 150000 }),
+    restored: { generations: [gen(1, T1, "senior"), gen(2, T2, "junior", { meter: 160000, notes: 1 })], indexes: { 1: { "src/relay.ts": C0 }, 2: { "src/relay.ts": C1 } } },
+  });
+  fs.mkdirSync(path.join(path.dirname(t.transcript(T1)), T1, "subagents"), { recursive: true });
+  await until(() => /ready generation=3/.test(t.health()));
+  await until(() => !fs.existsSync(t.transcript(T1)));
+  expect(fs.existsSync(path.join(path.dirname(t.transcript(T1)), T1))).toBe(false);
+  await until(() => !fs.existsSync(path.join(t.dir, "index-1.json")));
+  expect(fs.existsSync(t.transcript(T2))).toBe(true);
+  expect(fs.existsSync(path.join(t.dir, "index-2.json"))).toBe(true);
+  expect(fs.existsSync(path.dirname(t.transcript(T1)))).toBe(true);
+  expect(t.state().generations.map((g) => [g.n, g.state])).toEqual([
+    [1, "retired"],
+    [2, "senior"],
+    [3, "junior"],
+  ]);
+});
+
 test("the proof of generation 2 asks generation 1 as its senior", async () => {
   const t = await setUp({ restored: { generations: [gen(1, T1, "junior")] }, rules: [{ kind: "fork", text: "Your senior answered", reply: "<answer>Forty-two.</answer>" }, { kind: "fork", text: "You are this expert's senior", reply: "<answer>Forty-two.</answer>" }, { kind: "fork", text: "Question proof-2", reply: "<ask-senior>What is the answer?</ask-senior>" }, ...BASE] });
   t.update(expertFile({ subject: "What may leave a machine, and why." }));
@@ -379,17 +404,59 @@ test("the proof of generation 2 asks generation 1 as its senior", async () => {
   expect(turns(t, "fork", T1)[0]!.text).toContain("You are this expert's senior");
 });
 
-test("a promoteAtTokens within 100,000 of the compaction point fails the generation as soon as the model is known", async () => {
-  const t = await setUp({ file: expertFile({ promoteAtTokens: 900000 }) });
+// A failure that would come again every time isn't tried again: 10 minutes here is 500 ms.
+test("a promoteAtTokens within 100,000 of the compaction point fails the generation as soon as the model is known, and isn't tried again", async () => {
+  const t = await setUp({ minuteMs: 50, file: expertFile({ promoteAtTokens: 900000 }) });
   await until(() => t.expert.hosted().state === "failed" && /generation generation=1/.test(t.health()));
   expect(t.health()).toMatch(/generation generation=1 state=failed why="promoteAtTokens 900000 is within 100,000 tokens of the compaction point at 967000/);
   expect(turns(t, "trunk").length).toBeLessThanOrEqual(1);
+  await new Promise((r) => setTimeout(r, 800));
+  expect(starts(t, "trunk")).toHaveLength(1);
 });
 
-test("a grounding that leaves room for fewer than 20 learned notes fails", async () => {
-  const t = await setUp({ file: expertFile({ promoteAtTokens: 55000 }) });
+test("a grounding that leaves room for fewer than 20 learned notes fails, and isn't tried again", async () => {
+  const t = await setUp({ minuteMs: 50, file: expertFile({ promoteAtTokens: 55000 }) });
   await until(() => t.expert.hosted().state === "failed" && /generation generation=1/.test(t.health()));
   expect(t.health()).toMatch(/generation generation=1 state=failed why="room for fewer than 20 learned notes/);
+  await new Promise((r) => setTimeout(r, 800));
+  expect(starts(t, "trunk")).toHaveLength(1);
+});
+
+test("a first grounding that failed for a reason other than its proof is tried again on its own, with no question and no change to its file", async () => {
+  // Its grounding's time limit is 3 s here, and the first try again comes 2 s after.
+  const t = await setUp({ minuteMs: 200, rules: [{ kind: "trunk", text: "Now read", hang: true }, ...BASE] });
+  await until(() => t.expert.hosted().state === "failed");
+  t.rules(BASE);
+  await until(() => /ready generation=2/.test(t.health()));
+  expect(t.health()).toMatch(/retry attempt=1 of=3 after=10m/);
+  expect(t.state().generations.map((g) => [g.n, g.state])).toEqual([
+    [1, "failed"],
+    [2, "junior"],
+  ]);
+}, 30000);
+
+test("a promotion whose proof failed is tried again on its own, and the one before answers meanwhile", async () => {
+  const t = await setUp({ minuteMs: 200, restored: { generations: [gen(1, T1, "junior")] }, rules: [{ kind: "judge", reply: "FAIL: no." }, ...BASE] });
+  t.update(expertFile({ subject: "What may leave a machine, and why." }));
+  await until(() => /proof generation=2 result=fail/.test(t.health()));
+  expect(t.expert.hosted().state).toBe("ready");
+  t.rules(BASE);
+  await until(() => /ready generation=3/.test(t.health()));
+  expect(t.health()).toMatch(/retry attempt=1/);
+  expect(t.state().generations.map((g) => [g.n, g.state])).toEqual([
+    [1, "senior"],
+    [2, "failed"],
+    [3, "junior"],
+  ]);
+}, 30000);
+
+test("a judge that crashed fails the generation for that, not as a failed proof", async () => {
+  const t = await setUp({ rules: [{ kind: "judge", exit: true }, ...BASE] });
+  await until(() => t.expert.hosted().state === "failed");
+  expect(t.health()).toMatch(/generation generation=1 state=failed why="its proof's judge failed: claude exited/);
+  expect(t.health()).not.toMatch(/proof generation=1/);
+  t.ask("x-1");
+  expect(await t.reply("expert-x-1-1")).toEqual(forkFailed("expert-x-1-1", "the expert's last grounding failed; its host's health log for it says why"));
 });
 
 test("a fork that compacts fails its question and its generation, and a new junior grounds", async () => {
@@ -402,6 +469,8 @@ test("a fork that compacts fails its question and its generation, and a new juni
     [1, "failed"],
     [2, "junior"],
   ]);
+  // Failed, it is never forked again, so its transcript goes.
+  await until(() => !fs.existsSync(t.transcript(T1)));
 });
 
 test("a fork past forkTimeLimitMinutes is ended and refused", async () => {
@@ -484,6 +553,23 @@ test("a fetch that moved origin during a grounding doesn't move the checkout unt
   expect(await t.reply("expert-x-2-1")).toMatchObject({ commit: C2 });
 });
 
+test("a fork that leaves the checkout changed during a promotion grounding doesn't hold new questions behind the reset", async () => {
+  const t = await setUp({ restored: { generations: [gen(1, T1, "junior")] }, rules: [{ kind: "trunk", text: "Now read", reply: "grounded", context: 50000, delayMs: 1500 }, ...BASE] });
+  t.update(expertFile({ subject: "What may leave a machine, and why." }));
+  await until(() => turns(t, "trunk").length === 2);
+  t.repo.dirty = true;
+  t.ask("x-1");
+  expect(await t.reply("expert-x-1-1")).toEqual(forkFailed("expert-x-1-1", "the fork changed its checkout, which was reset"));
+  await until(() => /question id=x-1/.test(t.health()));
+  t.ask("x-2");
+  // Not held: a plain refusal, which the server asks again after.
+  expect(await t.reply("expert-x-2-1")).toEqual({ type: "refusal", v: PROTOCOL_VERSION, id: "expert-x-2-1", reason: "unavailable", detail: "the expert's checkout is being reset" });
+  expect(t.expert.idle()).toBe(false);
+  expect(t.repo.dirty).toBe(true);
+  await until(() => /ready generation=2/.test(t.health()) && !t.repo.dirty);
+  expect(t.calls.filter((c) => c.args.includes("reset") || c.args.includes("clean")).map((c) => c.args[0])).toEqual(["reset", "clean"]);
+}, 30000);
+
 // What the runner may ask in a person's repo: it only ever reads there.
 const READS = ["remote get-url origin", "ls-remote --symref origin HEAD", "symbolic-ref --short refs/remotes/origin/HEAD", "rev-parse --path-format=absolute --git-common-dir"];
 
@@ -499,6 +585,7 @@ test("a change of repo deletes the old clone, then clones the new repo's origin 
   for (const c of t.calls.filter((c) => c.cwd === old || c.cwd === repo)) expect(READS).toContain(c.args.join(" "));
   expect(t.state()).toMatchObject({ repo, generations: [{ n: 1, state: "junior" }] });
   expect(t.state().generations[0]!.trunk).not.toBe(T1);
+  expect(fs.existsSync(t.transcript(T1))).toBe(false);
 });
 
 test("a repo changed while the runner was off: the old clone is deleted and the new one made", async () => {
@@ -611,6 +698,50 @@ test("a senior whose trunk was resumed by hand is dropped, so the junior explore
   const restarted = await setUp({ restored: { generations: [gen(1, T1, "junior", { last: "u-1" })], transcripts: { [T1]: [turn("assistant", "u-1"), turn("user", "u-9")] } } });
   expect(restarted.expert.hosted().state).toBe("starting");
   await until(() => /ready generation=2/.test(restarted.health()));
+}, 30000);
+
+test("a learned note's append keeps its own turns; a turn added by hand while one runs retires the junior", async () => {
+  const root = tempRoot();
+  const release = (n: number) => path.join(root, `release-${n}`);
+  // Notes told apart by their text, so each append waits for its own release.
+  const note = (n: number) => `<answer>Yes.</answer>\n<learned>Rule or fact: a (${n}). Why: b. Files: src/relay.ts:1-2.</learned>`;
+  const t = await setUp({
+    restored: { generations: [gen(1, T1, "junior", { last: "u-2" })], transcripts: { [T1]: [turn("user", "u-1"), turn("assistant", "u-2")] } },
+    rules: [{ kind: "fork", text: "(x-1)", reply: note(1), reads: ["src/relay.ts"] }, { kind: "fork", text: "(x-2)", reply: note(2), reads: ["src/relay.ts"] }, { kind: "append", text: "(1)", reply: "noted", context: 60000, until: release(1) }, { kind: "append", reply: "noted", context: 61000, until: release(2) }, ...BASE],
+  });
+
+  // Its own turns as Claude Code writes them: the note, a tool's result, an entry of its own, a reply.
+  t.ask("x-1");
+  await until(() => turns(t, "append").length === 1);
+  addLines(t.transcript(T1), { type: "user", uuid: "n-1", message: { role: "user", content: [{ type: "text", text: turns(t, "append")[0]!.text }] } }, { type: "user", uuid: "n-2", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "r0", content: "x" }] } }, { type: "user", uuid: "n-3", isMeta: true, message: { role: "user", content: "caveat" } }, turn("assistant", "n-4"));
+  fs.writeFileSync(release(1), "");
+  await until(() => /question id=x-1 .* note=appended/.test(t.health()));
+  expect(t.state().generations[0]).toMatchObject({ state: "junior", notes: 1, last: "n-4" });
+
+  // A person's turn while the next one runs.
+  t.ask("x-2");
+  await until(() => turns(t, "append").length === 2);
+  addLines(t.transcript(T1), turn("user", "u-3"), turn("assistant", "u-4"));
+  fs.writeFileSync(release(2), "");
+  await until(() => /ready generation=2/.test(t.health()));
+  expect(t.health()).toMatch(/generation generation=1 state=retired why="its trunk was changed outside Isoplan"/);
+  expect(t.health()).toMatch(/question id=x-2 .* note=none/);
+  t.ask("x-3");
+  await t.reply("expert-x-3-1");
+  expect(starts(t, "fork").at(-1)!.trunk).toBe(t.state().generations.find((g) => g.n === 2)!.trunk);
+}, 30000);
+
+test("a trunk changed by hand while its question waits for a fork slot isn't forked: the question gets a plain refusal", async () => {
+  const t = await setUp({ file: expertFile({ maxForks: 1 }), restored: { generations: [gen(1, T1, "junior", { last: "u-2" })], transcripts: { [T1]: [turn("user", "u-1"), turn("assistant", "u-2")] } }, rules: [{ kind: "fork", text: "(x-1)", reply: ANSWER, delayMs: 1500 }, ...BASE] });
+  t.ask("x-1");
+  await until(() => starts(t, "fork").length === 1);
+  t.ask("x-2");
+  await new Promise((r) => setTimeout(r, 300));
+  addLines(t.transcript(T1), turn("user", "u-3"), turn("assistant", "u-4"));
+  expect(await t.reply("expert-x-2-1")).toEqual({ type: "refusal", v: PROTOCOL_VERSION, id: "expert-x-2-1", reason: "unavailable", detail: "the expert's junior is being replaced" });
+  expect(starts(t, "fork").filter((s) => s.trunk === T1)).toHaveLength(1);
+  expect(t.state().generations[0]).toMatchObject({ n: 1, state: "retired" });
+  await until(() => /ready generation=2/.test(t.health()));
 }, 30000);
 
 test("the judge's verdict passes only with PASS as its first word and no FAIL in its first line", async () => {

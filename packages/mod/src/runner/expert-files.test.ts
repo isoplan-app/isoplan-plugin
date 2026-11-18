@@ -34,6 +34,7 @@ test("expert files: a file added, changed and removed is told once each; a folde
   await t.w.look();
   fs.rmSync(path.join(t.dir, "adr.json"));
   await t.w.look();
+  await t.w.look();
   expect(t.changes.slice(1)).toEqual([{ name: "adr", kind: "changed", text: '{"version":1}' }, { name: "adr", kind: "removed" }]);
 });
 
@@ -45,4 +46,25 @@ test("expert files: saved again with the same content, nothing changes", async (
   await t.w.look();
   await t.w.look();
   expect(t.changes).toEqual([{ name: "adr", kind: "added", text: "{}" }]);
+});
+
+test("expert files: a file missing for one look and back the next is neither removed nor added again; missing for two looks, it is removed", async () => {
+  const t = watch();
+  t.write("adr.json", "{}", Date.now() - 60000);
+  await t.w.look();
+  fs.rmSync(path.join(t.dir, "adr.json"));
+  await t.w.look();
+  t.write("adr.json", "{}", Date.now() - 60000);
+  await t.w.look();
+  // The folder missing for a look is the same.
+  fs.rmSync(t.dir, { recursive: true });
+  await t.w.look();
+  t.write("adr.json", "{}", Date.now() - 60000);
+  await t.w.look();
+  expect(t.changes).toEqual([{ name: "adr", kind: "added", text: "{}" }]);
+  fs.rmSync(path.join(t.dir, "adr.json"));
+  await t.w.look();
+  expect(t.changes).toHaveLength(1);
+  await t.w.look();
+  expect(t.changes.slice(1)).toEqual([{ name: "adr", kind: "removed" }]);
 });

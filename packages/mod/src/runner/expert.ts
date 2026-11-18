@@ -53,7 +53,7 @@ import type { HealthLog } from "./expert-health.js";
 import { createCheckoutLock, createGate } from "./expert-lock.js";
 import { meterOf, notesRoomProblem, thresholdProblem, windowFor } from "./expert-meter.js";
 import { answerText, citationBlock, fileOf, noteFiles, parseReply, stamp } from "./expert-reply.js";
-import { fingerprint, readIndex, readState, writeIndex, writeState, type SavedExpert, type SavedGeneration } from "./expert-state.js";
+import { fingerprint, indexPath, readIndex, readState, writeIndex, writeState, type SavedExpert, type SavedGeneration } from "./expert-state.js";
 import type { RunGit } from "../handoff/git.js";
 import { fill } from "./prompts.js";
 import { createForkSlots } from "./runner.js";
@@ -121,6 +121,12 @@ const REMEMBER = 200;
 const JUDGE_MS = 2 * 60000;
 // The longest CONTEXT.md and CLAUDE.md put into the grounding.
 const GROUNDING_FILE_MAX = 100_000;
+// The minutes before each try again of a grounding that keeps failing: no question comes to a
+// failed expert, and no person is there to edit its file. A generation that passes, or a change to
+// its file, starts the count again.
+const RETRY_MINUTES = [10, 30, 90];
+// A trunk id as the runner makes them: only a path built from one is ever deleted.
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** What a fork that asks for a senior it hasn't got is told: the block is never honoured there. */
 export const NO_SENIOR = "ask-senior isn't available here; answer from your own context";
@@ -215,6 +221,8 @@ export function createExpert(o: ExpertOptions): Expert {
   const finished = new Map<string, Outgoing>(); // question id → what was last sent
   const waiters = new Set<() => void>();
   const transcripts = new Map<string, string>(); // trunk → its transcript's path, once found
+  const live = new Map<string, number>(); // trunk → its processes running
+  const discarded = new Set<string>(); // trunks whose files are deleted
 
   let saved: SavedExpert = { version: 1, fingerprint: "", repo: file.repo, branch: "", generations: [] };
   let ledger: Ledger | null = null;
@@ -228,7 +236,11 @@ export function createExpert(o: ExpertOptions): Expert {
   let lastFailed = false; // the last grounding failed
   // Why, as an asker is told: never the log's detail, which can name paths on this machine.
   let lastFailure: "proof" | "checkout" | "other" = "other";
-  let promotionBlocked = false; // a promotion failed: not again until the file changes or a restart
+  let promotionBlocked = false; // a promotion failed: not again until a retry, the file changes or a restart
+  let retries = 0; // groundings tried again since one last passed or the file changed
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  // A fork left the checkout changed while a grounding held it: it is reset once the grounding lets go.
+  let resetPending = false;
   let stopped = false;
   let epoch = 0; // moves on a reset or a stop: work begun before then changes nothing
   let busy = 0; // processes running
@@ -309,13 +321,25 @@ export function createExpert(o: ExpertOptions): Expert {
     try {
       // Claude Code runs Explore subagents in the background unless background tasks are off, and a
       // turn's result would then come before their reports: the turn has to hold its subagents' work.
-      child = spawn([...claudeCommand(bin), ...args], { cwd, env: { ...forkEnv(env), CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" } });
+      // Auto memory is off too: an expert knows only its grounding and learned notes, and a memory
+      // Claude Code kept for the read checkout would reach every fork outside them.
+      child = spawn([...claudeCommand(bin), ...args], { cwd, env: { ...forkEnv(env), CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1", CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" } });
     } catch (err) {
       return failed("not-set-up", `couldn't start claude: ${(err as Error).message}`);
     }
     children.add(child);
     kids?.add(child);
-    child.on("close", () => (children.delete(child), kids?.delete(child)));
+    if (trunk) live.set(trunk, (live.get(trunk) ?? 0) + 1);
+    child.on("close", () => {
+      children.delete(child);
+      kids?.delete(child);
+      if (!trunk) return;
+      const left = live.get(trunk)! - 1;
+      if (left) live.set(trunk, left);
+      else live.delete(trunk);
+      const g = saved.generations.find((x) => x.trunk === trunk);
+      if (g) discardIfDone(g);
+    });
     if (trunk) o.track?.(child, { kind: "fork", session: `claude-code:${trunk}`, folder: cwd });
     busy++;
     try {
@@ -343,6 +367,35 @@ export function createExpert(o: ExpertOptions): Expert {
     say("generation", { generation: g.n, state: "failed", why });
     log(`generation ${g.n} failed: ${why}`);
     void save();
+    discardIfDone(g);
+  }
+
+  // A retired or failed generation's trunk transcript, the folder beside it (its subagents'), and its
+  // index are deleted once none of its processes runs, since none of it is used again. Its record stays
+  // in state.json, so its number isn't used again.
+  function discardIfDone(g: SavedGeneration) {
+    if ((g.state !== "retired" && g.state !== "failed") || live.has(g.trunk) || discarded.has(g.trunk)) return;
+    discarded.add(g.trunk);
+    void discard(g);
+  }
+
+  async function discard(g: SavedGeneration) {
+    indexes.delete(g.n);
+    const n = g.n;
+    // After any write of it already queued.
+    saving = saving.then(() => fs.rm(indexPath(o.dir, n), { force: true })).catch((err: Error) => log(`couldn't delete generation ${n}'s index: ${err.message}`));
+    // A trunk that isn't a uuid could name a project folder itself, so nothing is deleted for it.
+    if (!UUID.test(g.trunk)) return;
+    const transcript = await transcriptOf(g.trunk);
+    transcripts.delete(g.trunk);
+    if (!transcript) return;
+    try {
+      await fs.rm(transcript, { force: true });
+      await fs.rm(path.join(path.dirname(transcript), g.trunk), { recursive: true, force: true });
+      log(`deleted generation ${n}'s trunk transcript, as it is ${g.state}`);
+    } catch (err) {
+      log(`couldn't delete generation ${n}'s trunk transcript: ${(err as Error).message}`);
+    }
   }
 
   // A generation that compacted or used a disallowed tool can't answer again; a junior's is replaced.
@@ -356,6 +409,7 @@ export function createExpert(o: ExpertOptions): Expert {
   /** Grounds a new generation and asks its proof question; one that passes becomes the junior. */
   async function ground(): Promise<void> {
     if (groundingRun || stopped) return;
+    clearRetry();
     const mine = epoch;
     const f = file;
     const fp = fingerprint(f);
@@ -364,8 +418,11 @@ export function createExpert(o: ExpertOptions): Expert {
     lastFailed = false;
     changed();
     let passed: SavedGeneration | null = null;
+    // Once it failed: whether trying again could go differently.
+    let retry: boolean | null = null;
+    const failure = { repeats: false };
     try {
-      if (!(await prepare())) return void ((lastFailed = true), (lastFailure = "checkout"));
+      if (!(await prepare())) return void ((lastFailed = true), (lastFailure = "checkout"), (retry = true));
       if (mine !== epoch) return;
       const n = Math.max(0, ...saved.generations.map((g) => g.n)) + 1;
       const g: SavedGeneration = { n, trunk: randomUUID(), model: f.model, commit: "", groundedAt: now(), meter: 0, notes: 0, state: "grounding" };
@@ -375,7 +432,7 @@ export function createExpert(o: ExpertOptions): Expert {
       const ok = await lock.shared(async () => {
         holding++;
         try {
-          return await groundAndProve(g, f, mine);
+          return await groundAndProve(g, f, mine, failure);
         } finally {
           holding--;
         }
@@ -387,24 +444,54 @@ export function createExpert(o: ExpertOptions): Expert {
         lastFailure = g.why === NOT_PASSED ? "proof" : "other";
         if (gen("junior")) {
           promotionBlocked = true;
-          log(`its new generation ${n} didn't pass, so it isn't tried again until its file changes or the runner restarts`);
+          log(`its new generation ${n} didn't pass, so the one before goes on answering`);
         }
+        retry = !failure.repeats;
       }
     } catch (err) {
       log(`its grounding failed: ${(err as Error)?.stack ?? String(err)}`);
       lastFailed = !gen("junior");
       lastFailure = "other";
+      retry = true;
     } finally {
+      // The grounding has let go of the checkout, so a reset a fork left waiting runs now.
+      if (resetPending && holding === 0) {
+        resetPending = false;
+        await lock.exclusive(() => checkout.reset()).catch((err: Error) => log(`couldn't reset its checkout: ${err.message}`));
+      }
       if (mine === epoch && passed) await promote(passed, fp);
       if (groundingRun === me) groundingRun = null;
       changed();
       // The file changed while this one grounded: ground for it now.
       if (mine === epoch && !stopped && fingerprint(file) !== fp && file.repo === f.repo) void ground();
+      else if (mine === epoch && retry !== null) retryLater(retry);
       else checkPromotion();
     }
   }
 
-  async function groundAndProve(g: SavedGeneration, f: ExpertFile, mine: number): Promise<boolean> {
+  function clearRetry() {
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = null;
+  }
+
+  // A failed grounding is tried again on the runner's own timer, a few times, further apart each time.
+  function retryLater(retryable: boolean) {
+    if (stopped) return;
+    if (!retryable) return log("its grounding failed in a way that fails every time, so it isn't tried again until its file changes");
+    if (retries >= RETRY_MINUTES.length) return log(`its grounding failed ${retries + 1} times running, so it isn't tried again until its file changes or the runner restarts`);
+    const minutes = RETRY_MINUTES[retries++]!;
+    const attempt = retries;
+    log(`its grounding failed, so it is tried again in ${minutes} minutes`);
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      say("retry", { attempt, of: RETRY_MINUTES.length, after: `${minutes}m` });
+      void ground();
+    }, minutes * minute);
+    retryTimer.unref?.();
+  }
+
+  /** Sets `failure.repeats` when it fails in a way that fails every time: the expert file's numbers against the model. */
+  async function groundAndProve(g: SavedGeneration, f: ExpertFile, mine: number, failure: { repeats: boolean }): Promise<boolean> {
     const started = now();
     const commit = await checkout.head();
     g.commit = commit;
@@ -420,9 +507,10 @@ export function createExpert(o: ExpertOptions): Expert {
     let windowed = false;
     const check = (model: string) => {
       const w = windowFor(model, f.window);
-      if (!w.ok) return w.why;
-      windowed = true;
-      return thresholdProblem(f.promoteAtTokens, w.compactAt ?? w.window);
+      windowed = w.ok;
+      const why = w.ok ? thresholdProblem(f.promoteAtTokens, w.compactAt ?? w.window) : w.why;
+      if (why) failure.repeats = true;
+      return why;
     };
     const c = await run(trunkArgs(g.trunk, f.model), readDir, g.trunk, fill(p.grounding, values), trunkNext([p.read]), f.groundingTimeLimitMinutes * minute, { check });
     overhead(c.usage);
@@ -433,7 +521,9 @@ export function createExpert(o: ExpertOptions): Expert {
     }
     g.model = c.model ?? f.model;
     g.last = await lastTurn(g.trunk);
-    const problem = (windowed ? null : check(g.model)) ?? (c.turns.length < 2 ? "its grounding ended before its second turn" : notesRoomProblem(f.promoteAtTokens, meterOf(c.turns.at(-1)!)));
+    const room = c.turns.length < 2 ? null : notesRoomProblem(f.promoteAtTokens, meterOf(c.turns.at(-1)!));
+    if (room) failure.repeats = true;
+    const problem = (windowed ? null : check(g.model)) ?? (c.turns.length < 2 ? "its grounding ended before its second turn" : room);
     g.meter = c.turns.length ? meterOf(c.turns.at(-1)!) : 0;
     if (problem) {
       failGeneration(g, problem);
@@ -463,10 +553,15 @@ export function createExpert(o: ExpertOptions): Expert {
     const judged = await run(judgeArgs(s.expertJudgeModel), o.dir, null, fill((await loadExpertPrompts(o.appDir)).judge, { question: f.proof.question, expected: f.proof.answer, answer }), () => null, JUDGE_MS, { root: o.dir });
     overhead(judged.usage);
     if (mine !== epoch) return false;
-    const verdict = judged.ok ? (judged.turns.at(-1)?.text ?? "") : `the judge failed: ${judged.failure!.detail}`;
+    // A judge that crashed or ran out of time judged nothing: the generation fails, but not its proof.
+    if (!judged.ok) {
+      failGeneration(g, `its proof's judge failed: ${judged.failure!.detail}`);
+      return false;
+    }
+    const verdict = judged.turns.at(-1)?.text ?? "";
     // Its first line is the verdict: PASS as its first word, and no FAIL in it ("Pass? No: FAIL").
     const line = verdict.split(/\r?\n/)[0]!;
-    const pass = judged.ok && /^\W*PASS\b/i.test(line) && !/\bFAIL\b/i.test(line);
+    const pass = /^\W*PASS\b/i.test(line) && !/\bFAIL\b/i.test(line);
     g.proof = { passed: pass, at: now() };
     say("proof", { generation: g.n, result: pass ? "pass" : "fail", expected: f.proof.answer, answer, judge: verdict });
     if (!pass) failGeneration(g, NOT_PASSED);
@@ -485,7 +580,10 @@ export function createExpert(o: ExpertOptions): Expert {
       }
       g.state = "junior";
       saved.fingerprint = fp;
+      retries = 0;
+      promotionBlocked = false;
       await save();
+      if (senior) discardIfDone(senior);
       if (junior) say("promotion", { junior: g.n, senior: junior.n, retired: senior ? senior.n : "none" });
       say("ready", { generation: g.n });
       log(`generation ${g.n} answers now`);
@@ -685,6 +783,15 @@ export function createExpert(o: ExpertOptions): Expert {
               await reservation.cancel();
               return failed("its junior failed while the question waited", forkFailed("the expert's junior failed; a new one is grounding"));
             }
+            // A plain refusal, which the server asks again later, so it isn't remembered: a checkout
+            // waiting to be reset, or a junior whose trunk was changed while the question waited
+            // (retired now; a new one grounds), isn't forked.
+            const notNow = resetPending ? "the expert's checkout is being reset" : !(await trusted(junior)) ? "the expert's junior is being replaced" : null;
+            if (notNow) {
+              await reservation.cancel();
+              say("error", { id: q.id, cause: notNow });
+              return deliver(q, unavailable(notNow), false);
+            }
             // The fork's time limit counts from here, not from when the question came: a question
             // held while the expert started, or queued for a slot or the checkout, isn't cut short.
             const deadline = now() + file.forkTimeLimitMinutes * minute;
@@ -758,7 +865,9 @@ export function createExpert(o: ExpertOptions): Expert {
         }
       } finally {
         inFlight.delete(q);
-        if (resetting) await lock.exclusive(() => checkout.reset()).catch((err: Error) => log(`couldn't reset its checkout: ${err.message}`));
+        // A grounding holding the checkout isn't waited for: it is reset once the grounding lets go.
+        if (resetting && holding > 0) resetPending = true;
+        else if (resetting) await lock.exclusive(() => checkout.reset()).catch((err: Error) => log(`couldn't reset its checkout: ${err.message}`));
         checkPromotion();
       }
     } finally {
@@ -771,15 +880,22 @@ export function createExpert(o: ExpertOptions): Expert {
   function append(g: SavedGeneration, note: string): Promise<boolean> {
     const done = (appends.get(g.trunk) ?? Promise.resolve()).then(() =>
       gate.closed(async () => {
-        if (stopped || g.state !== "junior") return false;
+        if (stopped || g.state !== "junior" || !(await trusted(g))) return false;
         // A trunk check meanwhile can't tell this append's turns from a person's, so it doesn't count.
         appending++;
         appendsStarted++;
         try {
           const p = await loadExpertPrompts(o.appDir);
-          const c = await run(appendArgs(g.trunk, g.model), readDir, g.trunk, fill(p.note, { note }), trunkNext([]), file.forkTimeLimitMinutes * minute, {});
+          const before = g.last ?? null;
+          const text = fill(p.note, { note });
+          const c = await run(appendArgs(g.trunk, g.model), readDir, g.trunk, text, trunkNext([]), file.forkTimeLimitMinutes * minute, {});
           overhead(c.usage);
-          // Recorded even when it failed: whatever of it reached the transcript is the runner's own.
+          // Whatever of it reached the transcript is the runner's own, even when it failed; a person's
+          // turn among it is not, and then the generation isn't used again.
+          if (!(await onlyOurs(g.trunk, before, [text, NO_SENIOR]))) {
+            retireChanged(g);
+            return false;
+          }
           g.last = await lastTurn(g.trunk);
           if (!c.ok) {
             log(`couldn't append a learned note to generation ${g.n}: ${c.failure!.detail}`);
@@ -803,14 +919,19 @@ export function createExpert(o: ExpertOptions): Expert {
     return done.catch((err: Error) => (log(`couldn't append a learned note: ${err.message}`), false));
   }
 
-  // A new repo: the old repo's clone goes, and it grounds from scratch.
-  async function reset(oldRepo: string) {
+  // A new repo: the old repo's clone and generations go, and it grounds from scratch.
+  async function reset(oldRepo: string, generations: SavedGeneration[]) {
     epoch++;
     killAll();
+    clearRetry();
     // The old repo's own checkout: after a restart `checkout` is already the new repo's.
     const old = makeCheckout(oldRepo);
     log(`its repo changed from ${oldRepo} to ${file.repo}, so it starts again`);
-    await lock.exclusive(() => old.remove()).catch((err: Error) => log(`couldn't remove its clone of ${oldRepo}: ${err.message}`));
+    await lock.exclusive(async () => {
+      await old.remove().catch((err: Error) => log(`couldn't remove its clone of ${oldRepo}: ${err.message}`));
+      // Numbers start again at 1, so the old indexes go before any new one is written.
+      for (const g of generations) if (!discarded.has(g.trunk)) (discarded.add(g.trunk), await discard(g));
+    });
     saved = { version: 1, fingerprint: "", repo: file.repo, branch: "", generations: [] };
     indexes.clear();
     await save();
@@ -819,6 +940,8 @@ export function createExpert(o: ExpertOptions): Expert {
     prepared = false;
     lastFailed = false;
     promotionBlocked = false;
+    retries = 0;
+    resetPending = false;
     groundingRun = null;
     changed();
     void ground();
@@ -852,6 +975,29 @@ export function createExpert(o: ExpertOptions): Expert {
     return null;
   }
 
+  // Whether every user turn after `after` (from the start when null) in a trunk's transcript is one
+  // of `ours`. Tool results and Claude Code's own entries (isMeta, a subagent's) are user entries too.
+  async function onlyOurs(trunk: string, after: string | null, ours: string[]): Promise<boolean> {
+    const file = await transcriptOf(trunk);
+    const entries = (file ? await fs.readFile(file, "utf8").catch(() => "") : "").split("\n").flatMap((l) => {
+      try {
+        return [JSON.parse(l) as { type?: unknown; uuid?: unknown; isMeta?: unknown; isSidechain?: unknown; message?: { content?: unknown } }];
+      } catch {
+        return []; // a blank line, or one still being written
+      }
+    });
+    const from = after === null ? 0 : entries.findIndex((e) => e.uuid === after) + 1;
+    if (from === 0 && after !== null) return false;
+    const wanted = new Set(ours.map((t) => t.trim()));
+    return entries.slice(from).every((e) => {
+      if (e.type !== "user" || e.isMeta === true || e.isSidechain === true) return true;
+      const content = e.message?.content;
+      const blocks = typeof content === "string" ? [{ type: "text", text: content }] : Array.isArray(content) ? (content as { type?: unknown; text?: unknown }[]) : [];
+      if (blocks.some((b) => b?.type === "tool_result")) return true;
+      return wanted.has(blocks.map((b) => (b?.type === "text" && typeof b.text === "string" ? b.text : "")).join("").trim());
+    });
+  }
+
   /** Whether a junior's or senior's trunk is as the runner left it; one that isn't is taken out of use. */
   async function trusted(g: SavedGeneration): Promise<boolean> {
     const started = appendsStarted;
@@ -863,17 +1009,22 @@ export function createExpert(o: ExpertOptions): Expert {
       return true;
     }
     if (last === g.last || appending > 0 || appendsStarted !== started) return true;
-    if (g.state === "junior" || g.state === "senior") {
-      const wasJunior = g.state === "junior";
-      g.state = "retired";
-      g.why = "its trunk was changed outside Isoplan";
-      say("generation", { generation: g.n, state: "retired", why: g.why });
-      log(`generation ${g.n}'s trunk was changed outside Isoplan (resumed by hand, say), so it isn't used again${wasJunior ? ", and a new generation grounds" : ""}`);
-      void save();
-      changed();
-      if (wasJunior && !stopped) void ground();
-    }
+    retireChanged(g);
     return false;
+  }
+
+  // A junior or senior whose trunk was changed outside Isoplan is retired; a junior's is replaced.
+  function retireChanged(g: SavedGeneration) {
+    if (g.state !== "junior" && g.state !== "senior") return;
+    const wasJunior = g.state === "junior";
+    g.state = "retired";
+    g.why = "its trunk was changed outside Isoplan";
+    say("generation", { generation: g.n, state: "retired", why: g.why });
+    log(`generation ${g.n}'s trunk was changed outside Isoplan (resumed by hand, say), so it isn't used again${wasJunior ? ", and a new generation grounds" : ""}`);
+    void save();
+    discardIfDone(g);
+    changed();
+    if (wasJunior && !stopped) void ground();
   }
 
   return {
@@ -884,7 +1035,7 @@ export function createExpert(o: ExpertOptions): Expert {
       if (was && was.repo !== file.repo) {
         for (const g of was.generations) o.onTrunk?.(g.trunk);
         changed();
-        void reset(was.repo);
+        void reset(was.repo, was.generations);
         return;
       }
       if (was) {
@@ -905,8 +1056,10 @@ export function createExpert(o: ExpertOptions): Expert {
     update(f) {
       const old = file;
       file = f;
-      if (f.repo !== old.repo) return void reset(old.repo);
+      if (f.repo !== old.repo) return void reset(old.repo, saved.generations);
       promotionBlocked = false;
+      clearRetry();
+      retries = 0;
       changed();
       if (fingerprint(f) !== saved.fingerprint) void ground();
       else checkPromotion();
@@ -961,11 +1114,13 @@ export function createExpert(o: ExpertOptions): Expert {
     stop() {
       stopped = true;
       epoch++;
+      clearRetry();
       killAll();
       for (const wake of [...waiters]) wake();
     },
     close() {
       stopped = true;
+      clearRetry();
       killAll();
     },
   };
