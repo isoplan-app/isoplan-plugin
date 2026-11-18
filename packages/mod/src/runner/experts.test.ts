@@ -172,3 +172,21 @@ test("an expert's clone stays where it was made, a folder clonesFolder named bef
     t.experts.close();
   }
 });
+
+test("listed: an office that starts listing an expert it didn't is logged, with a line in the expert's health log", async () => {
+  const t = setUp();
+  await t.experts.start();
+  try {
+    t.experts.listed("wss://office.example", []);
+    t.experts.listed("wss://office.example", ["adr"]);
+    expect(t.logs.filter((l) => l.startsWith("wss://office.example"))).toEqual([
+      "wss://office.example doesn't list the experts adr: their repo isn't in an office there, another machine's expert has the name, or the office has more experts than a session may be told of",
+      "wss://office.example now lists the experts adr",
+    ]);
+    const health = () => (fs.existsSync(path.join(t.logsDir, "expert-adr.log")) ? fs.readFileSync(path.join(t.logsDir, "expert-adr.log"), "utf8") : "");
+    for (let i = 0; i < 1000 && !/unlisted=""\n/.test(health()); i++) await new Promise((r) => setTimeout(r, 10));
+    expect(health()).toMatch(/ listed server=wss:\/\/office.example unlisted=adr\n[\s\S]* listed server=wss:\/\/office.example unlisted=""\n/);
+  } finally {
+    t.experts.close();
+  }
+});

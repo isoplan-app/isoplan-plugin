@@ -69,6 +69,8 @@ const RETRY_CAP_MS = 3e4;
 const STABLE_MS = 6e4;
 const SWITCH_CHECK_MS = 1e3;
 const NOTE_MAX = 1e3;
+const LATE_MAX = 3;
+const LATE_CHARS = 2e4;
 const ASK_TIMEOUT_MS = 42e4;
 const RUNNING = /* @__PURE__ */ new Set([
 	"pending",
@@ -144,19 +146,29 @@ function register(on) {
 			const agent = e.agentId ? "claude-code:" + e.agentId : lead;
 			const waiting = notes.get(agent) ?? [];
 			notes.delete(agent);
-			const late = await lateFor($, e.agentId ?? null);
+			const ready = await lateFor($, e.agentId ?? null);
+			const late = [];
+			let chars = 0;
+			for (const entry of ready) {
+				chars += entry[1].text.length;
+				if (late.length && (late.length === LATE_MAX || chars > LATE_CHARS)) break;
+				late.push(entry);
+			}
 			for (const [question, reply] of late) {
 				replies.delete(question);
 				shown.add(question);
 				ack($, question, reply.server);
 			}
 			if (!waiting.length && !late.length) return r;
+			const held = ready.length - late.length;
+			const more = held ? [held === 1 ? "Isoplan: 1 more answer to your questions is waiting; it comes with your next tool results." : `Isoplan: ${held} more answers to your questions are waiting; they come with your next tool results.`] : [];
 			return {
 				...r,
 				context: [
 					...r.context ?? [],
 					...waiting,
-					...late.map(([, reply]) => reply.text)
+					...late.map(([, reply]) => reply.text),
+					...more
 				]
 			};
 		} catch {

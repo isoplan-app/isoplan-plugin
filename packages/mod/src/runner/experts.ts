@@ -70,7 +70,7 @@ export interface Experts {
   hosted(): HostedExpert[];
   /** `hosted()` changed: an expert added, removed, or its state. Several listeners, one per office. */
   onChange(listener: () => void): void;
-  /** An office server's `hosting`: the experts it doesn't list are logged in their health logs. */
+  /** An office server's `hosting`: the experts it doesn't list are logged in their health logs, and so are those it lists again after. */
   listed(server: string, names: readonly string[]): void;
   owns(request: string): boolean;
   /** `senior` is told the request's id when the expert's junior first asks its senior for it. */
@@ -155,8 +155,14 @@ export function createExperts(o: ExpertsOptions): Experts {
     listed(server, listed) {
       const missing = [...experts.keys()].filter((n) => !listed.includes(n)).sort();
       const text = missing.join(",");
-      if ((unlisted.get(server) ?? "") === text) return;
+      const before = unlisted.get(server) ?? "";
+      if (before === text) return;
       unlisted.set(server, text);
+      const now = before.split(",").filter((n) => experts.has(n) && listed.includes(n));
+      if (now.length) {
+        o.log(`${server} now lists the experts ${now.join(", ")}`);
+        for (const name of now) health(name).say("listed", { server, unlisted: text });
+      }
       if (!missing.length) return;
       o.log(`${server} doesn't list the experts ${missing.join(", ")}: their repo isn't in an office there, another machine's expert has the name, or the office has more experts than a session may be told of`);
       for (const name of missing) health(name).say("listed", { server, unlisted: text });

@@ -21370,8 +21370,17 @@ function createExperts(o) {
 		listed(server, listed) {
 			const missing = [...experts.keys()].filter((n) => !listed.includes(n)).sort();
 			const text = missing.join(",");
-			if ((unlisted.get(server) ?? "") === text) return;
+			const before = unlisted.get(server) ?? "";
+			if (before === text) return;
 			unlisted.set(server, text);
+			const now = before.split(",").filter((n) => experts.has(n) && listed.includes(n));
+			if (now.length) {
+				o.log(`${server} now lists the experts ${now.join(", ")}`);
+				for (const name of now) health(name).say("listed", {
+					server,
+					unlisted: text
+				});
+			}
 			if (!missing.length) return;
 			o.log(`${server} doesn't list the experts ${missing.join(", ")}: their repo isn't in an office there, another machine's expert has the name, or the office has more experts than a session may be told of`);
 			for (const name of missing) health(name).say("listed", {
@@ -21557,7 +21566,7 @@ function hostExperts(o) {
 	timer.unref?.();
 	return {
 		onHosting(m) {
-			o.experts.listed(o.server, m.listed);
+			if (last !== null) o.experts.listed(o.server, m.listed);
 			hosting = true;
 			expertSenior = m.expertSenior === true;
 			queue(true);
