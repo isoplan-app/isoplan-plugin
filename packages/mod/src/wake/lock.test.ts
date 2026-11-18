@@ -31,3 +31,17 @@ test("lock: a second data layer is refused while the first lives; a stale lock i
   expect(await takeLock(s.lock, OTHER + 1, () => false)).toBe(true);
   expect(JSON.parse(fs.readFileSync(s.lock, "utf8"))).toEqual({ pid: OTHER + 1 });
 });
+
+test("lock: a takeover in progress beside a stale lock makes another taker lose, and one a crashed taker left is cleared once old", async () => {
+  const s = setup();
+  fs.mkdirSync(path.dirname(s.lock), { recursive: true });
+  fs.writeFileSync(s.lock, JSON.stringify({ pid: OTHER }));
+  fs.writeFileSync(`${s.lock}.take`, "1");
+  expect(await takeLock(s.lock, OTHER + 1, () => false)).toBe(false);
+  expect(JSON.parse(fs.readFileSync(s.lock, "utf8"))).toEqual({ pid: OTHER });
+  const old = new Date(Date.now() - 60000);
+  fs.utimesSync(`${s.lock}.take`, old, old);
+  expect(await takeLock(s.lock, OTHER + 1, () => false)).toBe(true);
+  expect(JSON.parse(fs.readFileSync(s.lock, "utf8"))).toEqual({ pid: OTHER + 1 });
+  expect(fs.readdirSync(path.dirname(s.lock))).toEqual(["s-1.json"]);
+});

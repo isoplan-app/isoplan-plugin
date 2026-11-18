@@ -77,11 +77,16 @@ export async function isHeld(file: string, now = Date.now(), isAlive = alive, ru
  * written into the lock beside the pid.
  *
  * A new lock is created exclusively, so of two takers at once only one gets it. A stale one is
- * moved aside by rename, which only one taker can do to the same file, and the taker checks that
- * what it moved is the lock it judged stale, by its text and its write time, so a lock its holder
- * refreshed meanwhile isn't taken: one that moved another's lock instead puts it back and loses.
- * With `force` a lock that can't be moved (on Windows a scanner may have it open) is tried again
- * after a short wait, then overwritten, so the plugin's data layer always gets it.
+ * taken over one taker at a time: only the taker that creates `<lock>.take` (exclusively too) may
+ * remove it, after reading it again to check it is still the lock it judged stale, by its text and
+ * its write time, so a lock its holder refreshed meanwhile, or another taker's new one, is never
+ * removed. A taker that finds `.take` there loses; one older than TAKE_STALE_MS was left by a taker
+ * that crashed holding it, and is cleared.
+ *
+ * With `force` a stale or held lock is moved aside by rename, and the taker checks that what it
+ * moved is the lock it read: one that moved another's lock instead puts it back and looks again. A
+ * lock that can't be moved (on Windows a scanner may have it open) is tried again after a short
+ * wait, then overwritten, so the plugin's data layer always gets it.
  */
 export async function takeLock(file: string, pid: number, isAlive = alive, force = false, now = Date.now(), { freshMs, extra = {} }: { freshMs?: number; extra?: Record<string, unknown> } = {}): Promise<boolean> {
   await fs.mkdir(path.dirname(file), { recursive: true });
@@ -98,12 +103,16 @@ export async function takeLock(file: string, pid: number, isAlive = alive, force
     if (!seen) continue; // gone since: try to create it again
     const lock = parseLock(seen.text, seen.mtimeMs);
     if (!force && lock?.pid !== pid && held(lock, now, { isAlive, freshMs })) return false;
+    if (!force) {
+      if (!(await removeStale(file, seen))) return false;
+      continue;
+    }
     const aside = `${file}.${pid}-${Math.random().toString(36).slice(2)}`;
     try {
       await fs.rename(file, aside);
     } catch (err) {
       // Another taker moved it first (or, on Windows, a reader has it open): look again.
-      if (["ENOENT", "EPERM", "EBUSY", "EACCES"].includes((err as NodeJS.ErrnoException).code ?? "")) continue;
+      if (["ENOENT", ...BUSY].includes((err as NodeJS.ErrnoException).code ?? "")) continue;
       throw err;
     }
     const moved = await fs.readFile(aside, "utf8").catch(() => null);
@@ -112,13 +121,43 @@ export async function takeLock(file: string, pid: number, isAlive = alive, force
       // That was another taker's new lock: it goes back, unless a newer one is there already.
       await fs.link(aside, file).catch(() => {});
       await fs.rm(aside, { force: true });
-      if (!force) return false;
       continue;
     }
     await fs.rm(aside, { force: true });
   }
   if (!force) return false;
   await fs.writeFile(file, body);
+  return true;
+}
+
+// How old a `.take` must be to count as left by a taker that crashed: a takeover takes milliseconds.
+const TAKE_STALE_MS = 5000;
+const BUSY = ["EPERM", "EBUSY", "EACCES"];
+
+/**
+ * Removes the stale lock `seen` while holding `<lock>.take`, if it is still that one; false when
+ * another taker holds `.take`. Either way the caller looks again.
+ */
+async function removeStale(file: string, seen: { text: string; mtimeMs: number }): Promise<boolean> {
+  const take = `${file}.take`;
+  try {
+    await fs.writeFile(take, String(process.pid), { flag: "wx" });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    const st = await fs.stat(take).catch(() => null);
+    if (st && Date.now() - st.mtimeMs < TAKE_STALE_MS) return false;
+    await fs.rm(take, { force: true });
+    return true;
+  }
+  try {
+    const now = await readText(file);
+    if (now?.text === seen.text && now.mtimeMs === seen.mtimeMs) await fs.rm(file, { force: true });
+  } catch (err) {
+    // On Windows a reader may have it open: the caller looks again.
+    if (!BUSY.includes((err as NodeJS.ErrnoException).code ?? "")) throw err;
+  } finally {
+    await fs.rm(take, { force: true });
+  }
   return true;
 }
 
