@@ -1709,7 +1709,11 @@ const WRITTEN = [
 	"offices",
 	"approved.json",
 	"update.json",
-	"update.lock"
+	"update.lock",
+	"starts",
+	"messages",
+	"remote-names.json",
+	"no-hooks"
 ];
 const SESSION_TRACES = [
 	"live",
@@ -1721,7 +1725,8 @@ const SESSION_TRACES = [
 	"offices",
 	"approved.json",
 	"update.json",
-	"update.lock"
+	"update.lock",
+	"messages"
 ];
 /**
 * Takes out everything install and the plugin put in place, in this order: the running runner;

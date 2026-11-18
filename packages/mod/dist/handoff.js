@@ -8745,8 +8745,13 @@ async function recordTaken(folder, commit) {
 		commits
 	}, null, 2) + "\n");
 }
-let emptyHooks = null;
-const noHooks = async () => ["-c", `core.hooksPath=${await (emptyHooks ??= fs.mkdtemp(path.join(os.tmpdir(), "isoplan-no-hooks-")))}`];
+const emptyHooks = /* @__PURE__ */ new Map();
+const noHooks = async () => {
+	const dir = path.join(claudePaths(process.env, os.homedir()).dir, "isoplan", "no-hooks");
+	let made = emptyHooks.get(dir);
+	if (!made) emptyHooks.set(dir, made = fs.mkdir(dir, { recursive: true }).then(() => dir));
+	return ["-c", `core.hooksPath=${await made}`];
+};
 /**
 * How many commits `ref` has that neither the new tip nor any commit this machine took of the
 * handoff before (`exempt`, which a new hand-over replaces) has: the receiver's own work. Null when

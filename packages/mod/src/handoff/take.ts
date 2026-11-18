@@ -99,7 +99,8 @@ import { normalize, pathKey } from "../data-layer/git.js";
 import type { NodeIo } from "../data-layer/io.js";
 import { atLeast, claudeCommand, claudeVersion, DESKTOP_MIN_VERSION, desktopPlatform } from "../runner/claude-binary.js";
 import { forkEnv, killTree, type Track } from "../runner/claude.js";
-import { isoplanFolder } from "../runner/repo-folders.js";
+import { claudePaths } from "../data-layer/claude-paths.js";
+import { isoplanFolder, readClonesFolders } from "../runner/repo-folders.js";
 import type { PreparedTake } from "../runner/session.js";
 import type { RemoteNames } from "../data-layer/remote-names.js";
 import { handoffBranch, remotesOf, sameRepo, type RunGit } from "./git.js";
@@ -248,10 +249,11 @@ export async function findWorkspace(io: NodeIo, run: RunGit, projectsDir: string
 
 // The folders the machine's Claude Code sessions since `since` ran in, the most recent first, each
 // once: never one of Isoplan's own (an expert's read/ has the person's remote too), under the Claude
-// folder `projectsDir` is in.
+// folder `projectsDir` is in or in a folder runner.json's `clonesFolder` has named.
 async function recentFolders(io: NodeIo, projectsDir: string, since: number): Promise<string[]> {
   const claudeDir = path.dirname(projectsDir);
-  return (await sessionFolders(io, projectsDir, since)).map((f) => f.folder).filter((folder) => !isoplanFolder(claudeDir, folder));
+  const clonesFolders = await readClonesFolders(claudeDir);
+  return (await sessionFolders(io, projectsDir, since)).map((f) => f.folder).filter((folder) => !isoplanFolder(claudeDir, folder, clonesFolders));
 }
 
 /**
@@ -604,9 +606,20 @@ export async function recordOrca(folder: string, terminal: string | null, worktr
 
 // An empty folder as core.hooksPath, so no hook of the repo's runs while the handoff's branch, or a
 // branch started from the floor (runner/checkouts.ts), is checked out: they would be whoever pushed
-// it, from that branch.
-let emptyHooks: Promise<string> | null = null;
-export const noHooks = async () => ["-c", `core.hooksPath=${await (emptyHooks ??= fs.mkdtemp(path.join(os.tmpdir(), "isoplan-no-hooks-")))}`];
+// it, from that branch. One for the Claude folder, <claude dir>/isoplan/no-hooks, made once.
+const emptyHooks = new Map<string, Promise<string>>();
+export const noHooks = async () => {
+  const dir = path.join(claudePaths(process.env, os.homedir()).dir, "isoplan", "no-hooks");
+  let made = emptyHooks.get(dir);
+  if (!made) emptyHooks.set(dir, (made = fs.mkdir(dir, { recursive: true }).then(() => dir)));
+  return ["-c", `core.hooksPath=${await made}`];
+};
+
+/** Removes the empty isoplan-no-hooks-* folders earlier versions made, one per process, in `tmp` (the system's temp folder); a folder with anything in it is left, and an error is ignored. */
+export async function removeOldNoHooks(tmp: string): Promise<void> {
+  const names = await fs.readdir(tmp).catch(() => []);
+  await Promise.all(names.filter((n) => n.startsWith("isoplan-no-hooks-")).map((n) => fs.rmdir(path.join(tmp, n)).catch(() => {})));
+}
 
 /** Takes the handoff on this machine; never throws. */
 export async function takeHandoff(message: Pick<HandoffMessage, "handoff" | "mode" | "session" | "by" | "room" | "permissions">, o: TakeOptions): Promise<TakenMessage> {

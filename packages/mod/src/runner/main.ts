@@ -82,14 +82,15 @@ import { loadPrompts } from "./prompts.js";
 import { createRunGit, gitFailed, handoffBranch, handoffNote, HandoffGitError, prepare, pushHandoff, type Prepared } from "../handoff/git.js";
 import { focusHandoff } from "../handoff/focus.js";
 import { findOrca, orcaRunner } from "../handoff/orca.js";
-import { CLOSED_FROM_MENU, desktopProblem, sessionFolders, takeHandoff, type TakeSettings } from "../handoff/take.js";
+import { CLOSED_FROM_MENU, desktopProblem, removeOldNoHooks, sessionFolders, takeHandoff, type TakeSettings } from "../handoff/take.js";
 import { recordTakenOffice } from "../handoff/taken-office.js";
 import { answerOffices } from "./offices.js";
 import { createForkSlots, createRunner, PushFailed, type RunnerSettings } from "./runner.js";
 import { errorText, loadPatterns, scan } from "./scan.js";
 import { createRegistry, registryPath } from "./registry.js";
 import { branchFolder, createCheckouts, createRemoteBranches, orcaBranchFolder } from "./checkouts.js";
-import { repoFolders } from "./repo-folders.js";
+import { createIsoplanClones } from "./isoplan-clone.js";
+import { readClonesFolders, repoFolders, useClonesFolder } from "./repo-folders.js";
 import { createNamer, type NamingSettings } from "./naming.js";
 import { createDriver, type DriveOffice, type Driver, type DriveSettings } from "./session.js";
 import { watchSessions } from "./reporting.js";
@@ -102,7 +103,7 @@ import { hostExperts } from "./expert-link.js";
 import { createExperts, expertIgnored, forOffice, type Experts } from "./experts.js";
 import { createPipeServer, type Hooked } from "../pipe/server.js";
 import { createPairLinks } from "./pair-links.js";
-import { startPlaces, startWhere } from "./start-where.js";
+import { startPlaces, startWhere, tidyStarts } from "./start-where.js";
 import { runnerEnvPath } from "./environment.js";
 import { applyClaudeDir, LOCK_REFRESH_MS, RUNNER_FRESH_MS, runnerCode, runnerLockPath } from "./start.js";
 import { closeProcess, createStatus, sessionsSeen, statusPath } from "./status.js";
@@ -194,13 +195,22 @@ async function worker(): Promise<number> {
   });
   const io = nodeIo();
   const config = () => loadConfig(io, path.join(appDir, "config.json"), path.join(isoplanDir, "config.json"));
-  const settings = () => loadSettings<RunnerSettings & TakeSettings & DriveSettings & NamingSettings & { claudeModel: string; repoSearchDepth: number; startAtLogin: boolean; trayRefreshSeconds: number; expertJudgeModel: string; expertWaitSeconds: number }>(io, path.join(appDir, "runner.json"), path.join(isoplanDir, "runner.json"));
+  const settings = () => loadSettings<RunnerSettings & TakeSettings & DriveSettings & NamingSettings & { claudeModel: string; repoSearchDepth: number; startAtLogin: boolean; trayRefreshSeconds: number; expertJudgeModel: string; expertWaitSeconds: number; clonesFolder: string }>(io, path.join(appDir, "runner.json"), path.join(isoplanDir, "runner.json"));
   const first = await config();
   // Plain ws:// to another machine would send the machine's credential unencrypted.
   const offices = officesOf(first);
   for (const { server } of offices.filter((o) => o.plainRefused)) log(`the runner doesn't answer through ${server}: it is plain ws:// to another machine; use wss://, or set "allowPlainWs": true in config.json`);
   if (offices.every((o) => o.plainRefused)) return 0;
-  await settings(); // a broken runner.json of the plugin's is a crash to see at once
+  const started = await settings(); // a broken runner.json of the plugin's is a crash to see at once
+  // Where new clones and experts' copies go, read as the runner starts, and every folder it has
+  // named, where those made earlier are still used (repo-folders.ts useClonesFolder).
+  const clones = await useClonesFolder(claudeDir, started.clonesFolder, log).catch(async (err: Error) => {
+    log(`couldn't record clonesFolder in runner.json, so new clones and experts' copies go under ${isoplanDir}: ${err.message}`);
+    return { folder: "", folders: await readClonesFolders(claudeDir) };
+  });
+  // Left by earlier versions, or by sessions started outside the floor a week ago or more.
+  void removeOldNoHooks(os.tmpdir());
+  void tidyStarts(claudeDir);
   const answering = offices.filter((o) => !o.plainRefused);
   const account = await accountOf({ readText: (p) => fs.readFile(p, "utf8").catch(() => null), run: io.run }, claudeJson, os.homedir());
   // The machine's links to pair it, to the sessions waiting for them.
@@ -264,7 +274,8 @@ async function worker(): Promise<number> {
   const titles = new Map<string, string>();
   // The experts this machine hosts (experts.ts), made once git is; declared here because the first
   // look below runs before that, and must not read a const declared after it. Their trunks are
-  // never reported: each one's folder is under expertsDir, which keeps them out from the first look.
+  // never reported: each one's folder is under expertsDir, or experts/ of a folder clonesFolder has
+  // named, which keeps them out from the first look.
   const expertsDir = path.join(isoplanDir, "experts");
   let experts: Experts | null = null;
   const reporting = watchSessions<Hooked>({
@@ -273,7 +284,7 @@ async function worker(): Promise<number> {
     config,
     isOff,
     log,
-    ignored: expertIgnored(expertsDir, () => experts),
+    ignored: expertIgnored(expertsDir, () => experts, clones.folders),
     hooked: (id) => pipe?.hooked(id) ?? null,
     removedFile: path.join(isoplanDir, "runner", "removed.json"),
     held: (id, hooks) => {
@@ -350,6 +361,8 @@ async function worker(): Promise<number> {
   // Ready once the expert files and their states are read; checkouts and groundings go on in the background.
   const hosted = createExperts({
     expertsDir,
+    clonesFolder: clones.folder,
+    clonesFolders: clones.folders,
     logsDir: path.join(isoplanDir, "logs"),
     projectsDir: path.join(claudeDir, "projects"),
     appDir,
@@ -451,6 +464,7 @@ async function worker(): Promise<number> {
         // Never one of Isoplan's own folders, such as an expert trunk's: not one a person worked in here.
         const repos = await repoFolders(seen, {
           claudeDir,
+          clonesFolders: clones.folders,
           checkout: checkouts.of,
           home,
           // Only a git checkout of a repo with a remote has branches to offer: not a folder above several repos.
@@ -577,6 +591,7 @@ async function worker(): Promise<number> {
     // transcript is written again (resumed in a terminal, say), or its hooks module connects.
     removed: (session) => reporting.end(session.slice(session.indexOf(":") + 1), REMOVED, true),
     projectOf: async (folder) => (await homeIo.projectOf(await homeIo.resolve(folder), folder)).id,
+    isoplanClone: createIsoplanClones({ git, claudeDir, clonesFolder: clones.folder, clonesFolders: clones.folders, timeoutMs: gitMs, log }),
     // A start that opens outside the floor (#85), as a take opens its session.
     elsewhere: (start, bin) =>
       startWhere(start, bin, {

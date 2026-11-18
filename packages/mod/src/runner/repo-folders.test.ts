@@ -1,7 +1,9 @@
 import { MAX_BRANCH_LENGTH, MAX_FOLDER_LENGTH, MAX_FOLDER_REPOS, MAX_REPO_BRANCHES } from "@isoplan/protocol";
+import path from "node:path";
 import { expect, test } from "vitest";
+import { tempRoot } from "../data-layer/fixture.js";
 import { pathKey } from "../data-layer/git.js";
-import { repoFolders, type RepoFoldersOptions } from "./repo-folders.js";
+import { isoplanFolder, readClonesFolders, repoFolders, useClonesFolder, type RepoFoldersOptions } from "./repo-folders.js";
 
 // A fake AWS key id, split so no key-shaped string sits in the source.
 const AWS_KEY = "AKIA" + "ABCDEFGHIJKLMNOP";
@@ -98,4 +100,26 @@ test("every repo's remote is asked at once: two slow ones hold the list up by on
     { project: APP, folders: ["/code/app"], branches: ["main"] },
     { project: API, folders: ["/code/api"], branches: ["dev"] },
   ]);
+});
+
+test.each([
+  ["Windows", "C:\\Users\\Ada\\.claude", "D:\\Isoplan", ["d:/isoplan/Clones/app-12345678", "D:\\Isoplan\\experts\\adr\\read"], "D:\\Isoplan\\code\\app"],
+  ["macOS", "/Users/ada/.claude", "/Volumes/work/isoplan", ["/Volumes/work/isoplan/clones/app-12345678", "/Volumes/work/isoplan/experts/adr/read"], "/Volumes/work/isoplan/code/app"],
+])("%s: the clones/ and experts/ of a folder clonesFolder has named are Isoplan's own; the rest of that folder isn't", (_, claudeDir, folder, own, mine) => {
+  for (const f of own) expect(isoplanFolder(claudeDir, f, [folder])).toBe(true);
+  expect(isoplanFolder(claudeDir, mine, [folder])).toBe(false);
+  expect(isoplanFolder(claudeDir, own[0]!)).toBe(false);
+});
+
+test("clonesFolder as the runner starts: an absolute one is recorded, and kept once another is named; one that isn't absolute is ignored, with a log line", async () => {
+  const claudeDir = tempRoot();
+  const logs: string[] = [];
+  const log = (t: string) => void logs.push(t);
+  const [a, b] = [path.join(claudeDir, "a"), path.join(claudeDir, "b")];
+  expect(await useClonesFolder(claudeDir, "", log)).toEqual({ folder: "", folders: [] });
+  expect(await useClonesFolder(claudeDir, a, log)).toEqual({ folder: a, folders: [a] });
+  expect(await useClonesFolder(claudeDir, b, log)).toEqual({ folder: b, folders: [a, b] });
+  expect(await useClonesFolder(claudeDir, "clones", log)).toEqual({ folder: "", folders: [a, b] });
+  expect(await readClonesFolders(claudeDir)).toEqual([a, b]);
+  expect(logs).toEqual([expect.stringContaining("clonesFolder in runner.json, clones, isn't an absolute path, so it is ignored")]);
 });

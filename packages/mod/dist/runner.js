@@ -12435,13 +12435,52 @@ async function commitIn(run, repo, id, index, timeoutMs, pushAnyway, scan) {
 //#region src/runner/repo-folders.ts
 /**
 * Whether `folder` is one of Isoplan's own: anything inside <claude dir>/isoplan/, such as an
-* expert's read/ or a clone Isoplan keeps for itself. Never the person's clone, so never offered to
-* start a session in, nor the clone a take works beside (handoff/take.ts). Windows paths compare
-* case-insensitively.
+* expert's read/ or a clone Isoplan keeps for itself, or inside the clones/ or experts/ of any of
+* `clonesFolders`, the folders runner.json's `clonesFolder` has named (readClonesFolders). Never the
+* person's clone, so never offered to start a session in, nor the clone a take works beside
+* (handoff/take.ts). Windows paths compare case-insensitively.
 */
-function isoplanFolder(claudeDir, folder) {
-	const own = join(claudeDir, "isoplan");
-	return pathKey(folder) === pathKey(own) || relativeTo(own, folder) !== null;
+function isoplanFolder(claudeDir, folder, clonesFolders = []) {
+	return [join(claudeDir, "isoplan"), ...clonesFolders.flatMap((f) => [join(f, "clones"), join(f, "experts")])].some((dir) => pathKey(folder) === pathKey(dir) || relativeTo(dir, folder) !== null);
+}
+/** The runner's record of every folder runner.json's `clonesFolder` has named, so clones and experts' copies made there are still found, and still Isoplan's own, once it names another. */
+const clonesFoldersPath = (claudeDir) => path.join(claudeDir, "isoplan", "clones-folders.json");
+/** The folders `clonesFolder` has named on this machine; none when the record is missing or doesn't parse. */
+async function readClonesFolders(claudeDir) {
+	try {
+		const value = JSON.parse(await fs.readFile(clonesFoldersPath(claudeDir), "utf8"));
+		return Array.isArray(value) ? value.filter((f) => typeof f === "string" && path.isAbsolute(f)) : [];
+	} catch {
+		return [];
+	}
+}
+/**
+* runner.json's `clonesFolder` as the runner starts: "" for the places under <claude dir>/isoplan;
+* one that isn't an absolute path is ignored, with a log line. A folder it names is added to the
+* record first. `folders` is every folder the record holds, this one included.
+*/
+async function useClonesFolder(claudeDir, setting, log) {
+	const folders = await readClonesFolders(claudeDir);
+	if (!setting) return {
+		folder: "",
+		folders
+	};
+	if (!path.isAbsolute(setting)) {
+		log(`clonesFolder in runner.json, ${setting}, isn't an absolute path, so it is ignored: new clones and experts' copies go under ${path.join(claudeDir, "isoplan")}`);
+		return {
+			folder: "",
+			folders
+		};
+	}
+	if (!folders.some((f) => pathKey(f) === pathKey(setting))) {
+		folders.push(setting);
+		await fs.mkdir(path.dirname(clonesFoldersPath(claudeDir)), { recursive: true });
+		await fs.writeFile(clonesFoldersPath(claudeDir), JSON.stringify(folders, null, 2) + "\n");
+	}
+	return {
+		folder: setting,
+		folders
+	};
 }
 /** The repos `seen` is in, the most recently used first: each once, by its main checkout, at most MAX_FOLDER_REPOS, each with at most MAX_REPO_BRANCHES branches. */
 async function repoFolders(seen, o) {
@@ -12458,9 +12497,9 @@ async function repoFolders(seen, o) {
 	const chosen = [];
 	for (const { folder } of [...seen].sort((a, b) => b.at - a.at)) {
 		if (byRepo.size >= 100) break;
-		if (isoplanFolder(o.claudeDir, folder)) continue;
+		if (isoplanFolder(o.claudeDir, folder, o.clonesFolders)) continue;
 		const checkout = await o.checkout(folder).catch(() => null);
-		if (!checkout || isoplanFolder(o.claudeDir, checkout)) continue;
+		if (!checkout || isoplanFolder(o.claudeDir, checkout, o.clonesFolders)) continue;
 		const key = pathKey(checkout);
 		if (tried.has(key)) continue;
 		tried.add(key);
@@ -12573,7 +12612,8 @@ async function findWorkspace(io, run, projectsDir, repos, since, timeoutMs, name
 }
 async function recentFolders(io, projectsDir, since) {
 	const claudeDir = path.dirname(projectsDir);
-	return (await sessionFolders(io, projectsDir, since)).map((f) => f.folder).filter((folder) => !isoplanFolder(claudeDir, folder));
+	const clonesFolders = await readClonesFolders(claudeDir);
+	return (await sessionFolders(io, projectsDir, since)).map((f) => f.folder).filter((folder) => !isoplanFolder(claudeDir, folder, clonesFolders));
 }
 /**
 * The folders the machine's Claude Code sessions since `since` ran in, still there (or, with `gone`,
@@ -13046,8 +13086,18 @@ async function recordOrca(folder, terminal, worktree) {
 		worktree
 	}, null, 2) + "\n");
 }
-let emptyHooks = null;
-const noHooks = async () => ["-c", `core.hooksPath=${await (emptyHooks ??= fs.mkdtemp(path.join(os.tmpdir(), "isoplan-no-hooks-")))}`];
+const emptyHooks = /* @__PURE__ */ new Map();
+const noHooks = async () => {
+	const dir = path.join(claudePaths(process.env, os.homedir()).dir, "isoplan", "no-hooks");
+	let made = emptyHooks.get(dir);
+	if (!made) emptyHooks.set(dir, made = fs.mkdir(dir, { recursive: true }).then(() => dir));
+	return ["-c", `core.hooksPath=${await made}`];
+};
+/** Removes the empty isoplan-no-hooks-* folders earlier versions made, one per process, in `tmp` (the system's temp folder); a folder with anything in it is left, and an error is ignored. */
+async function removeOldNoHooks(tmp) {
+	const names = await fs.readdir(tmp).catch(() => []);
+	await Promise.all(names.filter((n) => n.startsWith("isoplan-no-hooks-")).map((n) => fs.rmdir(path.join(tmp, n)).catch(() => {})));
+}
 /** Takes the handoff on this machine; never throws. */
 async function takeHandoff(message, o) {
 	const { handoff } = message;
@@ -14678,8 +14728,15 @@ function createRemoteBranches({ run, timeoutMs, refreshMs, log, now = Date.now }
 		return branches;
 	};
 }
-/** A branch name as a folder's: characters other than letters, digits, . _ - as -, none of . - at its end. */
-const asName = (branch) => branch.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/[.-]+$/, "");
+/**
+* A branch name as a folder's: characters other than letters, digits, . _ - as -, none of . - at its
+* end; one longer than 24 as its first 16 (none of . - at their end), - and a hash of the branch, so
+* a folder's path stays short and two long branches never share one.
+*/
+function asName(branch) {
+	const name = branch.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/[.-]+$/, "");
+	return name.length > 24 ? `${name.slice(0, 16).replace(/[.-]+$/, "")}-${createHash("sha256").update(branch).digest("hex").slice(0, 6)}` : name;
+}
 /**
 * The folder a session on `branch` opens in: `checkout` when it is on that branch; else a worktree
 * already on it; else a new one beside the checkout, from the local branch of that name as it is, or,
@@ -14785,153 +14842,6 @@ ${fetched.stderr}` };
 		remote: "origin"
 	}, branch, made, () => branchFolder(run, checkout, branch, timeoutMs), timeoutMs);
 	return typeof dir === "string" ? spelledAs(checkout, dir) : dir;
-}
-//#endregion
-//#region src/data-layer/titles.ts
-const ASK_EVERY_MS = 6e5;
-const MAX_FILES = 15;
-const MAX_TASKS = 10;
-const MAX_TITLE = 60;
-const TITLE_SYSTEM = "You name coding sessions for a floor plan of a team's work. From the facts given, write a title of 3 to 6 words saying what the session is working on. Reply with the title alone: no quotes and no full stop.";
-/** What the session's title is written from, each list sorted. */
-function titleInputs(facts) {
-	const subs = facts.agents.filter((a) => a.startedBy !== null);
-	const files = /* @__PURE__ */ new Map();
-	for (const e of facts.edits) {
-		const hit = files.get(e.file.toLowerCase());
-		if (!hit) files.set(e.file.toLowerCase(), {
-			file: e.file,
-			at: e.at
-		});
-		else if (e.at > hit.at) hit.at = e.at;
-	}
-	const tasks = subs.filter((a) => a.task).sort((a, b) => cmp(b.lastActive, a.lastActive));
-	return {
-		branch: facts.session.branch,
-		files: [...files.values()].sort((a, b) => cmp(b.at, a.at)).slice(0, MAX_FILES).map((f) => f.file).sort(),
-		types: [...new Set(subs.map((a) => a.agentType).filter((t) => !!t))].sort(),
-		tasks: [...new Set(tasks.map((a) => a.task))].slice(0, MAX_TASKS).sort()
-	};
-}
-/** The cache key for the inputs: a new call goes out only when this changes. */
-const titleKey = (inputs) => JSON.stringify(inputs);
-/** The prompt for the inputs. */
-function titlePrompt({ branch, files, types, tasks }) {
-	const out = [`Branch: ${branch || "(none)"}`];
-	if (files.length) out.push("Files edited:", ...files.map((f) => "- " + f));
-	if (types.length) out.push(`Agent types: ${types.join(", ")}`);
-	if (tasks.length) out.push("Subagent tasks:", ...tasks.map((t) => "- " + t));
-	return out.join("\n");
-}
-/** The title from a reply's text: its first line, unquoted, clipped; null when nothing is left. */
-function cleanTitle(reply) {
-	const title = (reply.split(/\r?\n/).map((l) => l.trim()).find(Boolean) || "").replace(/^["'`*]+|["'`*.]+$/g, "").trim();
-	if (!title) return null;
-	return title.length <= MAX_TITLE ? title : title.slice(0, 59).trimEnd() + "…";
-}
-/**
-* The title call due now, or null: when the session is titled by its branch, its inputs changed
-* since its last written title, and its last ask was at least ASK_EVERY_MS ago.
-*/
-function nextTitle(facts, cache, now) {
-	if (facts.session.titleFrom !== "branch") return null;
-	const inputs = titleInputs(facts);
-	if (!inputs.branch && !inputs.files.length && !inputs.tasks.length) return null;
-	const key = titleKey(inputs);
-	if (cache && (cache.key === key || now - cache.at < ASK_EVERY_MS)) return null;
-	return {
-		key,
-		prompt: titlePrompt(inputs)
-	};
-}
-const cmp = (a, b) => a < b ? -1 : a > b ? 1 : 0;
-//#endregion
-//#region src/runner/naming.ts
-const INSTRUCTION_CHARS = 2e3;
-/** Every flag of the naming call's command line, after the binary. */
-function namingArgs(model, system) {
-	return [
-		"-p",
-		"--no-session-persistence",
-		"--tools",
-		"",
-		"--setting-sources",
-		"",
-		"--strict-mcp-config",
-		"--model",
-		model,
-		"--system-prompt",
-		system,
-		"--output-format",
-		"json"
-	];
-}
-/** The name from the call's output, the one JSON object `--output-format json` writes; null for a failure or nothing usable. */
-function nameFrom(stdout) {
-	let e;
-	try {
-		e = JSON.parse(stdout.trim());
-	} catch {
-		return null;
-	}
-	if (!e || e.type !== "result" || e.is_error === true || e.subtype !== "success" || typeof e.result !== "string") return null;
-	return cleanTitle(e.result);
-}
-function createNamer(o) {
-	const spawn = o.spawn ?? hiddenSpawn;
-	const env = o.env ?? process.env;
-	const platform = o.platform ?? process.platform;
-	const running = /* @__PURE__ */ new Set();
-	return {
-		async name(instruction) {
-			const bin = await o.binary();
-			if (!bin) return null;
-			const st = await o.settings();
-			const system = (await o.system()).trim();
-			let child;
-			try {
-				child = spawn([...claudeCommand(bin), ...namingArgs(st.namingModel, system)], {
-					cwd: o.cwd ?? os.tmpdir(),
-					env: forkEnv(env)
-				});
-			} catch (err) {
-				o.log(`couldn't start claude to name a session: ${err.message}`);
-				return null;
-			}
-			running.add(child);
-			return new Promise((resolve) => {
-				let stdout = "";
-				let stderr = "";
-				let over = false;
-				const finish = (name, why) => {
-					if (over) return;
-					over = true;
-					clearTimeout(timer);
-					running.delete(child);
-					if (why) o.log(`no name was written for a session: ${why}`);
-					resolve(name);
-				};
-				const timer = setTimeout(() => {
-					killTree(child, platform);
-					finish(null, `it took longer than ${st.namingTimeoutSeconds} s`);
-				}, st.namingTimeoutSeconds * 1e3);
-				timer.unref?.();
-				child.stdout.setEncoding("utf8").on("data", (piece) => stdout += piece);
-				child.stderr.setEncoding("utf8").on("data", (piece) => stderr = (stderr + piece).slice(-500));
-				child.stdin.on("error", () => {});
-				child.on("error", (err) => finish(null, `claude failed: ${err.message}`));
-				child.on("close", (code) => {
-					const name = nameFrom(stdout);
-					finish(name, name ? void 0 : `claude exited${code === null ? "" : ` with code ${code}`} with no name${stderr.trim() ? `: ${stderr.trim().split("\n").slice(-2).join(" ")}` : ""}`);
-				});
-				child.stdin.end(`Instruction:\n${instruction.slice(0, INSTRUCTION_CHARS)}`);
-			});
-		},
-		close() {
-			for (const child of running) killTree(child, platform);
-			running.clear();
-		}
-	};
 }
 //#endregion
 //#region src/runner/expert-claude.ts
@@ -15192,6 +15102,18 @@ async function renamed(from, to) {
 		await new Promise((r) => setTimeout(r, 200));
 	}
 }
+/**
+* On Windows, git told to take paths longer than 260 characters for a clone of Isoplan's own: `git`
+* goes before `clone`, for the clone itself, and `clone` after it, which writes it into the new
+* repo's config, so every later git in it, the agent's included, has it too. Nothing elsewhere.
+*/
+const longPaths = (platform) => platform === "win32" ? {
+	git: ["-c", "core.longpaths=true"],
+	clone: ["--config", "core.longpaths=true"]
+} : {
+	git: [],
+	clone: []
+};
 /** Where a clone of `repo` borrows objects from: its own .git folder, since git won't borrow from a linked worktree (Orca's, say); the repo itself when git can't say. */
 async function borrowFrom(run, repo) {
 	const common = await run(repo, [
@@ -15201,9 +15123,9 @@ async function borrowFrom(run, repo) {
 	]);
 	return common.code === 0 && common.stdout.trim() ? common.stdout.trim() : repo;
 }
-function createExpertCheckout({ git, repo, dir, name, timeoutMs, log, fetchSeconds = () => 60, now = Date.now, onFetchFailed, cloneFrom = onTheWire }) {
-	const read = path.join(dir, "read");
-	const staging = path.join(dir, "read.new");
+function createExpertCheckout({ git, repo, dir, read = path.join(dir, "read"), name, timeoutMs, log, fetchSeconds = () => 60, now = Date.now, onFetchFailed, cloneFrom = onTheWire, platform = process.platform }) {
+	const staging = `${read}.new`;
+	const above = path.dirname(read);
 	let branch = null;
 	let fetchedAt = null;
 	const run = async (cwd, args, env) => git([...await noHooks(), ...args], {
@@ -15267,7 +15189,7 @@ function createExpertCheckout({ git, repo, dir, name, timeoutMs, log, fetchSecon
 			branch = await defaultBranch();
 			const st = await fs.lstat(read).catch(() => null);
 			if (!st || st.isDirectory() && (await fs.readdir(read)).length === 0) {
-				await fs.mkdir(dir, { recursive: true });
+				await fs.mkdir(above, { recursive: true });
 				await fs.rm(staging, {
 					recursive: true,
 					force: true,
@@ -15275,9 +15197,12 @@ function createExpertCheckout({ git, repo, dir, name, timeoutMs, log, fetchSecon
 					retryDelay: 200
 				});
 				const reference = await borrowFrom(run, repo);
-				await must(dir, [
+				const long = longPaths(platform);
+				await must(above, [
+					...long.git,
 					"clone",
 					"-q",
+					...long.clone,
 					"--no-checkout",
 					"--reference-if-able",
 					reference,
@@ -15397,14 +15322,21 @@ const NO_REMOTE = "This repo has no remote, so Isoplan can't keep a copy of its 
 const NOT_ON_WIRE = "This repo's remote is a folder or a share, not an https or ssh address, so Isoplan can't keep a copy of its own and nothing was started.";
 const NOT_MADE = "Isoplan's own copy of this repo couldn't be made on this computer, so nothing was started. Its runner log says why.";
 const NOT_FETCHED = "Isoplan's own copy of this repo couldn't be brought up to date on this computer, so nothing was started. Its runner log says why.";
-/** Where Isoplan keeps its clones. */
-const clonesDir = (claudeDir) => path.join(claudeDir, "isoplan", "clones");
-/** A project id as a folder's name: letters, digits, . _ - kept, the rest as -, cut short, then a hash of the id, so two ids never share one. */
+/** Where Isoplan keeps its clones: in runner.json's `clonesFolder` when it names one, else under <claude dir>/isoplan. */
+const clonesDir = (claudeDir, clonesFolder = "") => clonesFolder ? path.join(clonesFolder, "clones") : path.join(claudeDir, "isoplan", "clones");
+const slugged = (text) => text.replace(/[^a-z0-9._-]+/g, "-").replace(/^[.-]+|[.-]+$/g, "");
+const hashOf = (id) => createHash("sha256").update(id).digest("hex").slice(0, 8);
+/** A project id as a folder's name: its repo's name, letters, digits, . _ - kept, the rest as -, cut to 20, then a hash of the id, so two ids never share one. */
 function cloneName(project) {
 	const id = project.toLowerCase();
-	return `${id.replace(/[^a-z0-9._-]+/g, "-").replace(/^[.-]+|[.-]+$/g, "").slice(0, 60) || "repo"}-${createHash("sha256").update(id).digest("hex").slice(0, 8)}`;
+	return `${slugged(id.split("/").filter(Boolean).pop() ?? "").slice(0, 20).replace(/[.-]+$/, "") || "repo"}-${hashOf(id)}`;
 }
-function createIsoplanClones({ git, claudeDir, timeoutMs, log, cloneFrom = onTheWire }) {
+/** The name a clone was given before cloneName took only the repo's name: the whole id, cut to 60. One made then is still used at it. */
+function earlierCloneName(project) {
+	const id = project.toLowerCase();
+	return `${slugged(id).slice(0, 60) || "repo"}-${hashOf(id)}`;
+}
+function createIsoplanClones({ git, claudeDir, clonesFolder = "", clonesFolders = [], timeoutMs, log, cloneFrom = onTheWire, platform = process.platform }) {
 	const busy = /* @__PURE__ */ new Map();
 	const run = async (cwd, args) => git(args, {
 		cwd,
@@ -15427,9 +15359,16 @@ function createIsoplanClones({ git, claudeDir, timeoutMs, log, cloneFrom = onThe
 			log(`didn't clone ${project} for a hidden start: ${checkout}'s origin, ${url}, isn't an https, ssh or host:path remote`);
 			return { problem: NOT_ON_WIRE };
 		}
-		const root = clonesDir(claudeDir);
-		const clone = path.join(root, cloneName(project));
-		if (await fs.lstat(clone).catch(() => null)) {
+		const earlier = [path.join(clonesDir(claudeDir), earlierCloneName(project)), ...[
+			"",
+			clonesFolder,
+			...clonesFolders
+		].map((f) => path.join(clonesDir(claudeDir, f), cloneName(project)))];
+		const there = async (p) => await fs.lstat(p).catch(() => null) ? p : null;
+		const found = (await Promise.all(earlier.map(there))).find((p) => p !== null);
+		const root = clonesDir(claudeDir, clonesFolder);
+		const clone = found ?? path.join(root, cloneName(project));
+		if (found) {
 			if (!await fs.lstat(path.join(clone, ".git")).then((s) => s.isDirectory(), () => false)) {
 				log(`${clone} is there already and isn't a clone of its own, so it was left as it is and the hidden start of ${project} was refused; remove it and Isoplan clones it again`);
 				return { problem: NOT_MADE };
@@ -15459,9 +15398,12 @@ function createIsoplanClones({ git, claudeDir, timeoutMs, log, cloneFrom = onThe
 			maxRetries: 5,
 			retryDelay: 200
 		});
+		const long = longPaths(platform);
 		const made = await run(root, [
+			...long.git,
 			"clone",
 			"-q",
+			...long.clone,
 			"--reference-if-able",
 			await borrowFrom(run, checkout),
 			"--dissociate",
@@ -15492,6 +15434,153 @@ function createIsoplanClones({ git, claudeDir, timeoutMs, log, cloneFrom = onThe
 		busy.set(key, next);
 		next.then(() => busy.get(key) === next && busy.delete(key));
 		return next;
+	};
+}
+//#endregion
+//#region src/data-layer/titles.ts
+const ASK_EVERY_MS = 6e5;
+const MAX_FILES = 15;
+const MAX_TASKS = 10;
+const MAX_TITLE = 60;
+const TITLE_SYSTEM = "You name coding sessions for a floor plan of a team's work. From the facts given, write a title of 3 to 6 words saying what the session is working on. Reply with the title alone: no quotes and no full stop.";
+/** What the session's title is written from, each list sorted. */
+function titleInputs(facts) {
+	const subs = facts.agents.filter((a) => a.startedBy !== null);
+	const files = /* @__PURE__ */ new Map();
+	for (const e of facts.edits) {
+		const hit = files.get(e.file.toLowerCase());
+		if (!hit) files.set(e.file.toLowerCase(), {
+			file: e.file,
+			at: e.at
+		});
+		else if (e.at > hit.at) hit.at = e.at;
+	}
+	const tasks = subs.filter((a) => a.task).sort((a, b) => cmp(b.lastActive, a.lastActive));
+	return {
+		branch: facts.session.branch,
+		files: [...files.values()].sort((a, b) => cmp(b.at, a.at)).slice(0, MAX_FILES).map((f) => f.file).sort(),
+		types: [...new Set(subs.map((a) => a.agentType).filter((t) => !!t))].sort(),
+		tasks: [...new Set(tasks.map((a) => a.task))].slice(0, MAX_TASKS).sort()
+	};
+}
+/** The cache key for the inputs: a new call goes out only when this changes. */
+const titleKey = (inputs) => JSON.stringify(inputs);
+/** The prompt for the inputs. */
+function titlePrompt({ branch, files, types, tasks }) {
+	const out = [`Branch: ${branch || "(none)"}`];
+	if (files.length) out.push("Files edited:", ...files.map((f) => "- " + f));
+	if (types.length) out.push(`Agent types: ${types.join(", ")}`);
+	if (tasks.length) out.push("Subagent tasks:", ...tasks.map((t) => "- " + t));
+	return out.join("\n");
+}
+/** The title from a reply's text: its first line, unquoted, clipped; null when nothing is left. */
+function cleanTitle(reply) {
+	const title = (reply.split(/\r?\n/).map((l) => l.trim()).find(Boolean) || "").replace(/^["'`*]+|["'`*.]+$/g, "").trim();
+	if (!title) return null;
+	return title.length <= MAX_TITLE ? title : title.slice(0, 59).trimEnd() + "…";
+}
+/**
+* The title call due now, or null: when the session is titled by its branch, its inputs changed
+* since its last written title, and its last ask was at least ASK_EVERY_MS ago.
+*/
+function nextTitle(facts, cache, now) {
+	if (facts.session.titleFrom !== "branch") return null;
+	const inputs = titleInputs(facts);
+	if (!inputs.branch && !inputs.files.length && !inputs.tasks.length) return null;
+	const key = titleKey(inputs);
+	if (cache && (cache.key === key || now - cache.at < ASK_EVERY_MS)) return null;
+	return {
+		key,
+		prompt: titlePrompt(inputs)
+	};
+}
+const cmp = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+//#endregion
+//#region src/runner/naming.ts
+const INSTRUCTION_CHARS = 2e3;
+/** Every flag of the naming call's command line, after the binary. */
+function namingArgs(model, system) {
+	return [
+		"-p",
+		"--no-session-persistence",
+		"--tools",
+		"",
+		"--setting-sources",
+		"",
+		"--strict-mcp-config",
+		"--model",
+		model,
+		"--system-prompt",
+		system,
+		"--output-format",
+		"json"
+	];
+}
+/** The name from the call's output, the one JSON object `--output-format json` writes; null for a failure or nothing usable. */
+function nameFrom(stdout) {
+	let e;
+	try {
+		e = JSON.parse(stdout.trim());
+	} catch {
+		return null;
+	}
+	if (!e || e.type !== "result" || e.is_error === true || e.subtype !== "success" || typeof e.result !== "string") return null;
+	return cleanTitle(e.result);
+}
+function createNamer(o) {
+	const spawn = o.spawn ?? hiddenSpawn;
+	const env = o.env ?? process.env;
+	const platform = o.platform ?? process.platform;
+	const running = /* @__PURE__ */ new Set();
+	return {
+		async name(instruction) {
+			const bin = await o.binary();
+			if (!bin) return null;
+			const st = await o.settings();
+			const system = (await o.system()).trim();
+			let child;
+			try {
+				child = spawn([...claudeCommand(bin), ...namingArgs(st.namingModel, system)], {
+					cwd: o.cwd ?? os.tmpdir(),
+					env: forkEnv(env)
+				});
+			} catch (err) {
+				o.log(`couldn't start claude to name a session: ${err.message}`);
+				return null;
+			}
+			running.add(child);
+			return new Promise((resolve) => {
+				let stdout = "";
+				let stderr = "";
+				let over = false;
+				const finish = (name, why) => {
+					if (over) return;
+					over = true;
+					clearTimeout(timer);
+					running.delete(child);
+					if (why) o.log(`no name was written for a session: ${why}`);
+					resolve(name);
+				};
+				const timer = setTimeout(() => {
+					killTree(child, platform);
+					finish(null, `it took longer than ${st.namingTimeoutSeconds} s`);
+				}, st.namingTimeoutSeconds * 1e3);
+				timer.unref?.();
+				child.stdout.setEncoding("utf8").on("data", (piece) => stdout += piece);
+				child.stderr.setEncoding("utf8").on("data", (piece) => stderr = (stderr + piece).slice(-500));
+				child.stdin.on("error", () => {});
+				child.on("error", (err) => finish(null, `claude failed: ${err.message}`));
+				child.on("close", (code) => {
+					const name = nameFrom(stdout);
+					finish(name, name ? void 0 : `claude exited${code === null ? "" : ` with code ${code}`} with no name${stderr.trim() ? `: ${stderr.trim().split("\n").slice(-2).join(" ")}` : ""}`);
+				});
+				child.stdin.end(`Instruction:\n${instruction.slice(0, INSTRUCTION_CHARS)}`);
+			});
+		},
+		close() {
+			for (const child of running) killTree(child, platform);
+			running.clear();
+		}
 	};
 }
 //#endregion
@@ -20156,7 +20245,7 @@ function createExpert(o) {
 	const minute = o.minuteMs ?? 6e4;
 	const spawn = o.spawn ?? hiddenSpawn;
 	const env = o.env ?? process.env;
-	const readDir = path.join(o.dir, "read");
+	const readDir = o.read ?? path.join(o.dir, "read");
 	let file = o.file;
 	const name = file.name;
 	const say = o.health.say;
@@ -20206,6 +20295,7 @@ function createExpert(o) {
 			git: o.git,
 			repo,
 			dir: o.dir,
+			read: readDir,
 			name,
 			timeoutMs: o.gitTimeoutMs,
 			log,
@@ -21225,6 +21315,10 @@ function createExperts(o) {
 		return h;
 	};
 	const owner = (request) => [...experts.values(), ...stopped].find((e) => e.owns(request));
+	const readFolder = (name) => {
+		const made = [path.join(o.expertsDir, name, "read"), ...[o.clonesFolder ?? "", ...o.clonesFolders ?? []].filter(Boolean).map((f) => path.join(f, "experts", name, "read"))];
+		return made.find((p) => fs$1.existsSync(p)) ?? (o.clonesFolder ? path.join(o.clonesFolder, "experts", name, "read") : made[0]);
+	};
 	function onFile(change) {
 		const { name } = change;
 		const fileName = `${name}.json`;
@@ -21251,6 +21345,7 @@ function createExperts(o) {
 			...o,
 			file: parsed.expert,
 			dir: path.join(o.expertsDir, name),
+			read: readFolder(name),
 			health: health(name),
 			onChange: changed,
 			onTrunk: (trunk) => trunks.add(trunk)
@@ -21317,8 +21412,8 @@ function createExperts(o) {
 		}
 	};
 }
-/** Whether a session is an expert's, to keep it off the floor: in the experts' folder, or a trunk of one (while `experts` is made). */
-const expertIgnored = (expertsDir, experts) => (id, cwd) => cwd !== null && inside(expertsDir, cwd) !== null || (experts()?.isExpertSession(id) ?? false);
+/** Whether a session is an expert's, to keep it off the floor: in the experts' folder or experts/ of a folder `clonesFolder` has named, or a trunk of one (while `experts` is made). */
+const expertIgnored = (expertsDir, experts, clonesFolders = []) => (id, cwd) => cwd !== null && [expertsDir, ...clonesFolders.map((f) => path.join(f, "experts"))].some((dir) => inside(dir, cwd) !== null) || (experts()?.isExpertSession(id) ?? false);
 /**
 * The experts as one office's runner asks them: a question for an expert whose repo that office
 * doesn't take (by `home`, as `listingFor` lists) is refused as for an unknown name, before the
@@ -21691,6 +21786,23 @@ function startPlaces(platform, orca, desktop) {
 }
 /** The start's own folder: its launcher, and its task when that can't go on the command line. */
 const startDir = (claudeDir, session) => path.join(claudeDir, "isoplan", "starts", session);
+/** How long a start's own folder is kept: its session isn't the runner's to hold, so it can't tell when the session is done with it. */
+const START_KEPT_MS = 6048e5;
+/** Removes the starts' own folders last changed more than 7 days before `now`; an error is ignored. */
+async function tidyStarts(claudeDir, now = Date.now()) {
+	const starts = path.join(claudeDir, "isoplan", "starts");
+	const names = await fs.readdir(starts).catch(() => []);
+	await Promise.all(names.map(async (name) => {
+		const dir = path.join(starts, name);
+		const st = await fs.stat(dir).catch(() => null);
+		if (st?.isDirectory() && now - st.mtimeMs > START_KEPT_MS) await fs.rm(dir, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 200
+		}).catch(() => {});
+	}));
+}
 /** The longest task a Windows launcher's line takes, leaving room in cmd.exe's 8,191 for the rest of it. */
 const LAUNCHER_TASK_MAX = 4e3;
 /** Whether `task` can go on Claude Code's command line as it is, for `mode` on `platform`. */
@@ -21994,7 +22106,16 @@ async function worker() {
 	const offices = officesOf(first);
 	for (const { server } of offices.filter((o) => o.plainRefused)) log(`the runner doesn't answer through ${server}: it is plain ws:// to another machine; use wss://, or set "allowPlainWs": true in config.json`);
 	if (offices.every((o) => o.plainRefused)) return 0;
-	await settings();
+	const started = await settings();
+	const clones = await useClonesFolder(claudeDir, started.clonesFolder, log).catch(async (err) => {
+		log(`couldn't record clonesFolder in runner.json, so new clones and experts' copies go under ${isoplanDir}: ${err.message}`);
+		return {
+			folder: "",
+			folders: await readClonesFolders(claudeDir)
+		};
+	});
+	removeOldNoHooks(os.tmpdir());
+	tidyStarts(claudeDir);
 	const answering = offices.filter((o) => !o.plainRefused);
 	const account = await accountOf({
 		readText: (p) => fs.readFile(p, "utf8").catch(() => null),
@@ -22086,7 +22207,7 @@ async function worker() {
 		config,
 		isOff,
 		log,
-		ignored: expertIgnored(expertsDir, () => experts),
+		ignored: expertIgnored(expertsDir, () => experts, clones.folders),
 		hooked: (id) => pipe?.hooked(id) ?? null,
 		removedFile: path.join(isoplanDir, "runner", "removed.json"),
 		held: (id, hooks) => {
@@ -22175,6 +22296,8 @@ async function worker() {
 	const gitMs = async () => (await settings()).gitTimeoutSeconds * 1e3;
 	const hosted = createExperts({
 		expertsDir,
+		clonesFolder: clones.folder,
+		clonesFolders: clones.folders,
 		logsDir: path.join(isoplanDir, "logs"),
 		projectsDir: path.join(claudeDir, "projects"),
 		appDir,
@@ -22271,6 +22394,7 @@ async function worker() {
 				});
 				const repos = await repoFolders(seen, {
 					claudeDir,
+					clonesFolders: clones.folders,
 					checkout: checkouts.of,
 					home,
 					branches: async (checkout, project) => !project.startsWith("local:") && await homeIo.resolve(checkout) ? remoteBranches(checkout) : null,
@@ -22399,6 +22523,14 @@ async function worker() {
 		namer,
 		removed: (session) => reporting.end(session.slice(session.indexOf(":") + 1), REMOVED, true),
 		projectOf: async (folder) => (await homeIo.projectOf(await homeIo.resolve(folder), folder)).id,
+		isoplanClone: createIsoplanClones({
+			git,
+			claudeDir,
+			clonesFolder: clones.folder,
+			clonesFolders: clones.folders,
+			timeoutMs: gitMs,
+			log
+		}),
 		elsewhere: (start, bin) => startWhere(start, bin, {
 			run: git,
 			claudeDir,

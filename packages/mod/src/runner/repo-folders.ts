@@ -11,6 +11,8 @@
 // each branch pass the secret scan before they may leave the machine; one it matches, or one longer
 // than the protocol takes, is left out, never cut. Isoplan's own folders are never listed.
 
+import fs from "node:fs/promises";
+import path from "node:path";
 import { MAX_BRANCH_LENGTH, MAX_FOLDER_LENGTH, MAX_FOLDER_REPOS, MAX_REPO_BRANCHES } from "@isoplan/protocol";
 import { join, pathKey, relativeTo } from "../data-layer/git.js";
 
@@ -32,18 +34,54 @@ export interface RepoFolders {
 
 /**
  * Whether `folder` is one of Isoplan's own: anything inside <claude dir>/isoplan/, such as an
- * expert's read/ or a clone Isoplan keeps for itself. Never the person's clone, so never offered to
- * start a session in, nor the clone a take works beside (handoff/take.ts). Windows paths compare
- * case-insensitively.
+ * expert's read/ or a clone Isoplan keeps for itself, or inside the clones/ or experts/ of any of
+ * `clonesFolders`, the folders runner.json's `clonesFolder` has named (readClonesFolders). Never the
+ * person's clone, so never offered to start a session in, nor the clone a take works beside
+ * (handoff/take.ts). Windows paths compare case-insensitively.
  */
-export function isoplanFolder(claudeDir: string, folder: string): boolean {
-  const own = join(claudeDir, "isoplan");
-  return pathKey(folder) === pathKey(own) || relativeTo(own, folder) !== null;
+export function isoplanFolder(claudeDir: string, folder: string, clonesFolders: readonly string[] = []): boolean {
+  const own = [join(claudeDir, "isoplan"), ...clonesFolders.flatMap((f) => [join(f, "clones"), join(f, "experts")])];
+  return own.some((dir) => pathKey(folder) === pathKey(dir) || relativeTo(dir, folder) !== null);
+}
+
+/** The runner's record of every folder runner.json's `clonesFolder` has named, so clones and experts' copies made there are still found, and still Isoplan's own, once it names another. */
+export const clonesFoldersPath = (claudeDir: string) => path.join(claudeDir, "isoplan", "clones-folders.json");
+
+/** The folders `clonesFolder` has named on this machine; none when the record is missing or doesn't parse. */
+export async function readClonesFolders(claudeDir: string): Promise<string[]> {
+  try {
+    const value: unknown = JSON.parse(await fs.readFile(clonesFoldersPath(claudeDir), "utf8"));
+    return Array.isArray(value) ? value.filter((f): f is string => typeof f === "string" && path.isAbsolute(f)) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * runner.json's `clonesFolder` as the runner starts: "" for the places under <claude dir>/isoplan;
+ * one that isn't an absolute path is ignored, with a log line. A folder it names is added to the
+ * record first. `folders` is every folder the record holds, this one included.
+ */
+export async function useClonesFolder(claudeDir: string, setting: string, log: (text: string) => void): Promise<{ folder: string; folders: string[] }> {
+  const folders = await readClonesFolders(claudeDir);
+  if (!setting) return { folder: "", folders };
+  if (!path.isAbsolute(setting)) {
+    log(`clonesFolder in runner.json, ${setting}, isn't an absolute path, so it is ignored: new clones and experts' copies go under ${path.join(claudeDir, "isoplan")}`);
+    return { folder: "", folders };
+  }
+  if (!folders.some((f) => pathKey(f) === pathKey(setting))) {
+    folders.push(setting);
+    await fs.mkdir(path.dirname(clonesFoldersPath(claudeDir)), { recursive: true });
+    await fs.writeFile(clonesFoldersPath(claudeDir), JSON.stringify(folders, null, 2) + "\n");
+  }
+  return { folder: setting, folders };
 }
 
 export interface RepoFoldersOptions {
   /** Claude's folder on this machine, whose isoplan/ holds Isoplan's own folders (isoplanFolder). */
   claudeDir: string;
+  /** The folders runner.json's `clonesFolder` has named, whose clones/ and experts/ are Isoplan's own too. */
+  clonesFolders?: readonly string[];
   /** The main checkout of the repo `folder` is in, or the folder itself when git can't place it; null when there is none to list. */
   checkout: (folder: string) => Promise<string | null>;
   /** The project id of the repo the office takes that `folder` is in, lower-cased; null when it is gone or the office takes none. */
@@ -72,9 +110,9 @@ export async function repoFolders(seen: FolderSeen[], o: RepoFoldersOptions): Pr
   const chosen: { repo: RepoFolders; key: string }[] = [];
   for (const { folder } of [...seen].sort((a, b) => b.at - a.at)) {
     if (byRepo.size >= MAX_FOLDER_REPOS) break;
-    if (isoplanFolder(o.claudeDir, folder)) continue;
+    if (isoplanFolder(o.claudeDir, folder, o.clonesFolders)) continue;
     const checkout = await o.checkout(folder).catch(() => null);
-    if (!checkout || isoplanFolder(o.claudeDir, checkout)) continue;
+    if (!checkout || isoplanFolder(o.claudeDir, checkout, o.clonesFolders)) continue;
     const key = pathKey(checkout);
     if (tried.has(key)) continue;
     tried.add(key);

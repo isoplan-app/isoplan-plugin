@@ -75,8 +75,10 @@ export interface HostedExpert {
 
 export interface ExpertOptions {
   file: ExpertFile;
-  /** Its folder, <expertsDir>/<name>: state, indexes, ledger and its clone. */
+  /** Its folder, <expertsDir>/<name>: state, indexes, ledger and, unless `read` is elsewhere, its clone. */
   dir: string;
+  /** Its clone, where every trunk and fork runs: <dir>/read unless runner.json's `clonesFolder` put it elsewhere (experts.ts readFolder). */
+  read?: string;
   health: HealthLog;
   /** <claudeDir>/projects, where trunk transcripts are: a junior whose transcript is gone or changed isn't used. */
   projectsDir: string;
@@ -209,7 +211,7 @@ export function createExpert(o: ExpertOptions): Expert {
   const minute = o.minuteMs ?? 60000;
   const spawn = o.spawn ?? hiddenSpawn;
   const env = o.env ?? process.env;
-  const readDir = path.join(o.dir, "read");
+  const readDir = o.read ?? path.join(o.dir, "read");
   let file = o.file;
   const name = file.name;
   const say = o.health.say;
@@ -256,7 +258,7 @@ export function createExpert(o: ExpertOptions): Expert {
   let lastHosted = "";
 
   function makeCheckout(repo: string): ExpertCheckout {
-    return createExpertCheckout({ git: o.git, repo, dir: o.dir, name, timeoutMs: o.gitTimeoutMs, log, fetchSeconds: () => file.fetchSeconds, now, onFetchFailed: (why) => say("fetch", { error: why }) });
+    return createExpertCheckout({ git: o.git, repo, dir: o.dir, read: readDir, name, timeoutMs: o.gitTimeoutMs, log, fetchSeconds: () => file.fetchSeconds, now, onFetchFailed: (why) => say("fetch", { error: why }) });
   }
 
   const gen = (state: SavedGeneration["state"]) => saved.generations.find((g) => g.state === state) ?? null;

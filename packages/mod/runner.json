@@ -39,5 +39,6 @@
   "repoFoldersCheckMinutes": 5,
   "branchRefreshMinutes": 5,
   "expertJudgeModel": "haiku",
-  "expertWaitSeconds": 10
+  "expertWaitSeconds": 10,
+  "clonesFolder": ""
 }

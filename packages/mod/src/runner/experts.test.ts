@@ -1,12 +1,15 @@
 import fs from "node:fs";
 import path from "node:path";
 import { PROTOCOL_VERSION, type RefusalMessage, type ReplyMessage } from "@isoplan/protocol";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { modDir, tempRoot } from "../data-layer/fixture.js";
 import type { GitResult, RunGit } from "../handoff/git.js";
 import type { ExpertSettings } from "./expert.js";
 import { createExperts, expertIgnored, forOffice, listingFor, type HostedExpert } from "./experts.js";
 import { UNREADABLE } from "./scan.js";
+
+// The empty folder git runs with as its hooks (handoff/take.ts noHooks) is made in the Claude folder: a temp one, never this machine's.
+vi.stubEnv("CLAUDE_CONFIG_DIR", path.join(tempRoot(), "claude"));
 
 const T1 = "11111111-1111-4111-8111-111111111111";
 const settings = { ...JSON.parse(fs.readFileSync(path.join(modDir, "runner.json"), "utf8")), expertJudgeModel: "haiku" } as ExpertSettings;
@@ -72,7 +75,7 @@ test("forOffice: a home that can't be worked out is refused plain unavailable, w
 
 // The experts folder with one expert file, whose expert is resumed from its state, and a claude
 // that never answers.
-function setUp() {
+function setUp(o: Partial<Parameters<typeof createExperts>[0]> = {}) {
   const root = tempRoot();
   const expertsDir = path.join(root, "isoplan", "experts");
   const logsDir = path.join(root, "isoplan", "logs");
@@ -85,16 +88,19 @@ function setUp() {
   const bin = path.join(root, "claude.js");
   fs.writeFileSync(bin, "process.stdin.resume(); setInterval(() => {}, 1000);\n");
   const ok = (stdout = ""): GitResult => ({ code: 0, stdout, stderr: "", timedOut: false });
-  const git: RunGit = async (argv) => {
-    const args = argv.slice(2);
+  const calls: { cwd: string; args: string[] }[] = [];
+  const git: RunGit = async (argv, { cwd }) => {
+    let args = argv;
+    while (args[0] === "-c") args = args.slice(2); // the no-hooks prefix, and Windows' long paths for a clone
+    calls.push({ cwd, args });
     if (args[0] === "ls-remote") return ok("ref: refs/heads/main\tHEAD\n");
     if (args[0] === "remote") return ok("https://example.com/app.git\n");
     if (args[0] === "clone") fs.mkdirSync(args.at(-1)!, { recursive: true });
     return ok("1".repeat(40));
   };
   const logs: string[] = [];
-  const experts = createExperts({ expertsDir, logsDir, projectsDir: path.join(root, "projects"), appDir: modDir, binary: async () => bin, settings: async () => settings, scan: async () => null, git, gitTimeoutMs: async () => 5000, log: (t) => void logs.push(t), lookMs: 3600000 });
-  return { experts, expertsDir, logsDir, logs };
+  const experts = createExperts({ expertsDir, logsDir, projectsDir: path.join(root, "projects"), appDir: modDir, binary: async () => bin, settings: async () => settings, scan: async () => null, git, gitTimeoutMs: async () => 5000, log: (t) => void logs.push(t), lookMs: 3600000, ...o });
+  return { root, experts, expertsDir, logsDir, logs, calls };
 }
 
 test("start() settles once the files and states are read, while the grounding's claude never answers; trunks are known as the experts'", async () => {
@@ -137,6 +143,31 @@ test("a file that doesn't parse is logged in both logs and starts nothing; a req
     const sent: (ReplyMessage | RefusalMessage)[] = [];
     t.experts.answer({ type: "request", v: PROTOCOL_VERSION, id: "expert-x-1-1", kind: "answer-expert", expert: "broken", questionId: "x-1", question: "Q?", blocking: false, from: { id: "claude:sam", name: "Sam" }, asker: "s-1" }, (m) => void sent.push(m));
     expect(sent).toEqual([{ type: "refusal", v: PROTOCOL_VERSION, id: "expert-x-1-1", reason: "unavailable", detail: "this machine hosts no expert named broken now", expert: { code: "EXPERT_UNKNOWN" } }]);
+  } finally {
+    t.experts.close();
+  }
+});
+
+test("an expert's clone stays where it was made, a folder clonesFolder named before; a new expert's goes in the folder clonesFolder names; sessions in either are kept off the floor", async () => {
+  const root = tempRoot();
+  const [before, now] = [path.join(root, "before"), path.join(root, "now")];
+  const t = setUp({ clonesFolder: now, clonesFolders: [before, now] });
+  const made = path.join(before, "experts", "adr", "read");
+  fs.mkdirSync(path.join(made, ".git"), { recursive: true });
+  const file = JSON.parse(fs.readFileSync(path.join(t.expertsDir, "adr.json"), "utf8"));
+  fs.writeFileSync(path.join(t.expertsDir, "billing.json"), JSON.stringify({ ...file, name: "billing" }));
+  await t.experts.start();
+  try {
+    const fresh = path.join(now, "experts", "billing", "read");
+    for (let i = 0; i < 500 && !fs.existsSync(fresh); i++) await new Promise((r) => setTimeout(r, 10));
+    expect(fs.existsSync(fresh)).toBe(true);
+    expect(t.calls).toContainEqual({ cwd: made, args: ["remote", "set-url", "origin", "https://example.com/app.git"] });
+    expect(t.calls.filter((c) => c.args[0] === "clone").map((c) => c.args.at(-1))).toEqual([`${fresh}.new`]);
+    expect(fs.existsSync(path.join(t.expertsDir, "adr", "read"))).toBe(false);
+    const ignored = expertIgnored(t.expertsDir, () => null, [before, now]);
+    expect(ignored("any", made)).toBe(true);
+    expect(ignored("any", fresh)).toBe(true);
+    expect(ignored("any", path.join(now, "code", "app"))).toBe(false);
   } finally {
     t.experts.close();
   }
