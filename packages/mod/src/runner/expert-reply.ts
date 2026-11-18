@@ -3,7 +3,6 @@
 //   <answer>…</answer>                 what the asker gets
 //   <cited>one path per line</cited>   repo-relative, a line range allowed (asks.ts:166-173)
 //   <learned>…</learned>               only after asking the senior or exploring: appended to the junior's trunk
-//   <pattern title="…">…</pattern>     rare: a general rule and its reason, committed to the notes branch
 //
 // or, to ask the senior, the whole reply is `<ask-senior>the question</ask-senior>`.
 //
@@ -26,7 +25,6 @@ export interface ExpertReply {
   /** Cited paths that were absolute or had `..` in them. */
   dropped: string[];
   learned: string | null;
-  patterns: { title: string; body: string }[];
   /** The question for the senior, when that is the whole reply. */
   askSenior: string | null;
 }
@@ -75,7 +73,6 @@ export function parseReply(text: string): ExpertReply {
     cited,
     dropped,
     learned: learned ? learned.slice(0, LEARNED_MAX) : null,
-    patterns: [...text.matchAll(/<pattern\s+title="([^"]*)"\s*>([\s\S]*?)<\/pattern>/g)].map((m) => ({ title: m[1]!.trim(), body: m[2]!.trim() })).filter((p) => p.title && p.body),
     askSenior: asked ? asked[1]!.trim() || null : null,
   };
 }

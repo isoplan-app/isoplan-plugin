@@ -71,8 +71,8 @@ function setUp() {
   const git: RunGit = async (argv) => {
     const args = argv.slice(2);
     if (args[0] === "ls-remote") return ok("ref: refs/heads/main\tHEAD\n");
-    if (args.includes("--show-toplevel")) return { ...ok(), code: 128 };
-    if (args[0] === "worktree" && args[1] === "add") fs.mkdirSync(args[3]!, { recursive: true });
+    if (args[0] === "remote") return ok("https://example.com/app.git\n");
+    if (args[0] === "clone") fs.mkdirSync(args.at(-1)!, { recursive: true });
     return ok("1".repeat(40));
   };
   const logs: string[] = [];

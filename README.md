@@ -222,7 +222,7 @@ You start an expert by writing `~/.claude/isoplan/experts/<name>.json`, the one 
 |---|---|---|
 | `version` | yes | `1`. A file written for a newer runner is refused. |
 | `name` | yes | Lowercase letters, digits and dashes, at most 63, the same as the file's name. Agents ask it by this name, which is unique in the office: the first host to list a name keeps it. |
-| `repo` | yes | An absolute path to a git checkout whose `origin` remote is a repo the office takes. |
+| `repo` | yes | An absolute path to a git checkout whose `origin` remote is a repo the office takes, at an https, ssh or host:path URL. |
 | `subject` | yes | Up to 1,000 characters: what to ask it about, and before which changes. Every agent in the office sees it, so it is checked for secrets before it leaves. |
 | `model` | yes | The model it grounds and answers with. |
 | `promoteAtTokens` | yes | The size of its junior's context at which a new generation takes over (below). It must leave at least 100,000 tokens before the model's compaction point. |
@@ -235,15 +235,15 @@ You start an expert by writing `~/.claude/isoplan/experts/<name>.json`, the one 
 | `window` | no | The model's context window, when the runner's table doesn't know it (at least 100,000). |
 | `areas` | no | Globs of the files it covers, kept for later and unused now. |
 
-Every number is a whole number of at least 1, except `fetchSeconds` and `window`. A field the runner doesn't know is logged, not fatal; a file that doesn't parse is logged, to `runner.log` and the expert's health log, with the field and the reason, and that expert doesn't start (one already running keeps running). The runner looks at the folder every few seconds. A change to `subject`, `model`, `proof` or `window` grounds a new generation in the background while the old one keeps answering; a new `repo` starts the expert over, removing its old worktrees first. Other fields apply at once. Removing the file stops the expert and keeps its folder.
+Every number is a whole number of at least 1, except `fetchSeconds` and `window`. A field the runner doesn't know is logged, not fatal; a file that doesn't parse is logged, to `runner.log` and the expert's health log, with the field and the reason, and that expert doesn't start (one already running keeps running). The runner looks at the folder every few seconds. A change to `subject`, `model`, `proof` or `window` grounds a new generation in the background while the old one keeps answering; a new `repo` starts the expert over, removing its old clone first. Other fields apply at once. Removing the file stops the expert and keeps its folder.
 
 ### Where things are
 
-Its state (the ids of its trunks, and which files each read at which commit) and its caps ledger are in `~/.claude/isoplan/experts/<name>/`. Its health log is `~/.claude/isoplan/logs/expert-<name>.log`: each grounding, proof question, promotion, question (by id, with its time and cost), cap reached and error. Two worktrees of your `repo` are there too: `read/`, detached at the default branch, where every trunk and fork runs, and `notes/`, on the branch `expert/<name>/notes`.
+Its state (the ids of its trunks, and which files each read at which commit) and its caps ledger are in `~/.claude/isoplan/experts/<name>/`. Its health log is `~/.claude/isoplan/logs/expert-<name>.log`: each grounding, proof question, promotion, question (by id, with its time and cost), cap reached and error. Its own clone of your `repo`'s origin is there too, `read/`, detached at the default branch, where every trunk and fork runs. It is a clone, not a worktree of your checkout, so it doesn't show under your repo in Orca or `git worktree list`, and its sessions aren't among yours; it borrows your checkout's objects while it is made, so little comes over the network. Your checkout is only read, for its origin's URL and default branch. A `read/` that isn't a clone of its own, such as a worktree an earlier plugin made, is left as it is and the expert doesn't start until you remove it.
 
 ### Generations and the proof question
 
-A generation is one trunk, from its grounding to its retirement. After each grounding, a fork answers the proof question, and a model with no tools (`expertJudgeModel` in `runner.json`, Haiku) compares its answer with yours; both answers and the verdict go to the health log. A generation that passes becomes the junior and answers questions. One that fails takes none: the generation before it keeps answering, and with none, questions fail with `EXPERT_FORK_FAILED` until you change the file or the runner restarts. A fork that asked the senior or explored adds what it found to the junior's trunk as a learned note, so the trunk grows. Once it reaches `promoteAtTokens`, a new generation grounds; when it passes, it becomes the junior, the old junior becomes its senior, which the junior asks before exploring, and the one before that retires. A generation that compacts fails, and a new one grounds. While it hosts an expert, the runner stays up, lit or not, so its experts can answer.
+A generation is one trunk, from its grounding to its retirement. After each grounding, a fork answers the proof question, and a model with no tools (`expertJudgeModel` in `runner.json`, Haiku) compares its answer with yours; both answers and the verdict go to the health log. A generation that passes becomes the junior and answers questions. One that fails takes none: the generation before it keeps answering, and with none, questions fail with `EXPERT_FORK_FAILED` until you change the file or the runner restarts. A fork that asked the senior or explored adds what it found to the junior's trunk as a learned note, so the trunk grows. Once it reaches `promoteAtTokens`, a new generation grounds; when it passes, it becomes the junior, the old junior becomes its senior, which the junior asks before exploring, and the one before that retires. A generation that compacts fails, and a new one grounds. Don't resume a trunk yourself: every later fork would inherit what you add, so a trunk with turns the runner didn't add is no longer used, and a junior's is replaced by a new generation. While it hosts an expert, the runner stays up, lit or not, so its experts can answer.
 
 ### Asking
 
@@ -253,13 +253,9 @@ Once the office tells a session which experts it may ask, its agent gets the `as
 
 The host's caps are the expert file's: questions per asking session per day, open questions per asking session, and the expert's daily token budget, counted in its own ledger, apart from the caps in `runner.json`. Raise them in the expert file. The office's are in its `asks.json`, raised by an admin: `openPerAskerPerRoom` is also how many questions one person may have waiting for one expert, and `perAskerPerDay` how many expert questions one person may ask in a day, counted apart from questions to earlier sessions.
 
-### Pattern notes
-
-When a fork finds a general rule worth keeping across generations, it writes a pattern note, which the runner checks for secrets and commits to `docs/patterns/` on the `expert/<name>/notes` branch, in the `notes/` worktree. The runner never pushes it: review the branch and merge what you want to keep.
-
 ### What leaves the machine
 
-From the host: each expert's name, subject and repo, only to an office that takes the repo, and its answers, each checked for secrets first; an answer that matches is withheld until you release it. The trunks, forks, learned notes and pattern notes stay on the machine. From the asker: the question, checked for secrets first. The office server holds a question and its answer only while it is in flight: their words are deleted once the asker has seen its end, or after twice `maxAgeHours` when it never does, and a record without words stays a day, for the daily cap.
+From the host: each expert's name, subject and repo, only to an office that takes the repo, and its answers, each checked for secrets first; an answer that matches is withheld until you release it. The trunks, forks and learned notes stay on the machine. From the asker: the question, checked for secrets first. The office server holds a question and its answer only while it is in flight: their words are deleted once the asker has seen its end, or after twice `maxAgeHours` when it never does, and a record without words stays a day, for the daily cap.
 
 ### What ask_expert's replies mean
 
@@ -268,6 +264,7 @@ Every reply names the expert and the question's id, which the host's health log 
 | Code | What happened | Fix |
 |---|---|---|
 | `EXPERT_RUNNER_UNREACHABLE` | The runner on the asker's machine, or its way to the office, can't be reached; nothing was sent. | Check that the runner is up and the machine is paired, and ask again. |
+| `EXPERT_REFUSED` | The office server refused the question, for the reason the reply gives (the session isn't held yet after a reconnect, say); it wasn't asked. | Do what the reason says, then ask again. |
 | `EXPERT_UNKNOWN` | No expert of that name in the session's office. | Ask one of the names the reply lists. |
 | `EXPERT_CAP` | A cap was reached, the office's or the host's; the reply says which, and when it frees. | Wait, or raise it: the office's in `asks.json` (an admin), the host's in the expert file (its owner). |
 | `EXPERT_QUESTION_HELD` | The question looked like it held a secret, so it wasn't sent. | Ask again without it. |

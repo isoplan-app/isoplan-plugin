@@ -34,7 +34,7 @@ import { killTree, userTurn } from "./claude.js";
 /** The only tools a trunk or fork is offered. */
 export const READ_TOOLS = ["Read", "Grep", "Glob", "Agent"];
 /** Tools that end a trunk or fork at once when offered or used. */
-export const DISALLOWED_TOOLS = ["Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"];
+export const DISALLOWED_TOOLS = ["Bash", "PowerShell", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"];
 // The tools whose use counts as exploring; Task is the subagent tool's older name.
 const EXPLORING = new Set([...READ_TOOLS, "Task"]);
 

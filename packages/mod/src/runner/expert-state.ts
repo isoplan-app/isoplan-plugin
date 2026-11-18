@@ -1,7 +1,8 @@
 // What an expert keeps in its folder, ~/.claude/isoplan/experts/<name>/, across runner restarts:
 //
 // - state.json: its generations, each with its trunk's session id, the model id it resolved to,
-//   the commit it was grounded at, its meter and learned notes, its role and its proof; and the
+//   the commit it was grounded at, its meter and learned notes, its role and its proof, and the
+//   uuid of its trunk transcript's last user or assistant entry as the runner left it; and the
 //   fingerprint of the expert file fields a new generation is grounded for.
 // - index-<n>.json: generation n's file → commit index, `{ "version": 1, "files": { path: commit } }`,
 //   the commit each file the generation read (or cited) was read at.
@@ -29,7 +30,13 @@ export interface SavedGeneration {
   notes: number;
   state: "grounding" | "junior" | "senior" | "retired" | "failed";
   proof?: { passed: boolean; at: number };
-  /** Why it failed. */
+  /**
+   * The uuid of its trunk transcript's last user or assistant entry after the runner's last turn on
+   * it (null for none), so a turn someone added by resuming it by hand shows; missing in a state
+   * from before it was recorded.
+   */
+  last?: string | null;
+  /** Why it failed or was retired. */
   why?: string;
 }
 
@@ -50,7 +57,7 @@ const STATES = ["grounding", "junior", "senior", "retired", "failed"];
 
 const isGeneration = (g: unknown): g is SavedGeneration => {
   const o = g as SavedGeneration | null;
-  return !!o && Number.isInteger(o.n) && typeof o.trunk === "string" && typeof o.model === "string" && typeof o.commit === "string" && Number.isFinite(o.groundedAt) && Number.isFinite(o.meter) && Number.isInteger(o.notes) && STATES.includes(o.state);
+  return !!o && Number.isInteger(o.n) && typeof o.trunk === "string" && typeof o.model === "string" && typeof o.commit === "string" && Number.isFinite(o.groundedAt) && Number.isFinite(o.meter) && Number.isInteger(o.notes) && STATES.includes(o.state) && (o.last === undefined || o.last === null || typeof o.last === "string");
 };
 
 async function readJson(file: string): Promise<unknown> {

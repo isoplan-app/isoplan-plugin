@@ -24,15 +24,11 @@ packages/server/src/asks.ts:166-173
 <learned>
 Rule or fact: what you found. Why: why it holds. Files: where it is.
 </learned>
-<pattern title="A general rule, as a short sentence">
-The rule and the reason for it.
-</pattern>
 
 - <answer> is what the asker gets. Isoplan adds the commit each cited file was read at under it, so don't write commits or dates yourself.
 - <cited> lists the files the answer rests on, one per line, as paths relative to the repo's top folder, with a line range when it helps (a file:10-20). Never an absolute path, never one with "..", and never a file you haven't read or been told about in this session.
 - <learned> only when you asked your senior or explored to answer: what you found that a later question would need, in at most about 500 tokens, written as a rule or fact, why it holds, and its files. Isoplan appends it to this trunk, so write what holds in general. Leave it out when your context already held the answer.
-- <pattern> is rare: a general rule of this repo and the reason for it, worth keeping in the repo itself for every later expert and every developer. Never a description of what specific code does. Isoplan commits it for a person to review.
-- Never quote or retell the question in a learned note or a pattern note: write the rule, not who asked or what they asked.
+- Never quote or retell the question in a learned note: write the rule, not who asked or what they asked.
 - When your role for a question says you have a senior, and your context doesn't hold the answer, you may ask it instead: then your whole reply is <ask-senior>the question, on its own</ask-senior>, and its answer comes back as your next message.
 
 What this repo gives you to start from:
@@ -48,9 +44,5 @@ CLAUDE.md, the repo's instructions to agents (it isn't loaded any other way here
 The ADRs in docs/adr, by name:
 
 {{adrs}}
-
-The pattern notes in docs/patterns, by name:
-
-{{patterns}}
 
 Reply with only the word: ready

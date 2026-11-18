@@ -8,4 +8,4 @@ The question:
 
 {{question}}
 
-Reply in the format from your grounding: <answer>, <cited>, and <learned> or <pattern> only when they apply.
+Reply in the format from your grounding: <answer>, <cited>, and <learned> only when it applies.

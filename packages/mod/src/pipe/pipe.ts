@@ -25,7 +25,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import fs from "node:fs/promises";
 import net, { type Socket } from "node:net";
 import path from "node:path";
-import type { ExpertCode } from "@isoplan/protocol";
+import type { ExpertTextCode } from "../ask/expert-text.js";
 
 /** What a hooks module's end says as it connects: the session it is for, and how its hooks module runs. */
 export interface PipeHello {
@@ -115,7 +115,7 @@ export interface PipeAnswer {
   type: "answer";
   text: string;
   failed?: true;
-  code?: ExpertCode;
+  code?: ExpertTextCode;
 }
 
 /** What the agent is told by an ask, as the runner works it out. */

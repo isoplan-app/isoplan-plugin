@@ -13292,7 +13292,7 @@ async function checkoutIn(run, cwd, repo, branch, folder, timeoutMs, names) {
 	const checkout = (args) => run(args, {
 		cwd,
 		timeoutMs,
-		env: NO_LFS
+		env: NO_LFS$1
 	});
 	const remotes = await remotesOf(run, cwd, timeoutMs);
 	const failed = (error, remote = null) => ({
@@ -13373,7 +13373,7 @@ function onTheWire(remote) {
 	return !!scp && scp[1].length > 1 && !remote.startsWith("\\");
 }
 const realpathNative = promisify(realpath.native);
-const NO_LFS = { GIT_LFS_SKIP_SMUDGE: "1" };
+const NO_LFS$1 = { GIT_LFS_SKIP_SMUDGE: "1" };
 function badPath(p) {
 	const parts = p.split(/[\\/]/);
 	if (parts.some(isGitFolder)) return `${p} is inside a .git folder`;
@@ -13418,7 +13418,7 @@ async function repoAt(run, base, repo, folder, timeoutMs, cloneFrom, names) {
 		], {
 			cwd: base,
 			timeoutMs,
-			env: NO_LFS
+			env: NO_LFS$1
 		});
 		if (cloned.code !== 0) return {
 			step: "clone",
@@ -13458,7 +13458,7 @@ async function worktreeFor(run, clone, remote, branch, id, exempt, timeoutMs, ex
 		], {
 			cwd: dir,
 			timeoutMs,
-			env: NO_LFS
+			env: NO_LFS$1
 		});
 		return moved.code === 0 ? dir : { error: `${dir} couldn't be moved to the handoff as handed over now:\n${moved.stderr}` };
 	};
@@ -13502,7 +13502,7 @@ async function worktreeFor(run, clone, remote, branch, id, exempt, timeoutMs, ex
 		], {
 			cwd: clone,
 			timeoutMs,
-			env: NO_LFS
+			env: NO_LFS$1
 		});
 		return r.code === 0 ? dir : { error: `git worktree add ${dir} failed${r.timedOut ? " (it took too long)" : ""}:\n${r.stderr}` };
 	}
@@ -18533,12 +18533,16 @@ async function machinePairing(office, allowPlainWs, claudeDir, claudeJson, io) {
 //#endregion
 //#region src/ask/expert-text.ts
 const machineOf = (host) => host ? `${host}'s machine` : "the host's machine";
+const said = (words) => words.replace(/\.\s*$/, "");
 /** The text for a situation that has a code, as the design's replies table gives it. */
 function expertText(code, a) {
 	return `${`Expert ${a.expert}, question ${a.id}: `}${(() => {
 		switch (code) {
-			case "EXPERT_RUNNER_UNREACHABLE": return `Isoplan's runner can't be reached on this machine${a.words ? `: ${a.words.replace(/\.\s*$/, "")}` : ""}, so nothing was sent. Explore this yourself`;
-			case "EXPERT_UNKNOWN": return a.words ?? `no expert named ${a.expert}; ask one of: ${(a.names ?? []).join(", ") || "none"}`;
+			case "EXPERT_RUNNER_UNREACHABLE": return `Isoplan's runner can't be reached on this machine${a.words ? `: ${said(a.words)}` : ""}, so nothing was sent. Explore this yourself`;
+			case "EXPERT_REFUSED": return `the office server refused the question${a.words ? `: ${said(a.words)}` : ""}, so it wasn't asked. Explore this yourself`;
+			case "EXPERT_UNKNOWN":
+				if (a.words) return a.words;
+				return a.names?.length ? `no expert named ${a.expert}; ask one of: ${a.names.join(", ")}` : "no expert can be asked from this session right now. Explore this yourself";
 			case "EXPERT_CAP": return a.words ?? "a cap on asking this expert has been reached";
 			case "EXPERT_QUESTION_HELD": return `the question looks like it holds a secret (it matches the secret pattern ${a.pattern ?? "unknown"}), so it wasn't sent. Ask again without it`;
 			case "EXPERT_PLUGIN_OLD": return a.words ?? "the Isoplan plugin on this machine or on the host's is from before experts; updating the Isoplan plugin there fixes it";
@@ -18556,8 +18560,16 @@ function expertText(code, a) {
 const askedText = (a) => `Expert ${a.expert}, question ${a.id}: asked. The answer arrives in this session as a note on one of your next tool results; carry on meanwhile.`;
 /** A blocking question that ran out of time before it could be sent: no answer will come. */
 const notSentText = (a) => `Expert ${a.expert}, question ${a.id}: couldn't reach the office server in time, so the question wasn't sent. Explore this yourself, and ask again later if you still need it.`;
-/** A question sent that the server didn't confirm in time: it may have been asked all the same. */
-const pendingText = (a) => `Expert ${a.expert}, question ${a.id}: the office server didn't confirm the question in time. It may have been asked all the same, and if so the answer arrives in this session as a note on one of your next tool results. Explore this yourself meanwhile, and don't ask it again.`;
+/**
+* A question that may have gone before the ask failed, `words` saying how: it may have been asked
+* all the same. Asked again, it would be a new question, and the answer to this one still comes.
+*/
+const mayBeAskedText = (a) => `Expert ${a.expert}, question ${a.id}: ${said(a.words)}. It may have been asked all the same, and if so the answer arrives in this session as a note on one of your next tool results. Explore this yourself meanwhile, and don't ask it again as a new question.`;
+/** A question sent that the server didn't confirm in time. */
+const pendingText = (a) => mayBeAskedText({
+	...a,
+	words: "the office server didn't confirm the question in time"
+});
 /** A blocking question whose wait ran out before the answer came. */
 const exploreMeanwhileText = (a) => `Expert ${a.expert}, question ${a.id}: the expert is still answering. Explore this yourself meanwhile: its answer will still arrive in this session, and it may correct what you find.`;
 /** What an answer describes: the branch and the commit, cut to seven. */
@@ -18602,6 +18614,13 @@ async function askExpertThrough(open, a, o) {
 	}
 	try {
 		return await askExpert(link, a, o);
+	} catch (err) {
+		if (err instanceof TokenExpired) throw err;
+		return { text: mayBeAskedText({
+			expert: a.expert,
+			id: a.key,
+			words: `the link to the office server failed: ${String(err?.message ?? err)}`
+		}) };
 	} finally {
 		const close = link.close();
 		if (!a.blocking) await close;
@@ -18628,7 +18647,7 @@ async function askExpert(link, a, { deadline, now = Date.now, pollMs = 2e3 }) {
 	if (!first) return { text: pendingText(about(a.key)) };
 	if (first.type === "error") {
 		if (first.code === "token-expired") throw new TokenExpired(first.message);
-		const code = REFUSALS.has(first.code) ? first.code : "EXPERT_RUNNER_UNREACHABLE";
+		const code = REFUSALS.has(first.code) ? first.code : "EXPERT_REFUSED";
 		return {
 			text: expertText(code, about(a.key, { words: first.message || void 0 })),
 			failed: true,
@@ -18799,6 +18818,7 @@ const READ_TOOLS = [
 /** Tools that end a trunk or fork at once when offered or used. */
 const DISALLOWED_TOOLS = [
 	"Bash",
+	"PowerShell",
 	"Edit",
 	"Write",
 	"NotebookEdit",
@@ -19300,36 +19320,34 @@ function expertOverCap(entries, asker, open, expected, now, caps, weights) {
 }
 //#endregion
 //#region src/runner/expert-checkout.ts
-/** A pattern note's file name: its title in lowercase letters, digits and dashes, at most 80. */
-const noteSlug = (title) => title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 80).replace(/^-+|-+$/g, "");
-const notesBranch = (name) => `expert/${name}/notes`;
-function createExpertCheckout({ git, repo, dir, name, timeoutMs, log, fetchSeconds = () => 60, now = Date.now, onFetchFailed }) {
+const NO_LFS = { GIT_LFS_SKIP_SMUDGE: "1" };
+async function renamed(from, to) {
+	for (let n = 1;; n++) try {
+		return await fs.rename(from, to);
+	} catch (err) {
+		const code = err.code;
+		if (n >= 5 || code !== "EPERM" && code !== "EBUSY" && code !== "EACCES") throw err;
+		await new Promise((r) => setTimeout(r, 200));
+	}
+}
+function createExpertCheckout({ git, repo, dir, name, timeoutMs, log, fetchSeconds = () => 60, now = Date.now, onFetchFailed, cloneFrom = onTheWire }) {
 	const read = path.join(dir, "read");
-	const notesDir = path.join(dir, "notes");
-	const branchName = notesBranch(name);
+	const staging = path.join(dir, "read.new");
 	let branch = null;
 	let fetchedAt = null;
-	let noting = Promise.resolve();
-	const run = async (args) => git([...await noHooks(), ...args], {
-		cwd: repo,
+	const run = async (cwd, args, env) => git([...await noHooks(), ...args], {
+		cwd,
+		...env && { env },
 		timeoutMs: typeof timeoutMs === "number" ? timeoutMs : await timeoutMs()
 	});
-	const must = async (args) => {
-		const r = await run(args);
+	const must = async (cwd, args, env) => {
+		const r = await run(cwd, args, env);
 		if (r.code !== 0) throw new Error(`git ${args.join(" ")} failed${r.timedOut ? " (it took too long)" : ""}: ${r.stderr.trim()}`);
 		return r.stdout.trim();
 	};
-	const isWorktree = async (folder) => {
-		const r = await run([
-			"-C",
-			folder,
-			"rev-parse",
-			"--show-toplevel"
-		]);
-		return r.code === 0 && inside(folder, r.stdout.trim()) === "";
-	};
+	const ownClone = () => fs.lstat(path.join(read, ".git")).then((s) => s.isDirectory(), () => false);
 	const defaultBranch = async () => {
-		const remote = await run([
+		const remote = await run(repo, [
 			"ls-remote",
 			"--symref",
 			"origin",
@@ -19337,7 +19355,7 @@ function createExpertCheckout({ git, repo, dir, name, timeoutMs, log, fetchSecon
 		]);
 		const named = remote.code === 0 ? /^ref: refs\/heads\/(\S+)\s+HEAD$/m.exec(remote.stdout)?.[1] : void 0;
 		if (named) return named;
-		const local = await run([
+		const local = await run(repo, [
 			"symbolic-ref",
 			"--short",
 			"refs/remotes/origin/HEAD"
@@ -19345,18 +19363,19 @@ function createExpertCheckout({ git, repo, dir, name, timeoutMs, log, fetchSecon
 		if (local.code === 0 && local.stdout.trim().startsWith("origin/")) return local.stdout.trim().slice(7);
 		throw new Error(`couldn't find origin's default branch in ${repo}: ${(remote.stderr || local.stderr).trim()}`);
 	};
-	const originTip = () => must([
+	const tracking = () => `refs/remotes/origin/${branch}`;
+	const originTip = () => must(read, [
 		"rev-parse",
 		"--verify",
-		`refs/remotes/origin/${branch}^{commit}`
+		`${tracking()}^{commit}`
 	]);
 	const fetchOrigin = async () => {
 		fetchedAt = now();
-		const r = await run([
+		const r = await run(read, [
 			"fetch",
 			"--no-tags",
 			"origin",
-			branch
+			`+refs/heads/${branch}:${tracking()}`
 		]);
 		if (r.code !== 0) {
 			const why = `${r.timedOut ? "git took too long" : "git failed"}: ${r.stderr.trim()}`;
@@ -19365,51 +19384,62 @@ function createExpertCheckout({ git, repo, dir, name, timeoutMs, log, fetchSecon
 		}
 		return r.code === 0;
 	};
-	const head = () => must([
-		"-C",
-		read,
-		"rev-parse",
-		"HEAD"
-	]);
-	const notes = async () => {
-		if (await isWorktree(notesDir)) return notesDir;
-		await must(["worktree", "prune"]);
-		const exists = (await run([
-			"rev-parse",
-			"--verify",
-			"-q",
-			`refs/heads/${branchName}`
-		])).code === 0;
-		await must(exists ? [
-			"worktree",
-			"add",
-			notesDir,
-			branchName
-		] : [
-			"worktree",
-			"add",
-			"--no-track",
-			"-b",
-			branchName,
-			notesDir,
-			`origin/${branch}`
-		]);
-		return notesDir;
-	};
+	const head = () => must(read, ["rev-parse", "HEAD"]);
 	return {
 		async prepare() {
+			const url = await must(repo, [
+				"remote",
+				"get-url",
+				"origin"
+			]);
+			if (!cloneFrom(url)) throw new Error(`${repo}'s origin, ${url}, isn't an https, ssh or host:path remote, so expert ${name} wasn't cloned from it: an expert never clones from a local path, a file:// URL or a \\\\server share`);
 			branch = await defaultBranch();
-			if (!await fetchOrigin()) await originTip();
-			if (!await isWorktree(read)) {
-				await must(["worktree", "prune"]);
-				await must([
-					"worktree",
-					"add",
+			const st = await fs.lstat(read).catch(() => null);
+			if (!st || st.isDirectory() && (await fs.readdir(read)).length === 0) {
+				await fs.mkdir(dir, { recursive: true });
+				await fs.rm(staging, {
+					recursive: true,
+					force: true,
+					maxRetries: 5,
+					retryDelay: 200
+				});
+				await must(dir, [
+					"clone",
+					"-q",
+					"--no-checkout",
+					"--reference-if-able",
+					repo,
+					"--dissociate",
+					"--single-branch",
+					"--branch",
+					branch,
+					"--no-tags",
+					"--",
+					url,
+					staging
+				], NO_LFS);
+				await must(staging, [
+					"checkout",
+					"-q",
 					"--detach",
-					read,
-					`origin/${branch}`
-				]);
+					tracking()
+				], NO_LFS);
+				if (st) await fs.rmdir(read);
+				await renamed(staging, read);
+				fetchedAt = now();
+				return {
+					branch,
+					commit: await head()
+				};
 			}
+			if (!st.isDirectory() || !await ownClone()) throw new Error(`${read} is there already and isn't a clone of its own (a worktree of ${repo} from an earlier Isoplan, say), so it was left as it is. Remove it (a worktree with \`git worktree remove --force ${read}\` in ${repo}), and the expert clones it again for its next question or at the runner's next start`);
+			await must(read, [
+				"remote",
+				"set-url",
+				"origin",
+				url
+			]);
+			if (!await fetchOrigin()) await originTip();
 			return {
 				branch,
 				commit: await head()
@@ -19417,58 +19447,44 @@ function createExpertCheckout({ git, repo, dir, name, timeoutMs, log, fetchSecon
 		},
 		async fetch() {
 			if (fetchedAt === null || now() - fetchedAt >= fetchSeconds() * 1e3) await fetchOrigin();
-			const tip = await run([
+			const tip = await run(read, [
 				"rev-parse",
 				"--verify",
-				`refs/remotes/origin/${branch}^{commit}`
+				`${tracking()}^{commit}`
 			]);
 			if (tip.code !== 0) return null;
 			const commit = tip.stdout.trim();
 			return commit === await head() ? null : commit;
 		},
 		async move(commit) {
-			await must([
-				"-C",
-				read,
+			await must(read, [
 				"checkout",
+				"-q",
 				"--detach",
 				"--force",
 				commit
-			]);
+			], NO_LFS);
 		},
 		head,
 		async dirty() {
-			const r = await run([
-				"-C",
-				read,
-				"status",
-				"--porcelain"
-			]);
+			const r = await run(read, ["status", "--porcelain"]);
 			return r.code !== 0 || r.stdout.trim() !== "";
 		},
 		async reset() {
-			await must([
-				"-C",
-				read,
+			await must(read, [
 				"reset",
+				"-q",
 				"--hard",
 				"HEAD"
-			]);
-			await must([
-				"-C",
-				read,
-				"clean",
-				"-fd"
-			]);
+			], NO_LFS);
+			await must(read, ["clean", "-fd"]);
 		},
 		async changed(index) {
 			const byCommit = /* @__PURE__ */ new Map();
 			for (const [file, commit] of Object.entries(index)) byCommit.set(commit, [...byCommit.get(commit) ?? [], file]);
 			const out = /* @__PURE__ */ new Set();
 			for (const [commit, files] of byCommit) {
-				const r = await run([
-					"-C",
-					read,
+				const r = await run(read, [
 					"diff",
 					"--name-only",
 					`${commit}..HEAD`
@@ -19478,76 +19494,18 @@ function createExpertCheckout({ git, repo, dir, name, timeoutMs, log, fetchSecon
 			}
 			return out;
 		},
-		notes,
-		commitNote(slug, title, body, questionId) {
-			const commit = async () => {
-				if (!slug) {
-					log(`expert ${name}'s pattern note "${title}" has no name to file it under, so it was skipped`);
-					return false;
-				}
-				const relative = `docs/patterns/${slug}.md`;
-				const root = await notes();
-				const folder = path.join(root, "docs", "patterns");
-				const file = path.join(folder, `${slug}.md`);
-				for (const f of [path.join(root, "docs"), folder]) {
-					const s = await fs.lstat(f).catch(() => null);
-					if (s && (s.isSymbolicLink() || !s.isDirectory())) {
-						log(`expert ${name}'s pattern note was skipped: ${path.relative(root, f)} in its notes worktree isn't a plain folder`);
-						return false;
-					}
-				}
-				await fs.mkdir(folder, { recursive: true });
-				if (inside(await fs.realpath(root), await fs.realpath(folder)) === null) {
-					log(`expert ${name}'s pattern note was skipped: docs/patterns is outside its notes worktree`);
-					return false;
-				}
-				if (!await fs.writeFile(file, `# ${title}\n\n${body}\n`, { flag: "wx" }).then(() => true, (err) => {
-					if (err.code !== "EEXIST") throw err;
-					return false;
-				})) {
-					log(`expert ${name}'s pattern note ${relative} is there already, so it was skipped`);
-					return false;
-				}
-				await must([
-					"-C",
-					notesDir,
-					"add",
-					"--",
-					relative
-				]);
-				await must([
-					"-C",
-					notesDir,
-					"-c",
-					"commit.gpgsign=false",
-					"commit",
-					"-q",
-					"-m",
-					`Pattern note from expert ${name} (question ${questionId})`,
-					"--",
-					relative
-				]);
-				return true;
-			};
-			const done = noting.then(commit).catch((err) => {
-				log(`couldn't commit expert ${name}'s pattern note: ${err.message}`);
-				return false;
-			});
-			noting = done;
-			return done;
-		},
 		async remove() {
-			for (const folder of [read, notesDir]) {
-				const r = await run([
-					"worktree",
-					"remove",
-					"--force",
-					folder
-				]);
-				if (r.code !== 0 && await fs.stat(folder).then(() => true, () => false)) log(`couldn't remove expert ${name}'s worktree ${folder} from ${repo}: ${r.stderr.trim()}`);
+			if (!await ownClone()) {
+				if (await fs.lstat(read).then(() => true, () => false)) log(`left ${read} as it is: it isn't expert ${name}'s own clone`);
+				return;
 			}
-			await run(["worktree", "prune"]);
-			log(`removed expert ${name}'s worktrees from ${repo}; its branch ${branchName} is kept there`);
+			await fs.rm(read, {
+				recursive: true,
+				force: true,
+				maxRetries: 5,
+				retryDelay: 200
+			});
+			log(`removed expert ${name}'s clone of ${repo}`);
 		},
 		async list(folder) {
 			return (await fs.readdir(path.join(read, ...folder.split("/")), { withFileTypes: true }).catch(() => [])).filter((e) => e.isFile()).map((e) => e.name).sort();
@@ -19722,10 +19680,6 @@ function parseReply(text) {
 		cited,
 		dropped,
 		learned: learned ? learned.slice(0, LEARNED_MAX) : null,
-		patterns: [...text.matchAll(/<pattern\s+title="([^"]*)"\s*>([\s\S]*?)<\/pattern>/g)].map((m) => ({
-			title: m[1].trim(),
-			body: m[2].trim()
-		})).filter((p) => p.title && p.body),
 		askSenior: asked ? asked[1].trim() || null : null
 	};
 }
@@ -19801,7 +19755,7 @@ const STATES = [
 ];
 const isGeneration = (g) => {
 	const o = g;
-	return !!o && Number.isInteger(o.n) && typeof o.trunk === "string" && typeof o.model === "string" && typeof o.commit === "string" && Number.isFinite(o.groundedAt) && Number.isFinite(o.meter) && Number.isInteger(o.notes) && STATES.includes(o.state);
+	return !!o && Number.isInteger(o.n) && typeof o.trunk === "string" && typeof o.model === "string" && typeof o.commit === "string" && Number.isFinite(o.groundedAt) && Number.isFinite(o.meter) && Number.isInteger(o.notes) && STATES.includes(o.state) && (o.last === void 0 || o.last === null || typeof o.last === "string");
 };
 async function readJson(file) {
 	try {
@@ -19938,6 +19892,7 @@ function createExpert(o) {
 	const finished = /* @__PURE__ */ new Map();
 	const held = /* @__PURE__ */ new Map();
 	const waiters = /* @__PURE__ */ new Set();
+	const transcripts = /* @__PURE__ */ new Map();
 	let saved = {
 		version: 1,
 		fingerprint: "",
@@ -19949,7 +19904,7 @@ function createExpert(o) {
 	let checkout = makeCheckout(file.repo);
 	let preparing = null;
 	let prepared = false;
-	let groundingRun = false;
+	let groundingRun = null;
 	let holding = 0;
 	let lastFailed = false;
 	let lastFailure = "other";
@@ -19957,7 +19912,8 @@ function createExpert(o) {
 	let stopped = false;
 	let epoch = 0;
 	let busy = 0;
-	let noting = 0;
+	let appending = 0;
+	let appendsStarted = 0;
 	let saving = Promise.resolve();
 	let lastHosted = "";
 	function makeCheckout(repo) {
@@ -20109,7 +20065,8 @@ function createExpert(o) {
 		const mine = epoch;
 		const f = file;
 		const fp = fingerprint(f);
-		groundingRun = true;
+		const me = {};
+		groundingRun = me;
 		lastFailed = false;
 		changed();
 		let passed = null;
@@ -20154,7 +20111,7 @@ function createExpert(o) {
 			lastFailure = "other";
 		} finally {
 			if (mine === epoch && passed) await promote(passed, fp);
-			groundingRun = false;
+			if (groundingRun === me) groundingRun = null;
 			changed();
 			if (mine === epoch && !stopped && fingerprint(file) !== fp && file.repo === f.repo) ground();
 			else checkPromotion();
@@ -20171,8 +20128,7 @@ function createExpert(o) {
 			subject: f.subject,
 			context: await checkout.read("CONTEXT.md", GROUNDING_FILE_MAX) ?? "none",
 			claude: await checkout.read("CLAUDE.md", GROUNDING_FILE_MAX) ?? "none",
-			adrs: names(await checkout.list("docs/adr")),
-			patterns: names(await checkout.list("docs/patterns"))
+			adrs: names(await checkout.list("docs/adr"))
 		};
 		let windowed = false;
 		const check = (model) => {
@@ -20189,6 +20145,7 @@ function createExpert(o) {
 			return false;
 		}
 		g.model = c.model ?? f.model;
+		g.last = await lastTurn(g.trunk);
 		const problem = (windowed ? null : check(g.model)) ?? (c.turns.length < 2 ? "its grounding ended before its second turn" : notesRoomProblem(f.promoteAtTokens, meterOf(c.turns.at(-1))));
 		g.meter = c.turns.length ? meterOf(c.turns.at(-1)) : 0;
 		if (problem) {
@@ -20238,7 +20195,8 @@ function createExpert(o) {
 		overhead(judged.usage);
 		if (mine !== epoch) return false;
 		const verdict = judged.ok ? judged.turns.at(-1)?.text ?? "" : `the judge failed: ${judged.failure.detail}`;
-		const pass = judged.ok && /^\W*PASS\b/i.test(verdict);
+		const line = verdict.split(/\r?\n/)[0];
+		const pass = judged.ok && /^\W*PASS\b/i.test(line) && !/\bFAIL\b/i.test(line);
 		g.proof = {
 			passed: pass,
 			at: now()
@@ -20344,6 +20302,12 @@ function createExpert(o) {
 		};
 	}
 	async function askSenior(senior, question, deadline, commit, kids, p) {
+		if (!await trusted(senior)) return {
+			answer: null,
+			cited: "",
+			stamps: {},
+			usage: zero()
+		};
 		const index = await indexOf(senior.n);
 		const first = fill(p.question, {
 			id: "for your junior",
@@ -20474,7 +20438,8 @@ function createExpert(o) {
 			deliver(q, refusal);
 		};
 		try {
-			const ready = await whenReady();
+			let ready = await whenReady();
+			while (ready === "ready" && !await trusted(gen("junior"))) ready = await whenReady();
 			if (ready === "stopped") return deliver(q, unknown());
 			if (ready === "failed") {
 				const why = {
@@ -20617,7 +20582,6 @@ function createExpert(o) {
 								log(`appended the learned note from ${q.id} to generation ${junior.n}: sha256 ${createHash("sha256").update(r.learned).digest("hex").slice(0, 12)}, "${first}"`);
 							}
 						}
-						for (const pattern of r.patterns) notePattern(pattern, q.id);
 					});
 				} finally {
 					freeSlot();
@@ -20635,38 +20599,36 @@ function createExpert(o) {
 	function append(g, note) {
 		const done = (appends.get(g.trunk) ?? Promise.resolve()).then(() => gate.closed(async () => {
 			if (stopped || g.state !== "junior") return false;
-			const p = await loadExpertPrompts(o.appDir);
-			const c = await run(appendArgs(g.trunk, g.model), readDir, g.trunk, fill(p.note, { note }), trunkNext([]), file.forkTimeLimitMinutes * minute, {});
-			overhead(c.usage);
-			if (!c.ok) {
-				log(`couldn't append a learned note to generation ${g.n}: ${c.failure.detail}`);
-				if (c.failure.kind === "compacted" || c.failure.kind === "disallowed") brokeGeneration(g, c.failure.kind === "compacted" ? "its trunk compacted" : c.failure.detail);
-				return false;
+			appending++;
+			appendsStarted++;
+			try {
+				const p = await loadExpertPrompts(o.appDir);
+				const c = await run(appendArgs(g.trunk, g.model), readDir, g.trunk, fill(p.note, { note }), trunkNext([]), file.forkTimeLimitMinutes * minute, {});
+				overhead(c.usage);
+				g.last = await lastTurn(g.trunk);
+				if (!c.ok) {
+					log(`couldn't append a learned note to generation ${g.n}: ${c.failure.detail}`);
+					if (c.failure.kind === "compacted" || c.failure.kind === "disallowed") brokeGeneration(g, c.failure.kind === "compacted" ? "its trunk compacted" : c.failure.detail);
+					else await save();
+					return false;
+				}
+				g.meter = meterOf(c.turns.at(-1));
+				g.notes++;
+				await save();
+				return true;
+			} finally {
+				appending--;
 			}
-			g.meter = meterOf(c.turns.at(-1));
-			g.notes++;
-			await save();
-			return true;
 		}));
 		appends.set(g.trunk, done.catch(() => false));
 		return done.catch((err) => (log(`couldn't append a learned note: ${err.message}`), false));
-	}
-	async function notePattern(pattern, qid) {
-		noting++;
-		try {
-			const matched = await o.scan(`${pattern.title}\n${pattern.body}`);
-			if (matched) return log(`skipped a pattern note from ${qid}: it matches the secret pattern "${matched}"`);
-			if (await checkout.commitNote(noteSlug(pattern.title), pattern.title, pattern.body, qid)) log(`committed a pattern note from ${qid} to its notes branch`);
-		} finally {
-			noting--;
-		}
 	}
 	async function reset(oldRepo) {
 		epoch++;
 		killAll();
 		const old = makeCheckout(oldRepo);
 		log(`its repo changed from ${oldRepo} to ${file.repo}, so it starts again`);
-		await lock.exclusive(() => old.remove()).catch((err) => log(`couldn't remove its worktrees from ${oldRepo}: ${err.message}`));
+		await lock.exclusive(() => old.remove()).catch((err) => log(`couldn't remove its clone of ${oldRepo}: ${err.message}`));
 		saved = {
 			version: 1,
 			fingerprint: "",
@@ -20681,13 +20643,54 @@ function createExpert(o) {
 		prepared = false;
 		lastFailed = false;
 		promotionBlocked = false;
-		groundingRun = false;
+		groundingRun = null;
 		changed();
 		ground();
 	}
 	async function transcriptOf(trunk) {
+		const there = (file) => fs.stat(file).then(() => true, () => false);
+		const known = transcripts.get(trunk);
+		if (known && await there(known)) return known;
 		const dirs = await fs.readdir(o.projectsDir, { withFileTypes: true }).catch(() => []);
-		for (const d of dirs) if (d.isDirectory() && await fs.stat(path.join(o.projectsDir, d.name, `${trunk}.jsonl`)).then(() => true, () => false)) return true;
+		for (const d of dirs) {
+			const file = path.join(o.projectsDir, d.name, `${trunk}.jsonl`);
+			if (d.isDirectory() && await there(file)) return transcripts.set(trunk, file), file;
+		}
+		return null;
+	}
+	async function lastTurn(trunk) {
+		const file = await transcriptOf(trunk);
+		const lines = (file ? await fs.readFile(file, "utf8").catch(() => "") : "").split("\n");
+		for (let i = lines.length - 1; i >= 0; i--) try {
+			const e = JSON.parse(lines[i]);
+			if ((e.type === "user" || e.type === "assistant") && typeof e.uuid === "string") return e.uuid;
+		} catch {}
+		return null;
+	}
+	/** Whether a junior's or senior's trunk is as the runner left it; one that isn't is taken out of use. */
+	async function trusted(g) {
+		const started = appendsStarted;
+		const last = await lastTurn(g.trunk);
+		if (g.last === void 0) {
+			g.last = last;
+			save();
+			return true;
+		}
+		if (last === g.last || appending > 0 || appendsStarted !== started) return true;
+		if (g.state === "junior" || g.state === "senior") {
+			const wasJunior = g.state === "junior";
+			g.state = "retired";
+			g.why = "its trunk was changed outside Isoplan";
+			say("generation", {
+				generation: g.n,
+				state: "retired",
+				why: g.why
+			});
+			log(`generation ${g.n}'s trunk was changed outside Isoplan (resumed by hand, say), so it isn't used again${wasJunior ? ", and a new generation grounds" : ""}`);
+			save();
+			changed();
+			if (wasJunior && !stopped) ground();
+		}
 		return false;
 	}
 	return {
@@ -20709,6 +20712,7 @@ function createExpert(o) {
 				}
 				const junior = gen("junior");
 				if (junior && !await transcriptOf(junior.trunk)) failGeneration(junior, "its trunk's transcript is gone");
+				for (const g of [gen("junior"), gen("senior")]) if (g) await trusted(g);
 			}
 			changed();
 			if (!gen("junior") || saved.fingerprint !== fingerprint(file)) ground();
@@ -20766,7 +20770,10 @@ function createExpert(o) {
 			handle(q).catch((err) => {
 				log(`question ${qid}: the runner failed: ${err?.stack ?? String(err)}`);
 				if (!finished.has(qid)) deliver(q, forkFailed("the runner failed"));
-			}).finally(() => questions.delete(qid));
+			}).finally(() => {
+				questions.delete(qid);
+				forget(qid);
+			});
 		},
 		release(request, send) {
 			if (stopped) return send({
@@ -20806,7 +20813,7 @@ function createExpert(o) {
 				log(`dropped the withheld answer to ${qid}: the office server dropped the question`);
 			}
 		},
-		idle: () => busy === 0 && !groundingRun && noting === 0 && questions.size === 0,
+		idle: () => busy === 0 && !groundingRun && questions.size === 0,
 		stop() {
 			stopped = true;
 			epoch++;

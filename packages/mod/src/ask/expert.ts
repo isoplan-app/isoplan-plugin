@@ -7,20 +7,22 @@
 // isn't answered by then arrives later as a note (hooks/register.ts). An end shown here is acked.
 //
 // No wait here is longer than the deadline when blocking: a question sent that the server didn't
-// confirm in time is told as pending, never as an error, since it may have been asked all the same;
-// one the deadline stopped before it was sent is told so, to be asked again later.
+// confirm in time is told as pending, never as an error, since it may have been asked all the same,
+// as is one whose ask failed once it was sent; one the deadline stopped before it was sent is told
+// so, to be asked again later.
 
-import { PROTOCOL_VERSION, type AskedMessage, type ExpertCode, type OfficeServerMessage } from "@isoplan/protocol";
+import { PROTOCOL_VERSION, type AskedMessage, type OfficeServerMessage } from "@isoplan/protocol";
 import type { SideLink } from "../handoff/connection.js";
 import type { Told } from "../pipe/pipe.js";
 import { TokenExpired } from "./ask.js";
-import { answeredText, askedText, expertText, exploreMeanwhileText, notSentText, pendingText, type ExpertAbout } from "./expert-text.js";
+import { answeredText, askedText, expertText, exploreMeanwhileText, mayBeAskedText, notSentText, pendingText, type ExpertAbout, type ExpertTextCode } from "./expert-text.js";
 
 // How long the server has to answer the ask and each check.
 const ANSWER_MS = 20000;
 
-// The server's refusals of an ask-expert that end it with their own code; any other is the runner's
-// way to the office failing.
+// The server's refusals of an ask-expert that end it with their own code. Any other refusal (the
+// session isn't held yet after a reconnect, the asker isn't the session's owner, a key whose end was
+// shown used again) is EXPERT_REFUSED, with the server's words: the office was reached all the same.
 const REFUSALS = new Set<string>(["EXPERT_UNKNOWN", "EXPERT_CAP", "EXPERT_PLUGIN_OLD"]);
 
 export interface ExpertQuestion {
@@ -57,6 +59,10 @@ export async function askExpertThrough(open: (ms: number) => Promise<SideLink>, 
   }
   try {
     return await askExpert(link, a, o);
+  } catch (err) {
+    if (err instanceof TokenExpired) throw err;
+    // The ask began with link.send, so the question may be on its way.
+    return { text: mayBeAskedText({ expert: a.expert, id: a.key, words: `the link to the office server failed: ${String((err as Error)?.message ?? err)}` }) };
   } finally {
     // A blocking ask is past its wait by now: the close handshake finishes without it.
     const close = link.close();
@@ -75,7 +81,7 @@ export async function askExpert(link: SideLink, a: ExpertQuestion, { deadline, n
   if (!first) return { text: pendingText(about(a.key)) };
   if (first.type === "error") {
     if (first.code === "token-expired") throw new TokenExpired(first.message);
-    const code = (REFUSALS.has(first.code) ? first.code : "EXPERT_RUNNER_UNREACHABLE") as ExpertCode;
+    const code = (REFUSALS.has(first.code) ? first.code : "EXPERT_REFUSED") as ExpertTextCode;
     return { text: expertText(code, about(a.key, { words: first.message || undefined })), failed: true, code };
   }
   let latest: AskedMessage = first;

@@ -5,7 +5,7 @@ import { tempRoot } from "../data-layer/fixture.js";
 import { forkEnv, hiddenSpawn } from "./claude.js";
 import { appendArgs, converse, expertForkArgs, inside, judgeArgs, trunkArgs } from "./expert-claude.js";
 
-const READ_ONLY = ["--tools", "Read,Grep,Glob,Agent", "--disallowedTools", "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch", "--setting-sources", "", "--strict-mcp-config", "--permission-mode", "dontAsk", "--autocompact", "1000000"];
+const READ_ONLY = ["--tools", "Read,Grep,Glob,Agent", "--disallowedTools", "Bash,PowerShell,Edit,Write,NotebookEdit,WebFetch,WebSearch", "--setting-sources", "", "--strict-mcp-config", "--permission-mode", "dontAsk", "--autocompact", "1000000"];
 const STREAM = ["--input-format", "stream-json", "--output-format", "stream-json", "--verbose"];
 
 test("argv: the four kinds are pinned, flag by flag", () => {

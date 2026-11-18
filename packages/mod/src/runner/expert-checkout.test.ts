@@ -2,31 +2,38 @@ import fs from "node:fs";
 import path from "node:path";
 import { expect, test } from "vitest";
 import { tempRoot } from "../data-layer/fixture.js";
-import type { GitResult, RunGit } from "../handoff/git.js";
-import { createExpertCheckout, noteSlug } from "./expert-checkout.js";
+import { git as gitIn, remoteAndClone } from "../handoff/fixture.js";
+import { createRunGit, type GitResult, type RunGit } from "../handoff/git.js";
+import { createExpertCheckout } from "./expert-checkout.js";
 
 const MAIN = "1".repeat(40);
 const MOVED = "2".repeat(40);
 const OLD = "3".repeat(40);
+const URL = "https://github.com/acme/app.git";
+const NO_LFS = { GIT_LFS_SKIP_SMUDGE: "1" };
 const ok = (stdout = ""): GitResult => ({ code: 0, stdout, stderr: "", timedOut: false });
 const failed = (stderr = "fatal"): GitResult => ({ code: 128, stdout: "", stderr, timedOut: false });
+
+interface Call {
+  cwd: string;
+  args: string[];
+  env?: Record<string, string>;
+}
 
 /**
  * A stand-in for git: it records every call (without the no-hooks prefix, which it checks), and
  * answers by `answer`, falling back to success with nothing said.
  */
 function fakeGit(answer: (args: string[]) => GitResult | undefined | Promise<GitResult | undefined> = () => undefined) {
-  const calls: string[][] = [];
-  const cwds = new Set<string>();
-  const git: RunGit = async (argv, { cwd }) => {
+  const calls: Call[] = [];
+  const git: RunGit = async (argv, { cwd, env }) => {
     expect(argv[0]).toBe("-c");
     expect(argv[1]).toMatch(/^core\.hooksPath=/);
     const args = argv.slice(2);
-    calls.push(args);
-    cwds.add(cwd);
+    calls.push({ cwd, args, ...(env && { env }) });
     return (await answer(args)) ?? ok();
   };
-  return { git, calls, cwds };
+  return { git, calls };
 }
 
 function setUp(answer?: Parameters<typeof fakeGit>[0], o: { fetchSeconds?: number; now?: () => number } = {}) {
@@ -34,41 +41,90 @@ function setUp(answer?: Parameters<typeof fakeGit>[0], o: { fetchSeconds?: numbe
   const repo = path.join(root, "app");
   const dir = path.join(root, "experts", "adr");
   const read = path.join(dir, "read");
-  const notes = path.join(dir, "notes");
+  const staging = path.join(dir, "read.new");
   const g = fakeGit(answer);
   const logged: string[] = [];
   const checkout = createExpertCheckout({ git: g.git, repo, dir, name: "adr", timeoutMs: 1000, log: (t) => void logged.push(t), fetchSeconds: () => o.fetchSeconds ?? 60, ...(o.now && { now: o.now }) });
-  return { ...g, checkout, repo, dir, read, notes, logged };
+  return { ...g, checkout, repo, dir, read, staging, logged };
 }
 
-test("prepare: origin's default branch, a fetch of it, and the read checkout detached at it; all from the repo, without hooks", async () => {
+// read/ as a clone of its own leaves it: a .git folder.
+const makeClone = (read: string) => fs.mkdirSync(path.join(read, ".git"), { recursive: true });
+
+test("prepare: only reads in the person's repo, then clones read/ from origin borrowing its objects, detached at origin's default branch, without hooks or LFS's download", async () => {
   const t = setUp((args) => {
+    if (args[0] === "remote") return ok(URL + "\n");
     if (args[0] === "ls-remote") return ok(`ref: refs/heads/trunk\tHEAD\n${MAIN}\tHEAD\n`);
-    if (args.includes("--show-toplevel")) return failed("not a git repository");
+    if (args[0] === "clone") makeClone(args.at(-1)!);
     if (args.at(-1) === "HEAD") return ok(MAIN + "\n");
   });
   expect(await t.checkout.prepare()).toEqual({ branch: "trunk", commit: MAIN });
   expect(t.calls).toEqual([
-    ["ls-remote", "--symref", "origin", "HEAD"],
-    ["fetch", "--no-tags", "origin", "trunk"],
-    ["-C", t.read, "rev-parse", "--show-toplevel"],
-    ["worktree", "prune"],
-    ["worktree", "add", "--detach", t.read, "origin/trunk"],
-    ["-C", t.read, "rev-parse", "HEAD"],
+    { cwd: t.repo, args: ["remote", "get-url", "origin"] },
+    { cwd: t.repo, args: ["ls-remote", "--symref", "origin", "HEAD"] },
+    { cwd: t.dir, args: ["clone", "-q", "--no-checkout", "--reference-if-able", t.repo, "--dissociate", "--single-branch", "--branch", "trunk", "--no-tags", "--", URL, t.staging], env: NO_LFS },
+    { cwd: t.staging, args: ["checkout", "-q", "--detach", "refs/remotes/origin/trunk"], env: NO_LFS },
+    { cwd: t.read, args: ["rev-parse", "HEAD"] },
   ]);
-  expect([...t.cwds]).toEqual([t.repo]);
+  expect(fs.existsSync(path.join(t.read, ".git"))).toBe(true);
+  expect(fs.existsSync(t.staging)).toBe(false);
+  // Just cloned: the next question's fetch waits fetchSeconds.
+  await t.checkout.fetch();
+  expect(t.calls.some((c) => c.args[0] === "fetch")).toBe(false);
 });
 
-test("prepare: with origin unreachable, the default branch from origin/HEAD and a read checkout already there kept", async () => {
+test("prepare: a clone cut short leaves no read/, and the half-made one is cleared before the next clone", async () => {
+  let cut = true;
   const t = setUp((args) => {
+    if (args[0] === "remote") return ok(URL + "\n");
+    if (args[0] === "ls-remote") return ok(`ref: refs/heads/main\tHEAD\n${MAIN}\tHEAD\n`);
+    if (args[0] === "clone") {
+      makeClone(args.at(-1)!);
+      if (cut) return { code: 128, stdout: "", stderr: "", timedOut: true };
+    }
+    if (args.at(-1) === "HEAD") return ok(MAIN + "\n");
+  });
+  await expect(t.checkout.prepare()).rejects.toThrow(/git clone .* failed \(it took too long\)/);
+  expect(fs.existsSync(t.read)).toBe(false);
+  fs.writeFileSync(path.join(t.staging, "left-over"), "");
+  cut = false;
+  expect(await t.checkout.prepare()).toEqual({ branch: "main", commit: MAIN });
+  expect(fs.existsSync(path.join(t.read, "left-over"))).toBe(false);
+});
+
+test("prepare: a clone already there gets origin's current URL and a fetch by refspec; with origin unreachable, the default branch from origin/HEAD and the clone kept as it is", async () => {
+  const online = setUp((args) => {
+    if (args[0] === "remote" && args[1] === "get-url") return ok(URL);
+    if (args[0] === "ls-remote") return ok(`ref: refs/heads/main\tHEAD\n`);
+    if (args.at(-1) === "HEAD") return ok(MAIN);
+  });
+  makeClone(online.read);
+  await online.checkout.prepare();
+  expect(online.calls.slice(2)).toEqual([
+    { cwd: online.read, args: ["remote", "set-url", "origin", URL] },
+    { cwd: online.read, args: ["fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"] },
+    { cwd: online.read, args: ["rev-parse", "HEAD"] },
+  ]);
+
+  const t = setUp((args) => {
+    if (args[0] === "remote" && args[1] === "get-url") return ok(URL);
     if (args[0] === "ls-remote" || args[0] === "fetch") return failed("could not read from remote");
     if (args[0] === "symbolic-ref") return ok("origin/main\n");
-    if (args.includes("--show-toplevel")) return ok(t.read.replace(/\\/g, "/") + "\n");
     if (args.at(-1) === "HEAD" || args.at(-1)?.startsWith("refs/remotes/")) return ok(OLD);
   });
+  makeClone(t.read);
   expect(await t.checkout.prepare()).toEqual({ branch: "main", commit: OLD });
-  expect(t.calls.some((c) => c[0] === "worktree")).toBe(false);
+  expect(t.calls.some((c) => c.args[0] === "clone")).toBe(false);
+  expect(t.calls.filter((c) => c.cwd === t.repo).map((c) => c.args[0])).toEqual(["remote", "ls-remote", "symbolic-ref"]);
   expect(t.logged).toEqual([expect.stringMatching(/^couldn't fetch origin main for expert adr, so it answers from its checkout as it is/)]);
+});
+
+test("prepare: an origin that is a local path, a file:// URL or a \\\\server share is refused, and nothing is cloned", async () => {
+  for (const url of ["C:/repos/app", "/srv/app.git", "file:///srv/app.git", "\\\\server\\share\\app"]) {
+    const t = setUp((args) => (args[0] === "remote" ? ok(url) : undefined));
+    await expect(t.checkout.prepare()).rejects.toThrow(/isn't an https, ssh or host:path remote, so expert adr wasn't cloned from it/);
+    expect(t.calls.map((c) => c.args[0])).toEqual(["remote"]);
+  }
 });
 
 test("fetch: at most every fetchSeconds; origin's commit when it is ahead of the read checkout, else null", async () => {
@@ -76,15 +132,16 @@ test("fetch: at most every fetchSeconds; origin's commit when it is ahead of the
   let tip = MAIN;
   const t = setUp(
     (args) => {
+      if (args[0] === "remote" && args[1] === "get-url") return ok(URL);
       if (args[0] === "ls-remote") return ok(`ref: refs/heads/main\tHEAD\n`);
-      if (args.includes("--show-toplevel")) return ok(t.read);
       if (args.at(-1)?.startsWith("refs/remotes/origin/main")) return ok(tip);
       if (args.at(-1) === "HEAD") return ok(MAIN);
     },
     { now: () => now },
   );
+  makeClone(t.read);
   await t.checkout.prepare();
-  const fetches = () => t.calls.filter((c) => c[0] === "fetch").length;
+  const fetches = () => t.calls.filter((c) => c.args[0] === "fetch").length;
   expect(await t.checkout.fetch()).toBe(null);
   expect(fetches()).toBe(1);
   // Moved, but fetched less than a minute ago: the tip already fetched is compared, with no fetch.
@@ -97,16 +154,16 @@ test("fetch: at most every fetchSeconds; origin's commit when it is ahead of the
   expect(fetches()).toBe(2);
 });
 
-test("move, head, dirty and reset run in the read checkout", async () => {
+test("move, dirty and reset run in the clone, the checkout and reset without LFS's download", async () => {
   const t = setUp((args) => (args.includes("--porcelain") ? ok(" M a.ts\n") : undefined));
   await t.checkout.move(MOVED);
   expect(await t.checkout.dirty()).toBe(true);
   await t.checkout.reset();
   expect(t.calls).toEqual([
-    ["-C", t.read, "checkout", "--detach", "--force", MOVED],
-    ["-C", t.read, "status", "--porcelain"],
-    ["-C", t.read, "reset", "--hard", "HEAD"],
-    ["-C", t.read, "clean", "-fd"],
+    { cwd: t.read, args: ["checkout", "-q", "--detach", "--force", MOVED], env: NO_LFS },
+    { cwd: t.read, args: ["status", "--porcelain"] },
+    { cwd: t.read, args: ["reset", "-q", "--hard", "HEAD"], env: NO_LFS },
+    { cwd: t.read, args: ["clean", "-fd"] },
   ]);
 });
 
@@ -117,57 +174,10 @@ test("changed: one diff per distinct commit with no pathspec, intersected with t
   });
   const changed = await t.checkout.changed({ "a.ts": MAIN, "b.ts": MAIN, "c.ts": OLD });
   expect([...changed].sort()).toEqual(["a.ts", "c.ts"]);
-  expect(t.calls).toEqual([
-    ["-C", t.read, "diff", "--name-only", `${MAIN}..HEAD`],
-    ["-C", t.read, "diff", "--name-only", `${OLD}..HEAD`],
+  expect(t.calls.map((c) => c.args)).toEqual([
+    ["diff", "--name-only", `${MAIN}..HEAD`],
+    ["diff", "--name-only", `${OLD}..HEAD`],
   ]);
-});
-
-test("pattern notes: committed one at a time on the notes branch, never pushed; one whose name exists is skipped", async () => {
-  let release = () => {};
-  const slow = new Promise<void>((r) => (release = r));
-  const t = setUp(async (args) => {
-    if (args[0] === "ls-remote") return ok(`ref: refs/heads/main\tHEAD\n`);
-    if (args.includes("--show-toplevel")) return args[1] === t.notes && !fs.existsSync(t.notes) ? failed() : ok(args[1]);
-    if (args.join(" ") === `worktree add --no-track -b expert/adr/notes ${t.notes} origin/main`) fs.mkdirSync(t.notes, { recursive: true });
-    if (args.includes("add") && args.at(-1) === "docs/patterns/first-rule.md") await slow;
-    if (args.at(-1) === "HEAD") return ok(MAIN);
-    if (args[1] === "--verify" && args[2] === "-q") return failed(); // no notes branch yet
-  });
-  await t.checkout.prepare();
-  t.calls.length = 0;
-  const first = t.checkout.commitNote(noteSlug("First rule!"), "First rule!", "Because.", "x-0000000001");
-  const second = t.checkout.commitNote(noteSlug("Second rule"), "Second rule", "Also because.", "x-0000000002");
-  await new Promise((r) => setTimeout(r, 20));
-  expect(t.calls.some((c) => c.at(-1) === "docs/patterns/second-rule.md")).toBe(false);
-  release();
-  expect(await Promise.all([first, second])).toEqual([true, true]);
-  const writes = t.calls.filter((c) => c[0] === "-C" && c[1] === t.notes && !c.includes("--show-toplevel"));
-  expect(writes).toEqual([
-    ["-C", t.notes, "add", "--", "docs/patterns/first-rule.md"],
-    ["-C", t.notes, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "Pattern note from expert adr (question x-0000000001)", "--", "docs/patterns/first-rule.md"],
-    ["-C", t.notes, "add", "--", "docs/patterns/second-rule.md"],
-    ["-C", t.notes, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "Pattern note from expert adr (question x-0000000002)", "--", "docs/patterns/second-rule.md"],
-  ]);
-  // With no upstream, so a push from it can't land on origin's default branch.
-  expect(t.calls).toContainEqual(["worktree", "add", "--no-track", "-b", "expert/adr/notes", t.notes, "origin/main"]);
-  expect(fs.readFileSync(path.join(t.notes, "docs", "patterns", "first-rule.md"), "utf8")).toBe("# First rule!\n\nBecause.\n");
-  expect(await t.checkout.commitNote("first-rule", "First rule", "Again.", "x-0000000003")).toBe(false);
-  expect(t.logged).toContainEqual(expect.stringMatching(/docs\/patterns\/first-rule\.md is there already/));
-  expect(t.calls.flat()).not.toContain("push");
-  expect(noteSlug("  A repo the office doesn't take sends nothing.  ")).toBe("a-repo-the-office-doesn-t-take-sends-nothing");
-  expect(noteSlug("x".repeat(100))).toHaveLength(80);
-});
-
-test("remove: the read worktree, then the notes worktree, then prune, from the old repo; the notes branch kept", async () => {
-  const t = setUp();
-  await t.checkout.remove();
-  expect(t.calls).toEqual([
-    ["worktree", "remove", "--force", t.read],
-    ["worktree", "remove", "--force", t.notes],
-    ["worktree", "prune"],
-  ]);
-  expect(t.logged).toEqual([expect.stringMatching(/its branch expert\/adr\/notes is kept there$/)]);
 });
 
 test("list and read: names in the read checkout's folders, and a file cut to its limit", async () => {
@@ -177,34 +187,73 @@ test("list and read: names in the read checkout's folders, and a file cut to its
   fs.writeFileSync(path.join(t.read, "docs", "adr", "0001-record.md"), "");
   fs.writeFileSync(path.join(t.read, "CONTEXT.md"), "abcdef");
   expect(await t.checkout.list("docs/adr")).toEqual(["0001-record.md", "0004-what-leaves-a-machine.md"]);
-  expect(await t.checkout.list("docs/patterns")).toEqual([]);
   expect(await t.checkout.read("CONTEXT.md", 4)).toBe("abcd");
   expect(await t.checkout.read("CLAUDE.md", 4)).toBe(null);
 });
 
-// A link the repo committed (a junction on Windows, which needs no privilege) to a folder outside.
-const linkOut = (from: string) => {
-  const outside = path.join(tempRoot(), "outside");
-  fs.mkdirSync(outside, { recursive: true });
-  fs.mkdirSync(path.dirname(from), { recursive: true });
-  fs.symlinkSync(outside, from, "junction");
-  return outside;
-};
-
 test("read: never through a link to a file outside the read checkout", async () => {
   const t = setUp();
-  const outside = linkOut(path.join(t.read, "docs"));
+  // A link the repo committed (a junction on Windows, which needs no privilege) to a folder outside.
+  const outside = path.join(tempRoot(), "outside");
+  fs.mkdirSync(outside, { recursive: true });
+  fs.mkdirSync(t.read, { recursive: true });
+  fs.symlinkSync(outside, path.join(t.read, "docs"), "junction");
   fs.writeFileSync(path.join(outside, "CLAUDE.md"), "a host file");
   expect(await t.checkout.read("docs/CLAUDE.md", 100)).toBe(null);
 });
 
-test("pattern notes: never written through a docs/patterns that links out of the notes worktree", async () => {
-  const t = setUp((args) => {
-    if (args.includes("--show-toplevel")) return ok(args[1]);
-  });
-  const outside = linkOut(path.join(t.notes, "docs", "patterns"));
-  expect(await t.checkout.commitNote("a-rule", "A rule", "Because.", "x-0000000001")).toBe(false);
-  expect(fs.readdirSync(outside)).toEqual([]);
-  expect(t.calls.some((c) => c.includes("commit"))).toBe(false);
-  expect(t.logged).toEqual([expect.stringMatching(/docs[\\/]patterns in its notes worktree isn't a plain folder$/)]);
-});
+// Real git from here: a bare repo as origin, and the person's clone of it.
+const MS = 30000;
+function realSetUp() {
+  const root = tempRoot();
+  const { remote, clone: repo } = remoteAndClone(root, "app");
+  const dir = path.join(root, "experts", "adr");
+  const logged: string[] = [];
+  // A local origin stands in for GitHub here, so the wire check is loosened.
+  const checkout = createExpertCheckout({ git: createRunGit(), repo, dir, name: "adr", timeoutMs: MS, log: (t) => void logged.push(t), fetchSeconds: () => 0, cloneFrom: () => true });
+  return { root, remote, repo, dir, read: path.join(dir, "read"), checkout, logged };
+}
+
+test("with real git: read/ is a clone of its own that follows origin, not a worktree of the person's repo, which is left as it was; remove deletes it", async () => {
+  const t = realSetUp();
+  const before = { refs: gitIn(t.repo, "for-each-ref"), config: fs.readFileSync(path.join(t.repo, ".git", "config"), "utf8"), worktrees: gitIn(t.repo, "worktree", "list") };
+  const tip = gitIn(t.remote, "rev-parse", "main");
+  expect(await t.checkout.prepare()).toEqual({ branch: "main", commit: tip });
+  expect(fs.statSync(path.join(t.read, ".git")).isDirectory()).toBe(true);
+  expect(gitIn(t.read, "rev-parse", "--abbrev-ref", "HEAD")).toBe("HEAD");
+  expect(fs.readFileSync(path.join(t.read, "app.js"), "utf8")).toMatch(/^console\.log\(1\);\r?\n$/);
+  // It stands alone: borrowed objects were copied, so nothing points back at the person's repo.
+  expect(fs.existsSync(path.join(t.read, ".git", "objects", "info", "alternates"))).toBe(false);
+  expect(gitIn(t.read, "tag")).toBe("");
+
+  // Origin moves on: the next fetch sees it, and move checks it out.
+  const pusher = remoteAndClone(t.root, "pusher").clone;
+  fs.writeFileSync(path.join(pusher, "app.js"), "console.log(2);\n");
+  gitIn(pusher, "commit", "-q", "-am", "second");
+  gitIn(pusher, "push", "-q", "origin", "main");
+  const moved = gitIn(pusher, "rev-parse", "HEAD");
+  expect(await t.checkout.fetch()).toBe(moved);
+  await t.checkout.move(moved);
+  expect(await t.checkout.head()).toBe(moved);
+  expect(await t.checkout.dirty()).toBe(false);
+  fs.writeFileSync(path.join(t.read, "app.js"), "changed by a fork\n");
+  expect(await t.checkout.dirty()).toBe(true);
+  await t.checkout.reset();
+  expect(await t.checkout.dirty()).toBe(false);
+  await t.checkout.prepare();
+
+  expect({ refs: gitIn(t.repo, "for-each-ref"), config: fs.readFileSync(path.join(t.repo, ".git", "config"), "utf8"), worktrees: gitIn(t.repo, "worktree", "list") }).toEqual(before);
+  await t.checkout.remove();
+  expect(fs.existsSync(t.read)).toBe(false);
+  expect(t.logged).toContainEqual(`removed expert adr's clone of ${t.repo}`);
+}, 60000);
+
+test("with real git: a read/ that is a worktree of the person's repo, from an earlier build, is refused and never deleted", async () => {
+  const t = realSetUp();
+  fs.mkdirSync(t.dir, { recursive: true });
+  gitIn(t.repo, "worktree", "add", "-q", "--detach", t.read);
+  await expect(t.checkout.prepare()).rejects.toThrow(/is there already and isn't a clone of its own .*git worktree remove --force/);
+  await t.checkout.remove();
+  expect(fs.existsSync(path.join(t.read, "app.js"))).toBe(true);
+  expect(t.logged).toEqual([`left ${t.read} as it is: it isn't expert adr's own clone`]);
+}, 60000);

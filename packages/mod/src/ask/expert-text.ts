@@ -22,17 +22,27 @@ export interface ExpertAbout {
   pattern?: string;
 }
 
+/**
+ * The protocol's codes, and EXPERT_REFUSED, which only this side uses: the office server refused the
+ * ask for a reason that has no code of its own (an `ask-refused`, say), so its words say why.
+ */
+export type ExpertTextCode = ExpertCode | "EXPERT_REFUSED";
+
 const machineOf = (host?: string) => (host ? `${host}'s machine` : "the host's machine");
+const said = (words: string) => words.replace(/\.\s*$/, "");
 
 /** The text for a situation that has a code, as the design's replies table gives it. */
-export function expertText(code: ExpertCode, a: ExpertAbout): string {
+export function expertText(code: ExpertTextCode, a: ExpertAbout): string {
   const prefix = `Expert ${a.expert}, question ${a.id}: `;
   const row = ((): string => {
     switch (code) {
       case "EXPERT_RUNNER_UNREACHABLE":
-        return `Isoplan's runner can't be reached on this machine${a.words ? `: ${a.words.replace(/\.\s*$/, "")}` : ""}, so nothing was sent. Explore this yourself`;
+        return `Isoplan's runner can't be reached on this machine${a.words ? `: ${said(a.words)}` : ""}, so nothing was sent. Explore this yourself`;
+      case "EXPERT_REFUSED":
+        return `the office server refused the question${a.words ? `: ${said(a.words)}` : ""}, so it wasn't asked. Explore this yourself`;
       case "EXPERT_UNKNOWN":
-        return a.words ?? `no expert named ${a.expert}; ask one of: ${(a.names ?? []).join(", ") || "none"}`;
+        if (a.words) return a.words;
+        return a.names?.length ? `no expert named ${a.expert}; ask one of: ${a.names.join(", ")}` : "no expert can be asked from this session right now. Explore this yourself";
       case "EXPERT_CAP":
         return a.words ?? "a cap on asking this expert has been reached";
       case "EXPERT_QUESTION_HELD":
@@ -64,9 +74,15 @@ export const askedText = (a: ExpertAbout) =>
 export const notSentText = (a: ExpertAbout) =>
   `Expert ${a.expert}, question ${a.id}: couldn't reach the office server in time, so the question wasn't sent. Explore this yourself, and ask again later if you still need it.`;
 
-/** A question sent that the server didn't confirm in time: it may have been asked all the same. */
-export const pendingText = (a: ExpertAbout) =>
-  `Expert ${a.expert}, question ${a.id}: the office server didn't confirm the question in time. It may have been asked all the same, and if so the answer arrives in this session as a note on one of your next tool results. Explore this yourself meanwhile, and don't ask it again.`;
+/**
+ * A question that may have gone before the ask failed, `words` saying how: it may have been asked
+ * all the same. Asked again, it would be a new question, and the answer to this one still comes.
+ */
+export const mayBeAskedText = (a: ExpertAbout & { words: string }) =>
+  `Expert ${a.expert}, question ${a.id}: ${said(a.words)}. It may have been asked all the same, and if so the answer arrives in this session as a note on one of your next tool results. Explore this yourself meanwhile, and don't ask it again as a new question.`;
+
+/** A question sent that the server didn't confirm in time. */
+export const pendingText = (a: ExpertAbout) => mayBeAskedText({ ...a, words: "the office server didn't confirm the question in time" });
 
 /** A blocking question whose wait ran out before the answer came. */
 export const exploreMeanwhileText = (a: ExpertAbout) =>

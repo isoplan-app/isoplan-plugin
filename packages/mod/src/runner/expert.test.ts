@@ -104,18 +104,12 @@ function fakeGit(readDir: string) {
     const args = argv.slice(2); // after the no-hooks prefix
     calls.push({ cwd, args });
     const at = (word: string) => args.includes(word);
+    if (args[0] === "remote" && args[1] === "get-url") return ok("https://github.com/acme/app.git\n");
     if (args[0] === "ls-remote") return repo.offline ? { ...ok(), code: 128, stderr: "could not read from remote" } : ok("ref: refs/heads/main\tHEAD\n");
-    if (at("--show-toplevel")) return fs.existsSync(args[1]!) ? ok(args[1]) : { ...ok(), code: 128 };
-    if (args[0] === "worktree" && args[1] === "add") {
-      const folder = at("--detach") ? args[3]! : at("-b") ? args[args.indexOf("-b") + 2]! : args[2]!;
-      if (folder === readDir) makeRead(readDir);
-      else fs.mkdirSync(folder, { recursive: true });
-      return ok();
-    }
+    if (args[0] === "clone") return (makeRead(args.at(-1)!), ok());
     if (args[0] === "rev-parse" && args[1] === "--verify" && args[2]?.startsWith("refs/remotes/")) return ok(repo.origin);
-    if (args[0] === "rev-parse" && at("-q")) return { ...ok(), code: 1 };
     if (at("rev-parse") && args.at(-1) === "HEAD") return ok(repo.head + "\n");
-    if (at("checkout")) return ((repo.head = args.at(-1)!), ok());
+    if (at("checkout")) return ((repo.head = args.at(-1)!.startsWith("refs/remotes/") ? repo.origin : args.at(-1)!), ok());
     if (at("status")) return ok(repo.dirty ? " M src/relay.ts\n" : "");
     if (at("reset")) return ((repo.dirty = false), ok());
     if (at("diff")) return ok(args.at(-1) === `${repo.head}..HEAD` ? "" : repo.changed.join("\n"));
@@ -130,6 +124,7 @@ function makeRead(readDir: string) {
   write("src/relay.ts", "export const relay = 1;\n");
   write("src/other.ts", "export const other = 1;\n");
   write("docs/adr/0004-x.md", "# What leaves a machine\n");
+  fs.mkdirSync(path.join(readDir, ".git"), { recursive: true });
 }
 
 const expertFile = (o: Record<string, unknown> = {}): ExpertFile => {
@@ -144,8 +139,8 @@ interface SetUp {
   file?: ExpertFile;
   rules?: Rule[];
   minuteMs?: number;
-  /** A state from before a restart: written with its trunks' transcripts and these indexes, for `repo` (the file's when not given). */
-  restored?: { generations: SavedGeneration[]; indexes?: Record<number, Record<string, string>>; repo?: string };
+  /** A state from before a restart: written with its trunks' transcripts (empty, or these entries) and these indexes, for `repo` (the file's when not given). */
+  restored?: { generations: SavedGeneration[]; indexes?: Record<number, Record<string, string>>; repo?: string; transcripts?: Record<string, object[]> };
   /** Origin is out of reach as it starts. */
   offline?: boolean;
 }
@@ -162,6 +157,7 @@ async function setUp(o: SetUp = {}) {
   fs.writeFileSync(bin, FAKE);
   fs.writeFileSync(claudeLog, "");
   const rules = (r: Rule[]) => fs.writeFileSync(rulesFile, JSON.stringify(r));
+  const transcript = (trunk: string) => path.join(projectsDir, "c--work-app", `${trunk}.jsonl`);
   rules(o.rules ?? BASE);
   let file = o.file ?? expertFile();
   if (o.restored) {
@@ -170,7 +166,7 @@ async function setUp(o: SetUp = {}) {
     fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify(state));
     for (const [n, files] of Object.entries(o.restored.indexes ?? {})) fs.writeFileSync(path.join(dir, `index-${n}.json`), JSON.stringify({ version: 1, files }));
     fs.mkdirSync(path.join(projectsDir, "c--work-app"), { recursive: true });
-    for (const g of o.restored.generations) fs.writeFileSync(path.join(projectsDir, "c--work-app", `${g.trunk}.jsonl`), "");
+    for (const g of o.restored.generations) fs.writeFileSync(transcript(g.trunk), (o.restored.transcripts?.[g.trunk] ?? []).map((e) => JSON.stringify(e) + "\n").join(""));
   }
   const g = fakeGit(readDir);
   g.repo.offline = o.offline ?? false;
@@ -202,7 +198,7 @@ async function setUp(o: SetUp = {}) {
   const state = () => JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8")) as SavedExpert;
   const update = (f: ExpertFile) => ((file = f), expert.update(f));
   await expert.start();
-  return { expert, ...g, sent, logs, trunks, claude, health, ask, reply, state, rules, update, dir, readDir, file: () => file };
+  return { expert, ...g, sent, logs, trunks, claude, health, ask, reply, state, rules, update, dir, readDir, transcript, file: () => file };
 }
 
 async function until(check: () => boolean, ms = 20000) {
@@ -421,9 +417,9 @@ test("a fork that left its checkout changed is refused, and the checkout reset",
   t.ask("x-1");
   expect(await t.reply("expert-x-1-1")).toEqual(forkFailed("expert-x-1-1", "the fork changed its checkout, which was reset"));
   await until(() => !t.repo.dirty);
-  expect(t.calls.filter((c) => c.args.includes("reset") || c.args.includes("clean")).map((c) => c.args)).toEqual([
-    ["-C", t.readDir, "reset", "--hard", "HEAD"],
-    ["-C", t.readDir, "clean", "-fd"],
+  expect(t.calls.filter((c) => c.args.includes("reset") || c.args.includes("clean"))).toEqual([
+    { cwd: t.readDir, args: ["reset", "-q", "--hard", "HEAD"] },
+    { cwd: t.readDir, args: ["clean", "-fd"] },
   ]);
 });
 
@@ -485,34 +481,30 @@ test("a fetch that moved origin during a grounding doesn't move the checkout unt
   expect(await t.reply("expert-x-2-1")).toMatchObject({ commit: C2 });
 });
 
-test("a change of repo removes the old worktrees, keeping the notes branch, then grounds afresh in the new repo", async () => {
+// What the runner may ask in a person's repo: it only ever reads there.
+const READS = ["remote get-url origin", "ls-remote --symref origin HEAD", "symbolic-ref --short refs/remotes/origin/HEAD"];
+
+test("a change of repo deletes the old clone, then clones the new repo's origin and grounds afresh, only reading in either repo", async () => {
   const t = await setUp({ restored: { generations: [gen(1, T1, "junior")] } });
   await until(() => t.calls.some((c) => c.args[0] === "fetch"));
   const old = t.file().repo;
   const repo = path.resolve("/work/app-2");
   t.update(expertFile({ repo }));
   await until(() => /ready generation=1/.test(t.health()));
-  const removal = t.calls.filter((c) => c.cwd === old && c.args[0] === "worktree").map((c) => c.args);
-  expect(removal.slice(-3)).toEqual([
-    ["worktree", "remove", "--force", t.readDir],
-    ["worktree", "remove", "--force", path.join(t.dir, "notes")],
-    ["worktree", "prune"],
-  ]);
-  expect(t.calls.some((c) => c.cwd === repo && c.args[0] === "ls-remote")).toBe(true);
+  expect(t.logs).toContainEqual(`expert adr: removed expert adr's clone of ${old}`);
+  expect(t.calls.filter((c) => c.args[0] === "clone")).toEqual([{ cwd: t.dir, args: expect.arrayContaining(["--reference-if-able", repo, "https://github.com/acme/app.git", path.join(t.dir, "read.new")]) }]);
+  for (const c of t.calls.filter((c) => c.cwd === old || c.cwd === repo)) expect(READS).toContain(c.args.join(" "));
   expect(t.state()).toMatchObject({ repo, generations: [{ n: 1, state: "junior" }] });
   expect(t.state().generations[0]!.trunk).not.toBe(T1);
 });
 
-test("a repo changed while the runner was off: the old worktrees are removed from the old repo", async () => {
+test("a repo changed while the runner was off: the old clone is deleted and the new one made", async () => {
   const old = path.resolve("/work/app");
   const repo = path.resolve("/work/app-2");
   const t = await setUp({ file: expertFile({ repo }), restored: { repo: old, generations: [gen(1, T1, "junior")] } });
   await until(() => /ready generation=1/.test(t.health()));
-  expect(t.calls.filter((c) => c.cwd === old && c.args[0] === "worktree").map((c) => c.args)).toEqual([
-    ["worktree", "remove", "--force", t.readDir],
-    ["worktree", "remove", "--force", path.join(t.dir, "notes")],
-    ["worktree", "prune"],
-  ]);
+  expect(t.logs).toContainEqual(`expert adr: removed expert adr's clone of ${old}`);
+  expect(t.calls.filter((c) => c.args[0] === "clone")).toHaveLength(1);
 });
 
 test("a question held while the expert starts gets its fork's whole time limit, counted from when the fork starts", async () => {
@@ -525,6 +517,8 @@ test("a question refused while the expert is still grounding isn't remembered: a
   const t = await setUp({ minuteMs: 3000, file: expertFile({ groundingTimeLimitMinutes: 1 }), rules: [{ kind: "fork", text: "Question proof-", reply: "<answer>Forty-two.</answer>", delayMs: 4000 }, ...BASE] });
   t.ask("x-1");
   expect(await t.reply("expert-x-1-1")).toEqual({ type: "refusal", v: PROTOCOL_VERSION, id: "expert-x-1-1", reason: "unavailable", detail: "the expert is still grounding its first junior" });
+  // Nothing remembered for it, so its request id isn't kept either.
+  await until(() => !t.expert.owns("expert-x-1-1"));
   await until(() => t.expert.hosted().state === "ready");
   t.ask("x-1", { id: "expert-x-1-2" });
   expect(await t.reply("expert-x-1-2")).toMatchObject({ type: "reply", kind: "answer-expert" });
@@ -581,21 +575,52 @@ test("a fork that used a disallowed tool fails its junior even when it also left
   expect(t.repo.dirty).toBe(false);
 }, 30000);
 
-test("pattern notes: a question's are scanned and committed to the notes branch, one matching a secret skipped; the proof's are never kept", async () => {
-  const patterns = '<pattern title="Questions wait on the server">Because the relay holds them.</pattern>\n<pattern title="The deploy key">It is SECRET.</pattern>';
-  const t = await setUp({ restored: { generations: [gen(1, T1, "junior")] }, rules: [{ kind: "fork", reply: `${ANSWER}\n${patterns}` }] });
+// A transcript's entries as Claude Code writes them: turns, and lines of other kinds between them.
+const turn = (type: "user" | "assistant", uuid: string) => ({ type, uuid, parentUuid: null, message: {} });
+const meta = { type: "last-prompt", lastPrompt: "x" };
+const addLines = (file: string, ...entries: object[]) => fs.appendFileSync(file, entries.map((e) => JSON.stringify(e) + "\n").join(""));
+
+test("a junior whose trunk was resumed by hand is retired, and its question waits for a new generation; lines that aren't turns don't count", async () => {
+  const t = await setUp({ restored: { generations: [gen(1, T1, "junior", { last: "u-2" })], transcripts: { [T1]: [turn("user", "u-1"), turn("assistant", "u-2")] } } });
+  addLines(t.transcript(T1), meta, { type: "attachment", uuid: "a-1" });
   t.ask("x-1");
   await t.reply("expert-x-1-1");
-  await until(() => t.expert.idle() && t.logs.some((l) => l.includes("pattern note from x-1")));
-  const notes = path.join(t.dir, "notes");
-  expect(t.calls.filter((c) => c.args.includes("commit")).map((c) => [c.args[1], c.args.at(-1)])).toEqual([[notes, "docs/patterns/questions-wait-on-the-server.md"]]);
-  expect(t.logs).toContainEqual('expert adr: skipped a pattern note from x-1: it matches the secret pattern "test secret"');
-  expect(t.calls.some((c) => c.args.some((a) => a.includes("the-deploy-key")))).toBe(false);
+  expect(starts(t, "fork").at(-1)!.trunk).toBe(T1);
 
-  const proof = await setUp({ rules: [{ kind: "fork", text: "Question proof-", reply: `<answer>Forty-two.</answer>\n${patterns}` }, ...BASE] });
-  await until(() => proof.expert.hosted().state === "ready" && proof.expert.idle());
-  expect(proof.calls.some((c) => c.args.includes("commit"))).toBe(false);
+  addLines(t.transcript(T1), turn("user", "u-3"), turn("assistant", "u-4"), meta);
+  t.ask("x-2");
+  expect(await t.reply("expert-x-2-1")).toMatchObject({ type: "reply", kind: "answer-expert" });
+  const second = t.state().generations.find((g) => g.n === 2)!;
+  expect(starts(t, "fork").at(-1)!.trunk).toBe(second.trunk);
+  expect(t.state().generations.map((g) => [g.n, g.state])).toEqual([
+    [1, "retired"],
+    [2, "junior"],
+  ]);
+  expect(t.health()).toMatch(/generation generation=1 state=retired why="its trunk was changed outside Isoplan"/);
 }, 30000);
+
+test("a senior whose trunk was resumed by hand is dropped, so the junior explores instead; on start a changed junior is retired at once", async () => {
+  const t = await setUp({ ...withSenior(JUNIOR_ASKS), restored: { generations: [gen(1, T1, "senior", { last: "u-1" }), gen(2, T2, "junior")], transcripts: { [T1]: [turn("assistant", "u-1")] } } });
+  addLines(t.transcript(T1), turn("user", "u-9"));
+  t.ask("x-1");
+  await t.reply("expert-x-1-1");
+  expect(starts(t, "fork").map((s) => s.trunk)).toEqual([T2]);
+  expect(turns(t, "fork", T2)[1]!.text).toContain("Your senior couldn't answer");
+  expect(t.state().generations.map((g) => [g.n, g.state])).toEqual([
+    [1, "retired"],
+    [2, "junior"],
+  ]);
+
+  const restarted = await setUp({ restored: { generations: [gen(1, T1, "junior", { last: "u-1" })], transcripts: { [T1]: [turn("assistant", "u-1"), turn("user", "u-9")] } } });
+  expect(restarted.expert.hosted().state).toBe("starting");
+  await until(() => /ready generation=2/.test(restarted.health()));
+}, 30000);
+
+test("the judge's verdict passes only with PASS as its first word and no FAIL in its first line", async () => {
+  const t = await setUp({ rules: [{ kind: "judge", reply: "Pass? No: FAIL, it says forty-three." }, ...BASE] });
+  await until(() => t.expert.hosted().state === "failed");
+  expect(t.health()).toMatch(/proof generation=1 result=fail/);
+});
 
 test("a checkout that couldn't be prepared is tried again for the next question, with no change to its file", async () => {
   const t = await setUp({ offline: true });

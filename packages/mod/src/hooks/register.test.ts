@@ -734,7 +734,7 @@ test("hooks: ask_expert is registered only once an office names experts the sess
   expect(spec.isDeferred).toBe(false);
   expect(spec.description).toContain("Ask one of this office's experts a question.");
   expect(spec.description).toContain("- reporting (isoplan-app, on Ada's machine): What leaves a machine.");
-  expect(spec.description).toContain("waits up to 10 seconds");
+  expect(spec.description).toContain("waits a short while (10 seconds unless this machine's Isoplan settings say otherwise)");
   expect(spec.inputSchema).toMatchObject({ required: ["expert", "question", "blocking"], properties: { expert: { enum: ["reporting"] }, blocking: { type: "boolean" } } });
 });
 
@@ -755,6 +755,20 @@ test("hooks: ask_expert checks the expert and its arguments itself, then runs th
   expect(await ask({ expert: "pairing", question: "Why?", blocking: false })).toEqual({ result: expect.stringContaining("(EXPERT_DROPPED)"), isError: true });
   h.$.process.run = async () => ({ exitCode: 1, stdout: "", stderr: "boom" });
   expect(await ask({ expert: "pairing", question: "Why?", blocking: false })).toEqual({ result: expect.stringContaining("(EXPERT_RUNNER_UNREACHABLE)"), isError: true });
+});
+
+test("hooks: an ask_expert script that runs until its timeout ends it may have asked already, so the agent is told not to ask again", async () => {
+  const h = await start([connected, expertRights(INTERNAL, "reporting")], { stays: true });
+  await vi.waitFor(() => expect(h.tools).toEqual(["ask_expert"]));
+  let now = 0;
+  h.$.clock.now = async () => now;
+  h.$.process.run = async () => {
+    now += 7 * 60 * 1000;
+    throw new Error("timed out");
+  };
+  expect(await hooks["tool.call"]!(h.$, { tool: EXPERT, tool_use_id: "k1", expert: "reporting", question: "How?", blocking: true }, vi.fn())).toEqual({
+    result: "Expert reporting, question k1: the ask didn't finish in time. It may have been asked all the same, and if so the answer arrives in this session as a note on one of your next tool results. Explore this yourself meanwhile, and don't ask it again as a new question.",
+  });
 });
 
 test("hooks: an expert named in two offices is asked only through the office whose expert the description shows", async () => {
@@ -833,6 +847,69 @@ test("hooks: two offices' rights a second apart are both in ask_expert's enum, a
   h.timers.shift()!();
   await vi.waitFor(() => expect(h.tools).toEqual(["ask_expert", "ask_expert"]));
   expect(enumOf(h)).toEqual(["billing", "pairing", "reporting"]);
+});
+
+test("hooks: a change of an expert's subject, host or repo registers ask_expert again with it", async () => {
+  const more = feed();
+  const h = await start([connected, expertRights(INTERNAL, "reporting")], { stays: true, feed: more });
+  await vi.waitFor(() => expect(h.tools).toEqual(["ask_expert"]));
+  more.push([{ type: "expert-rights", v: PROTOCOL_VERSION, experts: [expertRight("reporting", "What leaves a machine.")], server: INTERNAL } as DataLayerLine]);
+  await vi.waitFor(() => expect(h.tools).toHaveLength(2));
+  expect(h.specs[1]!.description).toContain("- reporting (isoplan-app, on Ada's machine): What leaves a machine.");
+  more.push([{ type: "expert-rights", v: PROTOCOL_VERSION, experts: [{ ...expertRight("reporting", "What leaves a machine."), host: "Grace", repo: "isoplan-site" }], server: INTERNAL } as DataLayerLine]);
+  await vi.waitFor(() => expect(h.tools).toHaveLength(3));
+  expect(h.specs[2]!.description).toContain("- reporting (isoplan-site, on Grace's machine): What leaves a machine.");
+  more.push([{ type: "expert-rights", v: PROTOCOL_VERSION, experts: [{ ...expertRight("reporting", "What leaves a machine."), host: "Grace", repo: "isoplan-site" }], server: INTERNAL } as DataLayerLine]);
+  await new Promise((r) => setTimeout(r, 10));
+  expect(h.tools).toHaveLength(3);
+});
+
+test("hooks: once no expert is left, ask_expert is registered again saying none can be asked now, and a call says so", async () => {
+  const more = feed();
+  const h = await start([connected, expertRights(INTERNAL, "reporting")], { stays: true, feed: more });
+  await vi.waitFor(() => expect(h.tools).toEqual(["ask_expert"]));
+  more.push([expertRights(INTERNAL)]);
+  await vi.waitFor(() => expect(h.tools).toHaveLength(2));
+  const spec = h.specs[1]!;
+  expect(spec.description).toBe("No expert can be asked from this session right now: no office lists one it may ask. Don't call this tool unless its description lists experts again.");
+  expect((spec.inputSchema as { properties: { expert: object } }).properties.expert).toEqual({ type: "string", description: "The expert's name, from the list above." });
+  expect(await hooks["tool.call"]!(h.$, { tool: EXPERT, tool_use_id: "k1", expert: "reporting", question: "How?", blocking: false }, vi.fn())).toEqual({
+    result: "Expert reporting, question k1: no expert can be asked from this session right now. Explore this yourself (EXPERT_UNKNOWN)",
+    isError: true,
+  });
+  more.push([expertRights(INTERNAL, "reporting")]);
+  await vi.waitFor(() => expect(h.tools).toHaveLength(3));
+  expect(enumOf(h)).toEqual(["reporting"]);
+});
+
+test("hooks: a registration of ask_expert that fails is tried again 5 s later, three times in a row at most", async () => {
+  const more = feed();
+  const h = await start([connected, expertRights(INTERNAL, "reporting")], { stays: true, heldTimers: true, feed: more });
+  const delays: number[] = [];
+  const after = h.$.clock.after;
+  h.$.clock.after = (ms, fn) => (delays.push(ms), after(ms, fn));
+  let fails = 2;
+  const register = h.$.tool.register;
+  h.$.tool.register = (tool) => (fails-- > 0 ? (h.tools.push("failed"), Promise.reject(new Error("not now"))) : register(tool));
+  // Runs each registration as it falls due, until none is.
+  const runDue = async () => {
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 10));
+      if (!h.timers.length) return;
+      h.timers.shift()!();
+    }
+  };
+  await vi.waitFor(() => expect(h.timers).toHaveLength(1));
+  await runDue();
+  expect(h.tools).toEqual(["failed", "failed", "ask_expert"]);
+  expect(delays).toEqual([2000, 5000, 5000]);
+
+  // One that keeps failing is tried four times in all, then left until the rights change.
+  fails = Infinity;
+  more.push([expertRights(INTERNAL, "reporting", "billing")]);
+  await runDue();
+  expect(h.tools).toEqual(["failed", "failed", "ask_expert", "failed", "failed", "failed", "failed"]);
+  expect(delays).toEqual([2000, 5000, 5000, 2000, 5000, 5000, 5000]);
 });
 
 test("hooks: after a new session id, the expert rights are cleared and ask_expert is registered again on that id's own rights", async () => {

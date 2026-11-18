@@ -15,7 +15,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { claudePaths } from "../data-layer/identity.js";
 import { openPipe, readPipeInfo, writeLine, type PipeAnswer, type PipeAskExpert, type Told } from "../pipe/pipe.js";
-import { expertText } from "./expert-text.js";
+import { expertText, mayBeAskedText } from "./expert-text.js";
 
 const flag = (argv: string[], name: string) => {
   const i = argv.indexOf(name);
@@ -36,9 +36,10 @@ export async function runAskExpert(argv: string[], stdin: string): Promise<{ tex
   const expert = flag(argv, "--expert");
   const key = flag(argv, "--key");
   if (!session || !cwd || !expert || !key) return { text: "usage: ask-expert.js --session <id> --cwd <folder> --expert <name> --key <id> [--blocking] [--server <address>]..., with the question on stdin", code: 2 };
-  // No pipe.json, a pipe that didn't answer or prove it is the runner, or a runner that stopped mid-ask.
+  // No pipe.json, or a pipe that didn't answer or prove it is the runner: nothing was sent.
   const unreachable = { text: expertText("EXPERT_RUNNER_UNREACHABLE", { expert, id: key }), code: 2 as const };
   let said: Told | null = null;
+  let sent = false;
   try {
     const { dir: claudeDir } = claudePaths(process.env, os.homedir());
     const info = await readPipeInfo(claudeDir);
@@ -52,13 +53,16 @@ export async function runAskExpert(argv: string[], stdin: string): Promise<{ tex
     await new Promise<void>((resolve) => {
       socket.on("close", () => resolve());
       writeLine(socket, request);
+      sent = true;
     });
   } catch (err) {
     return { text: expertText("EXPERT_RUNNER_UNREACHABLE", { expert, id: key, words: String((err as Error)?.message ?? err) }), code: 2 };
   }
   // Set in the pipe's callback, which TypeScript doesn't follow.
   const told = said as Told | null;
-  return told ? { text: told.text, code: told.failed ? 2 : 0 } : unreachable;
+  if (told) return { text: told.text, code: told.failed ? 2 : 0 };
+  // A runner that stopped mid-ask may have asked already.
+  return sent ? { text: mayBeAskedText({ expert, id: key, words: "Isoplan's runner stopped before it said how the question went" }), code: 0 } : unreachable;
 }
 
 // Run as dist/ask-expert.js, it asks and prints; imported (its tests), it does nothing. Node loads

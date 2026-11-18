@@ -7044,12 +7044,16 @@ const writeLine = (socket, value) => {
 //#endregion
 //#region src/ask/expert-text.ts
 const machineOf = (host) => host ? `${host}'s machine` : "the host's machine";
+const said = (words) => words.replace(/\.\s*$/, "");
 /** The text for a situation that has a code, as the design's replies table gives it. */
 function expertText(code, a) {
 	return `${`Expert ${a.expert}, question ${a.id}: `}${(() => {
 		switch (code) {
-			case "EXPERT_RUNNER_UNREACHABLE": return `Isoplan's runner can't be reached on this machine${a.words ? `: ${a.words.replace(/\.\s*$/, "")}` : ""}, so nothing was sent. Explore this yourself`;
-			case "EXPERT_UNKNOWN": return a.words ?? `no expert named ${a.expert}; ask one of: ${(a.names ?? []).join(", ") || "none"}`;
+			case "EXPERT_RUNNER_UNREACHABLE": return `Isoplan's runner can't be reached on this machine${a.words ? `: ${said(a.words)}` : ""}, so nothing was sent. Explore this yourself`;
+			case "EXPERT_REFUSED": return `the office server refused the question${a.words ? `: ${said(a.words)}` : ""}, so it wasn't asked. Explore this yourself`;
+			case "EXPERT_UNKNOWN":
+				if (a.words) return a.words;
+				return a.names?.length ? `no expert named ${a.expert}; ask one of: ${a.names.join(", ")}` : "no expert can be asked from this session right now. Explore this yourself";
 			case "EXPERT_CAP": return a.words ?? "a cap on asking this expert has been reached";
 			case "EXPERT_QUESTION_HELD": return `the question looks like it holds a secret (it matches the secret pattern ${a.pattern ?? "unknown"}), so it wasn't sent. Ask again without it`;
 			case "EXPERT_PLUGIN_OLD": return a.words ?? "the Isoplan plugin on this machine or on the host's is from before experts; updating the Isoplan plugin there fixes it";
@@ -7063,6 +7067,11 @@ function expertText(code, a) {
 		}
 	})()} (${code})`;
 }
+/**
+* A question that may have gone before the ask failed, `words` saying how: it may have been asked
+* all the same. Asked again, it would be a new question, and the answer to this one still comes.
+*/
+const mayBeAskedText = (a) => `Expert ${a.expert}, question ${a.id}: ${said(a.words)}. It may have been asked all the same, and if so the answer arrives in this session as a note on one of your next tool results. Explore this yourself meanwhile, and don't ask it again as a new question.`;
 //#endregion
 //#region src/ask/expert-main.ts
 const flag = (argv, name) => {
@@ -7093,6 +7102,7 @@ async function runAskExpert(argv, stdin) {
 		code: 2
 	};
 	let said = null;
+	let sent = false;
 	try {
 		const { dir: claudeDir } = claudePaths(process.env, os.homedir());
 		const info = await readPipeInfo(claudeDir);
@@ -7120,6 +7130,7 @@ async function runAskExpert(argv, stdin) {
 		await new Promise((resolve) => {
 			socket.on("close", () => resolve());
 			writeLine(socket, request);
+			sent = true;
 		});
 	} catch (err) {
 		return {
@@ -7132,9 +7143,17 @@ async function runAskExpert(argv, stdin) {
 		};
 	}
 	const told = said;
-	return told ? {
+	if (told) return {
 		text: told.text,
 		code: told.failed ? 2 : 0
+	};
+	return sent ? {
+		text: mayBeAskedText({
+			expert,
+			id: key,
+			words: "Isoplan's runner stopped before it said how the question went"
+		}),
+		code: 0
 	} : unreachable;
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(path.resolve(process.argv[1]))).href) {

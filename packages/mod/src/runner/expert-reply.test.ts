@@ -21,15 +21,12 @@ docs/adr/0004-what-leaves-a-machine.md
 </cited>
 <learned>
 Rule or fact: hello waits for the list. Why: ADR 0004. Files: report-session.ts
-</learned>
-<pattern title="A repo the office doesn't take sends nothing">Because the server must never learn it exists.</pattern>
-<pattern title="">no title</pattern>`);
+</learned>`);
   expect(reply).toEqual({
     answer: "Nothing leaves.",
     cited: ["docs/adr/0004-what-leaves-a-machine.md", "packages/server/src/asks.ts:166-173", "packages/mod/src/lines.ts"],
     dropped: ["/etc/passwd", "C:/Users/x/secret.ts", "../other/repo.ts"],
     learned: "Rule or fact: hello waits for the list. Why: ADR 0004. Files: report-session.ts",
-    patterns: [{ title: "A repo the office doesn't take sends nothing", body: "Because the server must never learn it exists." }],
     askSenior: null,
   });
   expect(parseReply("<learned>" + "x".repeat(5000) + "</learned>").learned).toHaveLength(3000);
