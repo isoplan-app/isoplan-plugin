@@ -171,11 +171,16 @@ async function isHeld(file, now = Date.now(), isAlive = alive, rule = {}) {
 * written into the lock beside the pid.
 *
 * A new lock is created exclusively, so of two takers at once only one gets it. A stale one is
-* moved aside by rename, which only one taker can do to the same file, and the taker checks that
-* what it moved is the lock it judged stale, by its text and its write time, so a lock its holder
-* refreshed meanwhile isn't taken: one that moved another's lock instead puts it back and loses.
-* With `force` a lock that can't be moved (on Windows a scanner may have it open) is tried again
-* after a short wait, then overwritten, so the plugin's data layer always gets it.
+* taken over one taker at a time: only the taker that creates `<lock>.take` (exclusively too) may
+* remove it, after reading it again to check it is still the lock it judged stale, by its text and
+* its write time, so a lock its holder refreshed meanwhile, or another taker's new one, is never
+* removed. A taker that finds `.take` there loses; one older than TAKE_STALE_MS was left by a taker
+* that crashed holding it, and is cleared.
+*
+* With `force` a stale or held lock is moved aside by rename, and the taker checks that what it
+* moved is the lock it read: one that moved another's lock instead puts it back and looks again. A
+* lock that can't be moved (on Windows a scanner may have it open) is tried again after a short
+* wait, then overwritten, so the plugin's data layer always gets it.
 */
 async function takeLock(file, pid, isAlive = alive, force = false, now = Date.now(), { freshMs, extra = {} } = {}) {
 	await fs.mkdir(path.dirname(file), { recursive: true });
@@ -198,16 +203,15 @@ async function takeLock(file, pid, isAlive = alive, force = false, now = Date.no
 			isAlive,
 			freshMs
 		})) return false;
+		if (!force) {
+			if (!await removeStale(file, seen)) return false;
+			continue;
+		}
 		const aside = `${file}.${pid}-${Math.random().toString(36).slice(2)}`;
 		try {
 			await fs.rename(file, aside);
 		} catch (err) {
-			if ([
-				"ENOENT",
-				"EPERM",
-				"EBUSY",
-				"EACCES"
-			].includes(err.code ?? "")) continue;
+			if (["ENOENT", ...BUSY].includes(err.code ?? "")) continue;
 			throw err;
 		}
 		const moved = await fs.readFile(aside, "utf8").catch(() => null);
@@ -215,13 +219,43 @@ async function takeLock(file, pid, isAlive = alive, force = false, now = Date.no
 		if (moved !== seen.text || movedAt !== seen.mtimeMs) {
 			await fs.link(aside, file).catch(() => {});
 			await fs.rm(aside, { force: true });
-			if (!force) return false;
 			continue;
 		}
 		await fs.rm(aside, { force: true });
 	}
 	if (!force) return false;
 	await fs.writeFile(file, body);
+	return true;
+}
+const TAKE_STALE_MS = 5e3;
+const BUSY = [
+	"EPERM",
+	"EBUSY",
+	"EACCES"
+];
+/**
+* Removes the stale lock `seen` while holding `<lock>.take`, if it is still that one; false when
+* another taker holds `.take`. Either way the caller looks again.
+*/
+async function removeStale(file, seen) {
+	const take = `${file}.take`;
+	try {
+		await fs.writeFile(take, String(process.pid), { flag: "wx" });
+	} catch (err) {
+		if (err.code !== "EEXIST") throw err;
+		const st = await fs.stat(take).catch(() => null);
+		if (st && Date.now() - st.mtimeMs < TAKE_STALE_MS) return false;
+		await fs.rm(take, { force: true });
+		return true;
+	}
+	try {
+		const now = await readText(file);
+		if (now?.text === seen.text && now.mtimeMs === seen.mtimeMs) await fs.rm(file, { force: true });
+	} catch (err) {
+		if (!BUSY.includes(err.code ?? "")) throw err;
+	} finally {
+		await fs.rm(take, { force: true });
+	}
 	return true;
 }
 /** Removes the lock if it still names `pid`. */

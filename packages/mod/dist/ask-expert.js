@@ -5988,6 +5988,10 @@ const HelloMessageSchema = object({
 * runner from before 0.10.0 drops the field it doesn't know and would run the session from the floor.
 * `experts` (protocol 0.13.0): this runner hosts experts. It answers `hosting` with `experts`, and
 * takes `answer-expert` requests; the server sends neither to a runner that didn't say it.
+* `hiddenStarts` (protocol 0.14.0, isoplan-app#315): this runner can start a session from the floor
+* hidden (a start's `hidden`), in a clone Isoplan keeps for itself. The server sends `hidden` only to
+* a runner that says it: a runner from before 0.14.0 drops the field it doesn't know and would start
+* the session in the person's own checkout.
 */
 const RunnerHelloMessageSchema = object({
 	type: literal("runner"),
@@ -6000,7 +6004,8 @@ const RunnerHelloMessageSchema = object({
 	drive: boolean().optional(),
 	claude: ClaudeCliSchema.optional(),
 	starts: array(StartModeSchema).max(4).optional(),
-	experts: literal(true).optional()
+	experts: literal(true).optional(),
+	hiddenStarts: literal(true).optional()
 });
 /** All of the session's facts. Sent on connect and on repair. */
 const FullMessageSchema = object({
@@ -6057,7 +6062,6 @@ const ExpertCodeSchema = _enum([
 	"EXPERT_QUEUED",
 	"EXPERT_STARTING",
 	"EXPERT_FORK_FAILED",
-	"EXPERT_ANSWER_WITHHELD",
 	"EXPERT_DROPPED"
 ]);
 /** `starting`: no generation of it has passed its proof question yet; `ready`: its junior answers; `failed`: its last grounding failed and none answers. */
@@ -6072,12 +6076,17 @@ const ExpertCapSchema = _enum([
 	"asker-open",
 	"expert-tokens"
 ]);
-/** One expert a runner hosts, as it lists it to an office server whose list takes its repo. */
+/**
+* One expert a runner hosts, as it lists it to an office server whose list takes its repo. `senior`
+* (protocol 0.14.0): it has a senior generation, which its junior can ask (see `expert-senior`);
+* absent from an older runner. An older server ignores it.
+*/
 const ExpertListingSchema = object({
 	name: ExpertNameSchema,
 	project: ProjectSchema,
 	subject: Subject,
-	state: ExpertStateSchema
+	state: ExpertStateSchema,
+	senior: boolean().optional()
 });
 /** One expert a session may ask: `repo` is its project's short name, `host` the hosting person's name. */
 const ExpertRightSchema = object({
@@ -6298,6 +6307,18 @@ const ExpertsMessageSchema = object({
 		});
 		seen.add(expert.name);
 	});
+});
+/**
+* The junior answering the `answer-expert` request `id` has asked its senior (protocol 0.14.0), so
+* the floor can show the senior joining the question's meeting. It carries no text: nothing of the
+* question or of what the junior asked. Sent once per request, when the junior first asks, only to a
+* server whose `hosting` says `expertSenior`, and only while the link is up (never through the reply
+* outbox): a server from before 0.14.0, which doesn't say it, is never sent one.
+*/
+const ExpertSeniorMessageSchema = object({
+	type: literal("expert-senior"),
+	v: Version,
+	id: RequestId
 });
 /**
 * A session asks an expert a question (protocol 0.13.0), on its own short link with the session's
@@ -6545,7 +6566,8 @@ discriminatedUnion("type", [
 		})
 	]),
 	ExpertsMessageSchema,
-	AskExpertMessageSchema
+	AskExpertMessageSchema,
+	ExpertSeniorMessageSchema
 ]);
 /** Asks the data layer to send its facts in full. */
 const RepairMessageSchema = object({
@@ -6783,11 +6805,14 @@ const ExpertRightsMessageSchema = object({
 * after each `experts` message, and whenever the offices change. The runner sends no `experts` on a
 * connection before that connection's first `hosting`, so a server from before experts, which sends
 * none, is never sent one.
+* `expertSenior` (protocol 0.14.0): this server reads `expert-senior`, so the runner may send it. A
+* server that reads it says it on every `hosting`; the runner goes by the connection's last one.
 */
 const HostingMessageSchema = object({
 	type: literal("hosting"),
 	v: Version,
-	listed: array(ExpertNameSchema).max(20)
+	listed: array(ExpertNameSchema).max(20),
+	expertSenior: literal(true).optional()
 });
 const drive = {
 	type: literal("drive"),
@@ -6825,8 +6850,14 @@ discriminatedUnion("type", [
 				"orca",
 				"desktop",
 				"driven"
-			]).optional()
+			]).optional(),
+			hidden: boolean().optional()
 		}).superRefine((message, context) => {
+			if (message.hidden && message.mode === "orca") context.addIssue({
+				code: "custom",
+				path: ["hidden"],
+				message: "a hidden start doesn't open in Orca, which would list its folder"
+			});
 			if (message.mode !== void 0 && message.mode !== "driven") {
 				if (message.folder === void 0) context.addIssue({
 					code: "custom",
@@ -6849,6 +6880,11 @@ discriminatedUnion("type", [
 					code: "custom",
 					path: ["branch"],
 					message: "a start names a branch only with a folder"
+				});
+				if (message.hidden) context.addIssue({
+					code: "custom",
+					path: ["hidden"],
+					message: "a start is hidden only with a folder"
 				});
 				return;
 			}
@@ -7062,7 +7098,6 @@ function expertText(code, a) {
 				return `queued: ${machineOf(a.host)} isn't connected. The answer arrives in this session when it reconnects, or a note says it was dropped and why. Carry on`;
 			case "EXPERT_STARTING": return "the expert is starting a new generation, and answers once the new junior's grounding is done, which takes longer. Carry on: the answer arrives as a note";
 			case "EXPERT_FORK_FAILED": return `the expert couldn't answer: ${a.words ?? "its fork failed"}. Ask a fresh Explore subagent instead`;
-			case "EXPERT_ANSWER_WITHHELD": return `the answer is held on ${machineOf(a.host)} until its owner releases it. Explore this yourself meanwhile; a later note follows if it is released`;
 			case "EXPERT_DROPPED": return `dropped: ${a.words ?? "it waited too long"}, so no answer will come. Explore it yourself, and ask again if it still matters`;
 		}
 	})()} (${code})`;
