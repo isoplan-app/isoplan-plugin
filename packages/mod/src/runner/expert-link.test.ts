@@ -1,11 +1,11 @@
-import { PROTOCOL_VERSION, type ExpertsMessage, type HostingMessage } from "@isoplan/protocol";
+import { PROTOCOL_VERSION, type ExpertSeniorMessage, type ExpertsMessage, type HostingMessage } from "@isoplan/protocol";
 import { expect, test } from "vitest";
 import { hostExperts } from "./expert-link.js";
 import type { HostedExpert } from "./experts.js";
 import { UNREADABLE } from "./scan.js";
 
-const hosting = (listed: string[] = []): HostingMessage => ({ type: "hosting", v: PROTOCOL_VERSION, listed });
-const expert = (name: string, state: HostedExpert["state"] = "ready"): HostedExpert => ({ name, repo: `/work/${name}`, subject: `The ${name} rules.`, state });
+const hosting = (listed: string[] = [], o: Partial<HostingMessage> = {}): HostingMessage => ({ type: "hosting", v: PROTOCOL_VERSION, listed, ...o });
+const expert = (name: string, state: HostedExpert["state"] = "ready"): HostedExpert => ({ name, repo: `/work/${name}`, subject: `The ${name} rules.`, state, senior: false });
 
 // A link that is up, a list that takes every repo, and experts whose hosted() is set by hand.
 function setUp(o: { repos?: ReadonlySet<string> | null; send?: () => boolean; scan?: () => Promise<string | null>; home?: () => Promise<void> } = {}) {
@@ -14,6 +14,7 @@ function setUp(o: { repos?: ReadonlySet<string> | null; send?: () => boolean; sc
   const refreshed: (boolean | undefined)[] = [];
   const listed: string[][] = [];
   const sent: ExpertsMessage[] = [];
+  const seniors: ExpertSeniorMessage[] = [];
   const logs: string[] = [];
   let repos = o.repos === undefined ? new Set(["github.com/acme/app"]) : o.repos;
   const host = hostExperts({
@@ -23,6 +24,7 @@ function setUp(o: { repos?: ReadonlySet<string> | null; send?: () => boolean; sc
     scan: async () => (o.scan ? o.scan() : null),
     log: (t) => void logs.push(t),
     send: (m) => (sent.push(m), o.send ? o.send() : true),
+    sendSenior: (m) => (seniors.push(m), true),
     server: "wss://office.example",
     checkMs: 3600000,
   });
@@ -30,6 +32,7 @@ function setUp(o: { repos?: ReadonlySet<string> | null; send?: () => boolean; sc
   return {
     host,
     sent,
+    seniors,
     logs,
     refreshed,
     listed,
@@ -148,5 +151,21 @@ test("a reconnect sends the listing again after its first hosting; one the link 
   t.change();
   await settle();
   expect(t.sent.map(names)).toEqual([["adr:ready"], ["adr:ready"], ["adr:failed"], ["adr:failed"]]);
+  t.host.stop();
+});
+
+test("a junior asking its senior is told only after a hosting that says expertSenior, and not after a reconnect until the next one says it", async () => {
+  const t = setUp();
+  t.host.senior("expert-x-1-1"); // before any hosting
+  t.host.onHosting(hosting());
+  t.host.senior("expert-x-1-2"); // a hosting that doesn't say it
+  t.host.onHosting(hosting([], { expertSenior: true }));
+  t.host.senior("expert-x-1-3");
+  t.host.onClose();
+  t.host.onOpen();
+  t.host.senior("expert-x-1-4"); // a new connection, no hosting yet
+  t.host.onHosting(hosting());
+  t.host.senior("expert-x-1-5");
+  expect(t.seniors).toEqual([{ type: "expert-senior", v: PROTOCOL_VERSION, id: "expert-x-1-3" }]);
   t.host.stop();
 });

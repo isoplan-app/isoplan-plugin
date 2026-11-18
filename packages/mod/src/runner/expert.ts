@@ -16,7 +16,8 @@
 //   checkout when no grounding holds it, then runs on a fork of the junior's trunk, at most maxForks
 //   at once, under the checkout's shared hold. The junior may ask its senior with an <ask-senior>
 //   reply: the runner runs a fork of the senior and gives its answer back as the junior's next turn,
-//   at most twice a question. Forks of a senior, and trunk turns, are never given a senior.
+//   at most twice a question, and the first time the request's `senior` is told (the floor shows
+//   the senior joining). Forks of a senior, and trunk turns, are never given a senior.
 // - The answer's citations are stamped by the runner, not the expert: read in this fork, at its
 //   commit; else the senior's stamp; else the junior's file → commit index; else unknown. A cited
 //   file that isn't in the checkout is dropped. The answer is scanned for secrets before it goes:
@@ -68,6 +69,8 @@ export interface HostedExpert {
   repo: string;
   subject: string;
   state: ExpertState;
+  /** It has a senior generation its junior can ask. */
+  senior: boolean;
 }
 
 export interface ExpertOptions {
@@ -104,7 +107,8 @@ export interface Expert {
   /** Its expert file changed. */
   update(file: ExpertFile): void;
   owns(request: string): boolean;
-  answer(request: AnswerExpertRequest, send: (m: Outgoing) => void): void;
+  /** `senior` is told the request's id when its junior first asks its senior for it. */
+  answer(request: AnswerExpertRequest, send: (m: Outgoing) => void, senior?: (id: string) => void): void;
   release(request: string, send: (m: Outgoing) => void): void;
   drop(request: string): void;
   /** No grounding, fork, append or judge running. */
@@ -195,6 +199,8 @@ interface Question {
   /** Its request ids the server hasn't dropped. */
   requests: Set<string>;
   send: (m: Outgoing) => void;
+  /** Told the newest request's id when its junior first asks its senior, as `send` gets its reply. */
+  senior: ((id: string) => void) | undefined;
   /** Released while it was still being answered. */
 }
 
@@ -255,7 +261,7 @@ export function createExpert(o: ExpertOptions): Expert {
 
   const gen = (state: SavedGeneration["state"]) => saved.generations.find((g) => g.state === state) ?? null;
   const state = (): ExpertState => (gen("junior") ? "ready" : !groundingRun && lastFailed ? "failed" : "starting");
-  const hosted = (): HostedExpert => ({ name, repo: file.repo, subject: file.subject, state: state() });
+  const hosted = (): HostedExpert => ({ name, repo: file.repo, subject: file.subject, state: state(), senior: !!gen("junior") && !!gen("senior") });
 
   // Wakes every question waiting for a junior, and tells the runner when the listing changed.
   function changed() {
@@ -599,7 +605,7 @@ export function createExpert(o: ExpertOptions): Expert {
   }
 
   /** One question on a fork of `junior`, asking `senior` when its reply asks: the junior's final reply. */
-  async function askFork(a: { junior: SavedGeneration; senior: SavedGeneration | null; question: string; id: string; deadline: number; commit: string; kids: Set<ChildProcessWithoutNullStreams> }): Promise<Asked> {
+  async function askFork(a: { junior: SavedGeneration; senior: SavedGeneration | null; question: string; id: string; deadline: number; commit: string; kids: Set<ChildProcessWithoutNullStreams>; onSenior?: () => void }): Promise<Asked> {
     const p = await loadExpertPrompts(o.appDir);
     const changedFiles = await checkout.changed(await indexOf(a.junior.n));
     const first = fill(p.question, { id: a.id, role: a.senior ? p.roleJunior : p.roleFirst, freshness: freshnessText(changedFiles), question: a.question });
@@ -614,6 +620,7 @@ export function createExpert(o: ExpertOptions): Expert {
       if (!a.senior) return asks === 1 ? NO_SENIOR : null;
       if (asks === 3) return ANSWER_NOW;
       if (asks > 3) return null;
+      if (!askedSenior) a.onSenior?.();
       askedSenior = true;
       const said = await askSenior(a.senior, asked, a.deadline, a.commit, a.kids, p);
       usage = add(usage, said.usage);
@@ -798,7 +805,7 @@ export function createExpert(o: ExpertOptions): Expert {
             const senior = gen("senior");
             const commit = await checkout.head();
             const kids = new Set<ChildProcessWithoutNullStreams>();
-            const asked = await askFork({ junior, senior, question: q.text, id: q.id, deadline, commit, kids });
+            const asked = await askFork({ junior, senior, question: q.text, id: q.id, deadline, commit, kids, onSenior: () => q.senior?.(q.latest) });
             for (const kid of kids) killTree(kid);
             freeSlot();
             line.cost = Math.round(weighted(asked.usage, s));
@@ -1065,12 +1072,14 @@ export function createExpert(o: ExpertOptions): Expert {
       else checkPromotion();
     },
     owns: (request) => byRequest.has(request),
-    answer(request, send) {
+    answer(request, send, senior) {
       const known = byRequest.get(request.id);
       if (known !== undefined) {
         const running = questions.get(known);
-        if (running) running.send = send;
-        else if (finished.has(known)) send(checked({ ...finished.get(known)!, id: request.id }));
+        if (running) {
+          running.send = send;
+          running.senior = senior;
+        } else if (finished.has(known)) send(checked({ ...finished.get(known)!, id: request.id }));
         return;
       }
       const qid = request.questionId;
@@ -1080,6 +1089,7 @@ export function createExpert(o: ExpertOptions): Expert {
         running.requests.add(request.id);
         running.latest = request.id;
         running.send = send;
+        running.senior = senior;
         return;
       }
       const sent = finished.get(qid);
@@ -1087,7 +1097,7 @@ export function createExpert(o: ExpertOptions): Expert {
         send(checked({ ...sent, id: request.id }));
         return;
       }
-      const q: Question = { id: qid, asker: request.asker, blocking: request.blocking, text: request.question, latest: request.id, requests: new Set([request.id]), send };
+      const q: Question = { id: qid, asker: request.asker, blocking: request.blocking, text: request.question, latest: request.id, requests: new Set([request.id]), send, senior };
       questions.set(qid, q);
       void handle(q)
         .catch((err: unknown) => {

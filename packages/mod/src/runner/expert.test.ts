@@ -195,8 +195,8 @@ async function setUp(o: SetUp = {}) {
   });
   const claude = () => fs.readFileSync(claudeLog, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as { kind: string; trunk: string | null; argv?: string[]; background?: string; memory?: string; turn?: number; text?: string });
   const health = () => (fs.existsSync(healthFile) ? fs.readFileSync(healthFile, "utf8") : "");
-  const ask = (qid: string, o: Partial<AnswerExpertRequest> = {}) =>
-    expert.answer({ type: "request", v: PROTOCOL_VERSION, id: `expert-${qid}-1`, kind: "answer-expert", expert: "adr", questionId: qid, question: `Where is it held? (${qid})`, blocking: true, from: { id: "claude:sam", name: "Sam" }, asker: "s-1", ...o }, (m) => void sent.push(m));
+  const ask = (qid: string, o: Partial<AnswerExpertRequest> = {}, senior?: (id: string) => void) =>
+    expert.answer({ type: "request", v: PROTOCOL_VERSION, id: `expert-${qid}-1`, kind: "answer-expert", expert: "adr", questionId: qid, question: `Where is it held? (${qid})`, blocking: true, from: { id: "claude:sam", name: "Sam" }, asker: "s-1", ...o }, (m) => void sent.push(m), senior);
   const reply = async (id: string) => (await until(() => sent.some((m) => m.id === id)), sent.find((m) => m.id === id)!);
   const state = () => JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8")) as SavedExpert;
   const update = (f: ExpertFile) => ((file = f), expert.update(f));
@@ -219,7 +219,7 @@ const forkFailed = (id: string, detail: string) => ({ type: "refusal", v: PROTOC
 
 test("grounding: two trunk turns, recorded before the spawn, then the proof passes and it is ready, all in the health log", async () => {
   const t = await setUp();
-  expect(t.expert.hosted()).toEqual({ name: "adr", repo: t.file().repo, subject: "What may leave a machine.", state: "starting" });
+  expect(t.expert.hosted()).toEqual({ name: "adr", repo: t.file().repo, subject: "What may leave a machine.", state: "starting", senior: false });
   await until(() => t.expert.hosted().state === "ready");
   const [trunk] = starts(t, "trunk");
   expect(trunk!.trunk).toBe(t.trunks[0]);
@@ -302,6 +302,15 @@ test("the junior asks its senior: a fork of the senior's trunk, whose answer is 
   expect(turns(t, "append", T2)[0]!.text).toContain("Rule or fact: questions wait on the server.");
   expect(t.health()).toMatch(/question id=x-1 .* senior=yes explored=no note=appended/);
   expect(t.state().generations.find((g) => g.n === 2)).toMatchObject({ notes: 1, meter: 60000 });
+});
+
+test("a junior that asks its senior twice for a request tells of it once, under the request's id", async () => {
+  const t = await setUp(withSenior([{ kind: "fork", text: "You have asked your senior twice", reply: ANSWER }, { kind: "fork", text: "You are this expert's senior", reply: "<answer>In the relay.</answer>" }, { kind: "fork", text: "Your senior answered", reply: "<ask-senior>And after that?</ask-senior>" }, ...JUNIOR_ASKS]));
+  const told: string[] = [];
+  t.ask("x-1", {}, (id) => void told.push(id));
+  expect(await t.reply("expert-x-1-1")).toMatchObject({ type: "reply" });
+  expect(starts(t, "fork").filter((s) => s.trunk === T1)).toHaveLength(2);
+  expect(told).toEqual(["expert-x-1-1"]);
 });
 
 test("the senior's answer to the junior marks the files it cited that changed since", async () => {
@@ -394,6 +403,13 @@ test("promotion deletes the retired generation's transcript, the folder beside i
     [2, "senior"],
     [3, "junior"],
   ]);
+});
+
+test("the expert says it has a senior once a promotion makes one, and not before", async () => {
+  const t = await setUp({ file: expertFile({ promoteAtTokens: 150000 }), restored: { generations: [gen(1, T1, "junior", { meter: 160000, notes: 1 })] } });
+  expect(t.expert.hosted()).toMatchObject({ state: "ready", senior: false });
+  await until(() => /ready generation=2/.test(t.health()));
+  expect(t.expert.hosted()).toMatchObject({ state: "ready", senior: true });
 });
 
 test("the proof of generation 2 asks generation 1 as its senior", async () => {
