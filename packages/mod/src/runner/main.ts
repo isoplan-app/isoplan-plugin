@@ -17,7 +17,7 @@
 // (lifecycle.ts). After MAX_FAST_FAILURES quick crashes in a row it gives up and lets the lock go.
 // The worker holds one link to each office server in config.json (#105), opened with a runner hello
 // carrying the machine's pairing token with that server when it signs people in, under the machine's
-// Claude account (src/data-layer/pairing.ts; a link to approve goes to the log, and to the status
+// Claude account or, after a change of login, the one it was paired under (src/data-layer/pairing.ts; a link to approve goes to the log, and to the status
 // line of each session waiting for it, through its hooks module, pair-links.ts), and stays up while any session on the machine is inside its
 // lights-off window. Each office's link answers for that office alone: only for sessions in a repo
 // it takes, from the same list the data layers read (src/data-layer/approved.ts). The forks, their

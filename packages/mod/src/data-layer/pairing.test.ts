@@ -244,20 +244,52 @@ test("the runner renews a token kept without an email once, for the email, and i
   expect(told).toEqual(["ada@example.com", undefined, undefined]);
 });
 
-test("each Claude account has its own entry; another server's counts as none and leaves the others alone", async () => {
+test("the machine has one pairing per office whichever Claude account looks it up; another server's counts as none and leaves it alone", async () => {
   const { pairing, make, file, approve } = setUp();
   await pairing.refused("not-paired", undefined);
   await pairing.token();
   await approve();
   await pairing.token();
   const bo = make({ id: "claude:b0", name: "Bo" });
-  expect(await bo.token()).toBeUndefined();
+  expect(await bo.token()).toBe(token(1));
   expect(await make(ADA, "wss://elsewhere.example/data-layer").token()).toBeUndefined();
-  await bo.refused("not-paired", undefined);
-  await bo.token();
   const kept = (await readPairing(file)).accounts;
-  expect(Object.keys(kept).sort()).toEqual(["claude:4f9c", "claude:b0"]);
+  expect(Object.keys(kept)).toEqual([ADA.id]);
   expect(kept[ADA.id]?.credential).toBe(CREDENTIAL);
+});
+
+test("after a change of Claude login the old login's entry is used and renewed under its own key, and only once it has ended does the machine pair again under the new login", async () => {
+  const { file, make, approve, calls } = setUp();
+  await writePairing(file, { accounts: { [ADA.id]: { server: SERVER, credential: CREDENTIAL, token: token(7), tokenExpires: clock - 1 } } });
+  const bo = make({ id: "claude:b0", name: "Bo" });
+  expect(await bo.token()).toBe(token(1));
+  const renewed = await readPairing(file);
+  expect(renewed.accounts).toEqual({ [ADA.id]: { server: SERVER, credential: CREDENTIAL, token: token(1), tokenExpires: clock + 60 * 60000 } });
+  expect(renewed.offices).toBeUndefined();
+  expect(calls).toEqual(["/token"]);
+
+  await bo.refused("pairing-ended", token(1));
+  expect(await bo.token()).toBeNull();
+  await approve();
+  expect(await bo.token()).toBe(token(2));
+  const after = await readPairing(file);
+  expect(after.accounts[ADA.id]).toEqual({ server: SERVER });
+  expect(after.accounts["claude:b0"]?.credential).toBe(CREDENTIAL);
+});
+
+test("with entries from several other Claude logins for one office, the one renewed most recently is used", async () => {
+  const { file, make } = setUp();
+  const DEV = "ws://127.0.0.1:4747/data-layer";
+  await writePairing(file, {
+    accounts: {},
+    offices: {
+      [DEV]: {
+        "claude:old": { server: DEV, credential: "old" + "-cred", token: token(8), tokenExpires: clock + 10 * 60000 },
+        "claude:new": { server: DEV, credential: CREDENTIAL, token: token(9), tokenExpires: clock + 50 * 60000 },
+      },
+    },
+  });
+  expect(await make({ id: "claude:b0", name: "Bo" }, DEV).token()).toBe(token(9));
 });
 
 test("a write that can't be renamed into place leaves no temp file behind", async () => {

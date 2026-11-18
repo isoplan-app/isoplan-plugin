@@ -7376,23 +7376,47 @@ const WRITE_TRIES = 4;
 const pairingPath = (claudeDir) => path.join(claudeDir, "isoplan", "pairing.json");
 /** The office's pairing lock; for the server a version before #105 reports to, the one it uses, so the two never answer one pairing at once. */
 const pairingLockPath = (claudeDir, office) => office.legacy ? path.join(claudeDir, "isoplan", "pairing.lock") : path.join(officeDir(claudeDir, office.server), "pairing.lock");
-/** The account's entry for `server`, or undefined: the one under `offices`, else the one under `accounts` when it is that server's. */
-function pairingEntry(all, server, account) {
-	const first = all.accounts[account];
-	return all.offices?.[server]?.[account] ?? (first?.server === server ? first : void 0);
+/** The entry kept under `key` for `server`, or undefined: the one under `offices`, else the one under `accounts` when it is that server's. */
+function entryUnder(all, server, key) {
+	const first = all.accounts[key];
+	return all.offices?.[server]?.[key] ?? (first?.server === server ? first : void 0);
 }
 /**
-* `all` with the account's entry for `server` set: under `accounts` only for the server a version
-* before #105 reports to (`legacy`, config.json's `server`), and only while `offices` holds none for
-* it, so pairingEntry reads it back; any other server's always under `offices`, so a version before
-* #105, which writes `accounts` for its own server, never wipes it.
+* The key the machine's pairing with `server` is kept under, looked up for the Claude login
+* `account`: the login's own while its entry holds a credential, else that of another login's entry
+* that does (with several, the one renewed most recently), else the login's own, where a new
+* pairing goes.
+*/
+function pairingKey(all, server, account) {
+	if (entryUnder(all, server, account)?.credential) return account;
+	let best;
+	for (const key of /* @__PURE__ */ new Set([...Object.keys(all.offices?.[server] ?? {}), ...Object.keys(all.accounts)])) {
+		const entry = entryUnder(all, server, key);
+		if (entry?.credential && (!best || (entry.tokenExpires ?? 0) > best.renewed)) best = {
+			key,
+			renewed: entry.tokenExpires ?? 0
+		};
+	}
+	return best?.key ?? account;
+}
+/** The machine's entry for `server`, looked up for the Claude login `account` (pairingKey), or undefined. */
+function pairingEntry(all, server, account) {
+	return entryUnder(all, server, pairingKey(all, server, account));
+}
+/**
+* `all` with the machine's entry for `server` set, under the key pairingKey finds for `account`, so
+* another login's entry is renewed where it is, never copied or moved: under `accounts` only for the
+* server a version before #105 reports to (`legacy`, config.json's `server`), and only while
+* `offices` holds none for it, so pairingEntry reads it back; any other server's always under
+* `offices`, so a version before #105, which writes `accounts` for its own server, never wipes it.
 */
 function withPairingEntry(all, server, account, entry, legacy) {
-	if (legacy && !all.offices?.[server]?.[account]) return {
+	const key = pairingKey(all, server, account);
+	if (legacy && !all.offices?.[server]?.[key]) return {
 		...all,
 		accounts: {
 			...all.accounts,
-			[account]: entry
+			[key]: entry
 		}
 	};
 	return {
@@ -7401,7 +7425,7 @@ function withPairingEntry(all, server, account, entry, legacy) {
 			...all.offices,
 			[server]: {
 				...all.offices?.[server],
-				[account]: entry
+				[key]: entry
 			}
 		}
 	};
@@ -19167,7 +19191,7 @@ async function hello(session, cwd, token, project, claudeJson, io) {
 		...token ? { token } : {}
 	};
 }
-/** This machine's pairing with `server`, under the machine's Claude account. */
+/** This machine's pairing with `server`, found for the machine's Claude account as every lookup finds it (pairingKey): another login's entry does when that account has none. */
 async function machinePairing(office, allowPlainWs, claudeDir, claudeJson, io) {
 	const { server } = office;
 	const account = await accountOf({

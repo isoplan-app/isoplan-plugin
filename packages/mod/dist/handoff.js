@@ -7225,10 +7225,32 @@ function freshRepos(copy, maxAgeMs, now) {
 //#endregion
 //#region src/data-layer/pairing.ts
 const pairingPath = (claudeDir) => path.join(claudeDir, "isoplan", "pairing.json");
-/** The account's entry for `server`, or undefined: the one under `offices`, else the one under `accounts` when it is that server's. */
+/** The entry kept under `key` for `server`, or undefined: the one under `offices`, else the one under `accounts` when it is that server's. */
+function entryUnder(all, server, key) {
+	const first = all.accounts[key];
+	return all.offices?.[server]?.[key] ?? (first?.server === server ? first : void 0);
+}
+/**
+* The key the machine's pairing with `server` is kept under, looked up for the Claude login
+* `account`: the login's own while its entry holds a credential, else that of another login's entry
+* that does (with several, the one renewed most recently), else the login's own, where a new
+* pairing goes.
+*/
+function pairingKey(all, server, account) {
+	if (entryUnder(all, server, account)?.credential) return account;
+	let best;
+	for (const key of /* @__PURE__ */ new Set([...Object.keys(all.offices?.[server] ?? {}), ...Object.keys(all.accounts)])) {
+		const entry = entryUnder(all, server, key);
+		if (entry?.credential && (!best || (entry.tokenExpires ?? 0) > best.renewed)) best = {
+			key,
+			renewed: entry.tokenExpires ?? 0
+		};
+	}
+	return best?.key ?? account;
+}
+/** The machine's entry for `server`, looked up for the Claude login `account` (pairingKey), or undefined. */
 function pairingEntry(all, server, account) {
-	const first = all.accounts[account];
-	return all.offices?.[server]?.[account] ?? (first?.server === server ? first : void 0);
+	return entryUnder(all, server, pairingKey(all, server, account));
 }
 const postJson = async (url, body) => {
 	const response = await fetch(url, {
