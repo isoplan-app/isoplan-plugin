@@ -9,10 +9,10 @@
 // (data-layer/home.ts approvedHome): its repo, or, for a folder above several repos, the first the
 // office takes. One that is gone, or in no repo the office takes, isn't listed. The checkout and
 // each branch pass the secret scan before they may leave the machine; one it matches, or one longer
-// than the protocol takes, is left out, never cut.
+// than the protocol takes, is left out, never cut. Isoplan's own folders are never listed.
 
 import { MAX_BRANCH_LENGTH, MAX_FOLDER_LENGTH, MAX_FOLDER_REPOS, MAX_REPO_BRANCHES } from "@isoplan/protocol";
-import { pathKey } from "../data-layer/git.js";
+import { join, pathKey, relativeTo } from "../data-layer/git.js";
 
 /** A folder a session ran in, and when it was last used, in ms since the epoch. */
 export interface FolderSeen {
@@ -30,7 +30,20 @@ export interface RepoFolders {
   branches?: string[];
 }
 
+/**
+ * Whether `folder` is one of Isoplan's own: anything inside <claude dir>/isoplan/, such as an
+ * expert's read/ or a clone Isoplan keeps for itself. Never the person's clone, so never offered to
+ * start a session in, nor the clone a take works beside (handoff/take.ts). Windows paths compare
+ * case-insensitively.
+ */
+export function isoplanFolder(claudeDir: string, folder: string): boolean {
+  const own = join(claudeDir, "isoplan");
+  return pathKey(folder) === pathKey(own) || relativeTo(own, folder) !== null;
+}
+
 export interface RepoFoldersOptions {
+  /** Claude's folder on this machine, whose isoplan/ holds Isoplan's own folders (isoplanFolder). */
+  claudeDir: string;
   /** The main checkout of the repo `folder` is in, or the folder itself when git can't place it; null when there is none to list. */
   checkout: (folder: string) => Promise<string | null>;
   /** The project id of the repo the office takes that `folder` is in, lower-cased; null when it is gone or the office takes none. */
@@ -59,8 +72,9 @@ export async function repoFolders(seen: FolderSeen[], o: RepoFoldersOptions): Pr
   const chosen: { repo: RepoFolders; key: string }[] = [];
   for (const { folder } of [...seen].sort((a, b) => b.at - a.at)) {
     if (byRepo.size >= MAX_FOLDER_REPOS) break;
+    if (isoplanFolder(o.claudeDir, folder)) continue;
     const checkout = await o.checkout(folder).catch(() => null);
-    if (!checkout) continue;
+    if (!checkout || isoplanFolder(o.claudeDir, checkout)) continue;
     const key = pathKey(checkout);
     if (tried.has(key)) continue;
     tried.add(key);

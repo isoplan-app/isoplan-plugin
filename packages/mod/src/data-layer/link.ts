@@ -32,7 +32,8 @@
 // after every hello and `onClose` at every drop, so the runner forgets the connection's drive-policy
 // and sends no driven message on the new one until its first drive-policy has come (runner/session.ts).
 // A runner that hosts experts (protocol 0.13.0) is told which of them the server lists (`hosting`,
-// to `onHosting`), and sends its listing (`experts`) through `sendLive` as well: it is live-only.
+// to `onHosting`), and sends its listing (`experts`) through `sendLive` as well: it is live-only, as
+// is `expert-senior` (protocol 0.14.0), sent only to a server whose hosting says it reads it.
 // A session's link passes the experts it may ask (`expert-rights`) on as a line, as `ask-rights`.
 //
 // Given `onError`, a throw in the link's socket handlers or its pacing timer (in `filter`, say) goes
@@ -45,6 +46,7 @@ import {
   type DriveMessage,
   type DrivenMessage,
   type DrivePolicyMessage,
+  type ExpertSeniorMessage,
   type ExpertsMessage,
   type Facts,
   type HostingMessage,
@@ -126,7 +128,7 @@ export interface Link {
   /** A reply, refusal or taken, first sent at `at` (now, unless it waited elsewhere first). One sent while the link is down goes out after the next hello, unless it is older than OUTBOX_MAX_AGE_MS by then. */
   send(message: Outgoing, at?: number): void;
   /** A driven message or an expert listing, sent now if the link is up; false when it is down, and the message is dropped. */
-  sendLive(message: DrivenMessage | ExpertsMessage): boolean;
+  sendLive(message: DrivenMessage | ExpertsMessage | ExpertSeniorMessage): boolean;
   /**
    * The projects the office holds, from this connection's welcome; null before one, and from a
    * server too old to send one, which would read another repo's files as the session's own (#74).

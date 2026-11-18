@@ -58,14 +58,43 @@ const types = (sent: DataLayerMessage[]) => sent.map((m) => m.type);
 beforeEach(() => void vi.useFakeTimers());
 afterEach(() => void vi.useRealTimers());
 
-test("expert: an answer that comes 5 s into a blocking wait is the call's result, checked on meanwhile and acked", async () => {
+test("expert: an answer that comes 5 s into a blocking wait is the call's result, checked on meanwhile, and acked once it was written to the script", async () => {
   const s = fakeServer((m) => (m.type === "ask-expert" || m.type === "ask-check" ? asked("asking") : null));
   setTimeout(() => s.push(asked("answered", { answer: "Only ids.", commit, branch: "main" })), 5000);
   const told = askExpert(s.link, question(true), { deadline: Date.now() + 10000 });
   await vi.advanceTimersByTimeAsync(5000);
-  expect(await told).toEqual({ text: answeredText({ ...about, answer: "Only ids.", commit, branch: "main" }) });
+  const { shown, ...text } = await told;
+  expect(text).toEqual({ text: answeredText({ ...about, answer: "Only ids.", commit, branch: "main" }) });
   expect(s.sent[0]).toEqual({ type: "ask-expert", v: PROTOCOL_VERSION, expert: "reporting", question: "How are sessions reported?", blocking: true, key: "k1" });
+  expect(types(s.sent)).toEqual(["ask-expert", "ask-check", "ask-check"]);
+  await shown!(true);
   expect(types(s.sent)).toEqual(["ask-expert", "ask-check", "ask-check", "asked-ack"]);
+});
+
+test("expert: an answer that couldn't be written to the script isn't acked, so the server tells it again as a note", async () => {
+  const s = fakeServer((m) => (m.type === "ask-expert" ? asked("answered", { answer: "Only ids.", commit, branch: "main" }) : null));
+  let closed = 0;
+  const link: SideLink = { ...s.link, close: async () => void closed++ };
+  const told = await askExpertThrough(async () => link, question(false), { deadline: Date.now() + 10000, connectMs: 20000 });
+  // The link stays open for the ack until the write is known.
+  expect(closed).toBe(0);
+  await told.shown!(false);
+  expect(types(s.sent)).toEqual(["ask-expert"]);
+  expect(closed).toBe(1);
+});
+
+test("expert: an answered question whose ack can't be sent is still the call's result", async () => {
+  const s = fakeServer((m) => (m.type === "ask-expert" ? asked("answered", { answer: "Only ids.", commit, branch: "main" }) : null));
+  const link: SideLink = {
+    ...s.link,
+    send: (m) => {
+      if (m.type === "asked-ack") throw new Error("the link closed");
+      s.link.send(m);
+    },
+  };
+  const { shown, ...told } = await askExpertThrough(async () => link, question(false), { deadline: Date.now() + 10000, connectMs: 20000 });
+  expect(told).toEqual({ text: answeredText({ ...about, answer: "Only ids.", commit, branch: "main" }) });
+  await expect(shown!(true)).resolves.toBeUndefined();
 });
 
 test("expert: an answer that would come at 15 s is not waited for: at 10 s the agent is told to explore meanwhile", async () => {
@@ -166,9 +195,11 @@ test("expert: each refusal of the ask is told by its code, any other as the serv
   await expect(askExpert(refuse("token-expired", "expired"), question(true), { deadline: Date.now() + 10000 })).rejects.toBeInstanceOf(TokenExpired);
 });
 
-test("expert: a withheld answer fails as held on the host's machine, and is acked so the server doesn't tell it again", async () => {
+test("expert: an asked that says withheld is told as dropped and acked", async () => {
   const s = fakeServer((m) => (m.type === "ask-expert" ? asked("withheld") : null));
-  expect(await askExpert(s.link, question(true), { deadline: Date.now() + 10000 })).toEqual({ text: expertText("EXPERT_ANSWER_WITHHELD", { ...about, host: "Ada" }), failed: true, code: "EXPERT_ANSWER_WITHHELD" });
+  const { shown, ...told } = await askExpert(s.link, question(true), { deadline: Date.now() + 10000 });
+  expect(told).toEqual({ text: expertText("EXPERT_DROPPED", { ...about, host: "Ada" }), failed: true, code: "EXPERT_DROPPED" });
+  await shown!(true);
   expect(types(s.sent)).toEqual(["ask-expert", "asked-ack"]);
 });
 
@@ -177,7 +208,9 @@ test("expert: a dropped question fails with its code and its reason, and is acke
   setTimeout(() => s.push(asked("dropped", { code: "EXPERT_FORK_FAILED", note: "its fork ran out of time" })), 1000);
   const told = askExpert(s.link, question(true), { deadline: Date.now() + 10000 });
   await vi.advanceTimersByTimeAsync(1000);
-  expect(await told).toEqual({ text: "Expert reporting, question x-1: the expert couldn't answer: its fork ran out of time. Ask a fresh Explore subagent instead (EXPERT_FORK_FAILED)", failed: true, code: "EXPERT_FORK_FAILED" });
+  const { shown, ...text } = await told;
+  expect(text).toEqual({ text: "Expert reporting, question x-1: the expert couldn't answer: its fork ran out of time. Ask a fresh Explore subagent instead (EXPERT_FORK_FAILED)", failed: true, code: "EXPERT_FORK_FAILED" });
+  await shown!(true);
   expect(types(s.sent)).toEqual(["ask-expert", "asked-ack"]);
 });
 
@@ -196,7 +229,6 @@ test("expert texts: every situation is said with its expert, its question and it
     ["EXPERT_QUEUED", { ...about, host: "Ada" }, "queued: Ada's machine isn't connected. The answer arrives in this session when it reconnects, or a note says it was dropped and why. Carry on"],
     ["EXPERT_STARTING", { ...about }, "the expert is starting a new generation, and answers once the new junior's grounding is done, which takes longer. Carry on: the answer arrives as a note"],
     ["EXPERT_FORK_FAILED", { ...about, words: "its fork compacted" }, "the expert couldn't answer: its fork compacted. Ask a fresh Explore subagent instead"],
-    ["EXPERT_ANSWER_WITHHELD", { ...about, host: "Ada" }, "the answer is held on Ada's machine until its owner releases it. Explore this yourself meanwhile; a later note follows if it is released"],
     ["EXPERT_DROPPED", { ...about, words: "Ada's machine was away for two days" }, "dropped: Ada's machine was away for two days, so no answer will come. Explore it yourself, and ask again if it still matters"],
   ];
   for (const [code, a, row] of rows) expect(expertText(code, a)).toBe(`Expert reporting, question x-1: ${row} (${code})`);
@@ -214,7 +246,6 @@ test("expert texts: every situation is said with its expert, its question and it
   expect(lateExpertText({ ...late, state: "dropped", code: "EXPERT_DROPPED", note: "it waited too long" })).toBe(
     "Isoplan: expert reporting won't answer your question x-1. You asked:\n> How?\n\nExpert reporting, question x-1: dropped: it waited too long, so no answer will come. Explore it yourself, and ask again if it still matters (EXPERT_DROPPED)",
   );
-  expect(lateExpertText({ ...late, state: "withheld" })).toContain("(EXPERT_ANSWER_WITHHELD)");
 });
 
 test("expert texts: an answer of 8,000 characters, the most an expert sends, still ends with its citation block", () => {

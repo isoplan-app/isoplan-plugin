@@ -259,6 +259,11 @@ const valid = {
   "reply answer-expert": { type: "reply", v, id: "expert-x-0123456789-a1b2c3", kind: "answer-expert", answer: "Yes: the title is a fact.\n\nCited, on main at 0123456:\n- docs/adr/0004-what-leaves-a-machine.md", commit, branch: "main" },
   "refusal of an answer-expert": { type: "refusal", v, id: "expert-x-0123456789-a1b2c3", reason: "unavailable", detail: "Over this expert's cap.", expert: { code: "EXPERT_CAP", cap: "asker-day", limit: 30, frees: "2026-11-18T09:00:00.000Z" } },
   "asked of an expert": { type: "asked", v, question: "x-0123456789", text: "May a session's title leave the machine?", state: "answered", answer: "Yes.", owner: "Adam", key: "toolu_02", expert: "adr-0004", commit, branch: "main" },
+  "experts with a senior": { type: "experts", v, experts: [{ ...expertListing, senior: true }] },
+  "hosting that reads expert-senior": { type: "hosting", v, listed: ["adr-0004"], expertSenior: true },
+  "expert-senior": { type: "expert-senior", v, id: "expert-x-0123456789-a1b2c3" },
+  "runner that starts hidden sessions": { type: "runner", v, account: adam, machine: { name: "sevengill" }, drive: true, hiddenStarts: true },
+  "drive start hidden": { type: "drive", v, kind: "start", id: "d13", by: adam, folder: "/Users/sam/code/isoplan", branch: "feat/dark-mode", project: isoplan, instruction: "Add a dark mode.", permissions: "auto", hidden: true },
 };
 
 const parsers = {
@@ -362,6 +367,11 @@ const parsers = {
   "reply answer-expert": parseDataLayerMessage,
   "refusal of an answer-expert": parseDataLayerMessage,
   "asked of an expert": parseOfficeServerMessage,
+  "experts with a senior": parseDataLayerMessage,
+  "hosting that reads expert-senior": parseOfficeServerMessage,
+  "expert-senior": parseDataLayerMessage,
+  "runner that starts hidden sessions": parseDataLayerMessage,
+  "drive start hidden": parseOfficeServerMessage,
 } satisfies Record<keyof typeof valid, (value: unknown) => ParseResult<unknown>>;
 
 // Each message with one field made wrong, and the path the error should name.
@@ -466,6 +476,11 @@ const broken: Record<keyof typeof valid, [unknown, string]> = {
   "reply answer-expert": [{ ...valid["reply answer-expert"], commit: "0123456" }, "commit"],
   "refusal of an answer-expert": [{ ...valid["refusal of an answer-expert"], expert: { code: "EXPERT_CAP", cap: "asker-week", limit: 30 } }, "expert.cap"],
   "asked of an expert": [{ ...valid["asked of an expert"], code: "EXPERT_LOST" }, "code"],
+  "experts with a senior": [{ ...valid["experts with a senior"], experts: [{ ...expertListing, senior: "yes" }] }, "experts[0].senior"],
+  "hosting that reads expert-senior": [{ ...valid["hosting that reads expert-senior"], expertSenior: false }, "expertSenior"],
+  "expert-senior": [{ ...valid["expert-senior"], id: "" }, "id"],
+  "runner that starts hidden sessions": [{ ...valid["runner that starts hidden sessions"], hiddenStarts: false }, "hiddenStarts"],
+  "drive start hidden": [{ ...valid["drive start hidden"], hidden: "yes" }, "hidden"],
 };
 
 describe.each(Object.keys(valid) as (keyof typeof valid)[])("%s", (type) => {
@@ -862,6 +877,16 @@ describe("driven sessions", () => {
     for (const message of [{ ...valid["drive start"], mode: "driven" }, { ...valid["drive start on a branch"], mode: "driven" }]) expect(parseOfficeServerMessage(message)).toEqual({ ok: true, message });
   });
 
+  test("a start is hidden only in a folder, and never in Orca; a hidden start opens anywhere else, with or without a branch", () => {
+    const { branch: _, ...noBranch } = valid["drive start hidden"];
+    for (const message of [noBranch, { ...valid["drive start hidden"], mode: "terminal" }, { ...valid["drive start in a folder"], hidden: false, mode: "orca" }]) expect(parseOfficeServerMessage(message)).toEqual({ ok: true, message });
+    for (const message of [{ ...valid["drive start"], hidden: true }, { ...valid["drive start in Orca"], hidden: true }]) {
+      const result = parseOfficeServerMessage(message);
+      expect(result).toMatchObject({ ok: false, kind: "invalid" });
+      expect(!result.ok && result.error).toContain("hidden");
+    }
+  });
+
   test("a start in a Windows folder keeps its backslashes", () => {
     const result = parseOfficeServerMessage(valid["drive start in a folder"]);
     expect(result.ok && result.message.type === "drive" && result.message.kind === "start" && result.message.folder).toBe(String.raw`C:\Users\adam\isoplan`);
@@ -980,6 +1005,12 @@ describe("experts", () => {
     for (const wrong of [{ expert: "ADR" }, { commit: "0123456" }, { branch: "" }]) {
       expect(parseOfficeServerMessage({ ...valid["asked of an expert"], ...wrong })).toMatchObject({ ok: false, kind: "invalid" });
     }
+  });
+
+  test("an asked of an expert with EXPERT_ANSWER_WITHHELD no longer parses: an expert never withholds its answer", () => {
+    const result = parseOfficeServerMessage({ ...valid["asked of an expert"], state: "withheld", answer: undefined, code: "EXPERT_ANSWER_WITHHELD" });
+    expect(result).toMatchObject({ ok: false, kind: "invalid" });
+    expect(!result.ok && result.error).toContain("code");
   });
 
   test("a session that asks experts says so with true, and never with false", () => {

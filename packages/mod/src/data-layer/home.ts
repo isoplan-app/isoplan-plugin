@@ -71,13 +71,16 @@ export const takesFrom =
     return !!where && repos!.has((await io.projectOf(where, dir)).id.toLowerCase());
   };
 
-/** A HomeIo on this machine, for the runner and the commands, naming GitHub repos as `names` does. */
-export function machineHomeIo(workspaceRepos: number, names: RemoteNames | null = null, machine = os.hostname()): HomeIo {
+/**
+ * A HomeIo on this machine, for the runner and the commands, naming GitHub repos as `names` does.
+ * `strict` makes a git that can't read a remote reject rather than give a local project (identity.ts).
+ */
+export function machineHomeIo(workspaceRepos: number, names: RemoteNames | null = null, machine = os.hostname(), strict = false): HomeIo {
   const io = nodeIo();
   const git = createGit(io);
   return {
     resolve: (dir) => git.resolve(dir),
-    projectOf: (where, dir) => projectOf(io.run, where, dir, machine, { names }),
+    projectOf: (where, dir) => projectOf(io.run, where, dir, machine, { names, strict }),
     stat: (p) => Promise.resolve(io.stat(p)),
     listDir: (d) => io.listDir(d),
     home: os.homedir(),

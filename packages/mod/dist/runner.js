@@ -6044,6 +6044,10 @@ const HelloMessageSchema = object({
 * runner from before 0.10.0 drops the field it doesn't know and would run the session from the floor.
 * `experts` (protocol 0.13.0): this runner hosts experts. It answers `hosting` with `experts`, and
 * takes `answer-expert` requests; the server sends neither to a runner that didn't say it.
+* `hiddenStarts` (protocol 0.14.0, isoplan-app#315): this runner can start a session from the floor
+* hidden (a start's `hidden`), in a clone Isoplan keeps for itself. The server sends `hidden` only to
+* a runner that says it: a runner from before 0.14.0 drops the field it doesn't know and would start
+* the session in the person's own checkout.
 */
 const RunnerHelloMessageSchema = object({
 	type: literal$1("runner"),
@@ -6056,7 +6060,8 @@ const RunnerHelloMessageSchema = object({
 	drive: boolean().optional(),
 	claude: ClaudeCliSchema.optional(),
 	starts: array(StartModeSchema).max(4).optional(),
-	experts: literal$1(true).optional()
+	experts: literal$1(true).optional(),
+	hiddenStarts: literal$1(true).optional()
 });
 /** All of the session's facts. Sent on connect and on repair. */
 const FullMessageSchema = object({
@@ -6113,7 +6118,6 @@ const ExpertCodeSchema = _enum([
 	"EXPERT_QUEUED",
 	"EXPERT_STARTING",
 	"EXPERT_FORK_FAILED",
-	"EXPERT_ANSWER_WITHHELD",
 	"EXPERT_DROPPED"
 ]);
 /** `starting`: no generation of it has passed its proof question yet; `ready`: its junior answers; `failed`: its last grounding failed and none answers. */
@@ -6128,12 +6132,17 @@ const ExpertCapSchema = _enum([
 	"asker-open",
 	"expert-tokens"
 ]);
-/** One expert a runner hosts, as it lists it to an office server whose list takes its repo. */
+/**
+* One expert a runner hosts, as it lists it to an office server whose list takes its repo. `senior`
+* (protocol 0.14.0): it has a senior generation, which its junior can ask (see `expert-senior`);
+* absent from an older runner. An older server ignores it.
+*/
 const ExpertListingSchema = object({
 	name: ExpertNameSchema,
 	project: ProjectSchema,
 	subject: Subject,
-	state: ExpertStateSchema
+	state: ExpertStateSchema,
+	senior: boolean().optional()
 });
 /** One expert a session may ask: `repo` is its project's short name, `host` the hosting person's name. */
 const ExpertRightSchema = object({
@@ -6354,6 +6363,18 @@ const ExpertsMessageSchema = object({
 		});
 		seen.add(expert.name);
 	});
+});
+/**
+* The junior answering the `answer-expert` request `id` has asked its senior (protocol 0.14.0), so
+* the floor can show the senior joining the question's meeting. It carries no text: nothing of the
+* question or of what the junior asked. Sent once per request, when the junior first asks, only to a
+* server whose `hosting` says `expertSenior`, and only while the link is up (never through the reply
+* outbox): a server from before 0.14.0, which doesn't say it, is never sent one.
+*/
+const ExpertSeniorMessageSchema = object({
+	type: literal$1("expert-senior"),
+	v: Version,
+	id: RequestId
 });
 /**
 * A session asks an expert a question (protocol 0.13.0), on its own short link with the session's
@@ -6630,7 +6651,8 @@ discriminatedUnion("type", [
 	AskedAckMessageSchema,
 	DrivenMessageSchema,
 	ExpertsMessageSchema,
-	AskExpertMessageSchema
+	AskExpertMessageSchema,
+	ExpertSeniorMessageSchema
 ]);
 /** Asks the data layer to send its facts in full. */
 const RepairMessageSchema = object({
@@ -6868,11 +6890,14 @@ const ExpertRightsMessageSchema = object({
 * after each `experts` message, and whenever the offices change. The runner sends no `experts` on a
 * connection before that connection's first `hosting`, so a server from before experts, which sends
 * none, is never sent one.
+* `expertSenior` (protocol 0.14.0): this server reads `expert-senior`, so the runner may send it. A
+* server that reads it says it on every `hosting`; the runner goes by the connection's last one.
 */
 const HostingMessageSchema = object({
 	type: literal$1("hosting"),
 	v: Version,
-	listed: array(ExpertNameSchema).max(20)
+	listed: array(ExpertNameSchema).max(20),
+	expertSenior: literal$1(true).optional()
 });
 const drive$1 = {
 	type: literal$1("drive"),
@@ -6910,8 +6935,14 @@ const OfficeServerMessageSchema = discriminatedUnion("type", [
 				"orca",
 				"desktop",
 				"driven"
-			]).optional()
+			]).optional(),
+			hidden: boolean().optional()
 		}).superRefine((message, context) => {
+			if (message.hidden && message.mode === "orca") context.addIssue({
+				code: "custom",
+				path: ["hidden"],
+				message: "a hidden start doesn't open in Orca, which would list its folder"
+			});
 			if (message.mode !== void 0 && message.mode !== "driven") {
 				if (message.folder === void 0) context.addIssue({
 					code: "custom",
@@ -6934,6 +6965,11 @@ const OfficeServerMessageSchema = discriminatedUnion("type", [
 					code: "custom",
 					path: ["branch"],
 					message: "a start names a branch only with a folder"
+				});
+				if (message.hidden) context.addIssue({
+					code: "custom",
+					path: ["hidden"],
+					message: "a start is hidden only with a folder"
 				});
 				return;
 			}
@@ -7209,11 +7245,16 @@ const held = (lock, now, { isAlive = alive, freshMs }) => !!lock && (lock.until 
 * written into the lock beside the pid.
 *
 * A new lock is created exclusively, so of two takers at once only one gets it. A stale one is
-* moved aside by rename, which only one taker can do to the same file, and the taker checks that
-* what it moved is the lock it judged stale, by its text and its write time, so a lock its holder
-* refreshed meanwhile isn't taken: one that moved another's lock instead puts it back and loses.
-* With `force` a lock that can't be moved (on Windows a scanner may have it open) is tried again
-* after a short wait, then overwritten, so the plugin's data layer always gets it.
+* taken over one taker at a time: only the taker that creates `<lock>.take` (exclusively too) may
+* remove it, after reading it again to check it is still the lock it judged stale, by its text and
+* its write time, so a lock its holder refreshed meanwhile, or another taker's new one, is never
+* removed. A taker that finds `.take` there loses; one older than TAKE_STALE_MS was left by a taker
+* that crashed holding it, and is cleared.
+*
+* With `force` a stale or held lock is moved aside by rename, and the taker checks that what it
+* moved is the lock it read: one that moved another's lock instead puts it back and looks again. A
+* lock that can't be moved (on Windows a scanner may have it open) is tried again after a short
+* wait, then overwritten, so the plugin's data layer always gets it.
 */
 async function takeLock(file, pid, isAlive = alive, force = false, now = Date.now(), { freshMs, extra = {} } = {}) {
 	await fs.mkdir(path.dirname(file), { recursive: true });
@@ -7236,16 +7277,15 @@ async function takeLock(file, pid, isAlive = alive, force = false, now = Date.no
 			isAlive,
 			freshMs
 		})) return false;
+		if (!force) {
+			if (!await removeStale(file, seen)) return false;
+			continue;
+		}
 		const aside = `${file}.${pid}-${Math.random().toString(36).slice(2)}`;
 		try {
 			await fs.rename(file, aside);
 		} catch (err) {
-			if ([
-				"ENOENT",
-				"EPERM",
-				"EBUSY",
-				"EACCES"
-			].includes(err.code ?? "")) continue;
+			if (["ENOENT", ...BUSY$1].includes(err.code ?? "")) continue;
 			throw err;
 		}
 		const moved = await fs.readFile(aside, "utf8").catch(() => null);
@@ -7253,13 +7293,43 @@ async function takeLock(file, pid, isAlive = alive, force = false, now = Date.no
 		if (moved !== seen.text || movedAt !== seen.mtimeMs) {
 			await fs.link(aside, file).catch(() => {});
 			await fs.rm(aside, { force: true });
-			if (!force) return false;
 			continue;
 		}
 		await fs.rm(aside, { force: true });
 	}
 	if (!force) return false;
 	await fs.writeFile(file, body);
+	return true;
+}
+const TAKE_STALE_MS = 5e3;
+const BUSY$1 = [
+	"EPERM",
+	"EBUSY",
+	"EACCES"
+];
+/**
+* Removes the stale lock `seen` while holding `<lock>.take`, if it is still that one; false when
+* another taker holds `.take`. Either way the caller looks again.
+*/
+async function removeStale(file, seen) {
+	const take = `${file}.take`;
+	try {
+		await fs.writeFile(take, String(process.pid), { flag: "wx" });
+	} catch (err) {
+		if (err.code !== "EEXIST") throw err;
+		const st = await fs.stat(take).catch(() => null);
+		if (st && Date.now() - st.mtimeMs < TAKE_STALE_MS) return false;
+		await fs.rm(take, { force: true });
+		return true;
+	}
+	try {
+		const now = await readText$1(file);
+		if (now?.text === seen.text && now.mtimeMs === seen.mtimeMs) await fs.rm(file, { force: true });
+	} catch (err) {
+		if (!BUSY$1.includes(err.code ?? "")) throw err;
+	} finally {
+		await fs.rm(take, { force: true });
+	}
 	return true;
 }
 /**
@@ -8114,16 +8184,20 @@ async function accountOf(io, claudeJson, cwd) {
 * (Windows, macOS) a local project's id is lower-cased, so one folder reached in two spellings is
 * one project, in the hello and in every edit alike. With `names`, a remote naming a GitHub repo by
 * an old name gives the repo's current id (remote-names.ts), so an old clone is the same project.
+* With `strict`, a git that can't say (it fails, or exits other than 0 or 2, git's "no such remote")
+* throws instead of reading as no remote, for callers that must not mistake a hiccup for a local repo.
 */
-async function projectOf(run, where, cwd, machine, { caseless = process.platform === "win32" || process.platform === "darwin", names = null } = {}) {
+async function projectOf(run, where, cwd, machine, { caseless = process.platform === "win32" || process.platform === "darwin", names = null, strict = false } = {}) {
 	let remote = null;
 	if (run && where) {
-		const r = await Promise.resolve(run([
+		const ran = Promise.resolve(run([
 			"git",
 			"remote",
 			"get-url",
 			"origin"
-		], { cwd: where.toplevel })).catch(() => null);
+		], { cwd: where.toplevel }));
+		const r = strict ? await ran : await ran.catch(() => null);
+		if (strict && r.code !== 0 && r.code !== 2) throw new Error(`git couldn't read the remote of ${where.toplevel} (exit ${r.code})`);
 		if (r && r.code === 0 && r.stdout.trim()) remote = r.stdout.trim();
 	}
 	const root = !where ? normalize(cwd) : /\/\.git$/.test(where.commonDir) ? dirname(where.commonDir) : where.toplevel;
@@ -8271,13 +8345,19 @@ const takesFrom = (io, repos) => async (dir) => {
 	const where = repos && await io.resolve(dir);
 	return !!where && repos.has((await io.projectOf(where, dir)).id.toLowerCase());
 };
-/** A HomeIo on this machine, for the runner and the commands, naming GitHub repos as `names` does. */
-function machineHomeIo(workspaceRepos, names = null, machine = os.hostname()) {
+/**
+* A HomeIo on this machine, for the runner and the commands, naming GitHub repos as `names` does.
+* `strict` makes a git that can't read a remote reject rather than give a local project (identity.ts).
+*/
+function machineHomeIo(workspaceRepos, names = null, machine = os.hostname(), strict = false) {
 	const io = nodeIo();
 	const git = createGit(io);
 	return {
 		resolve: (dir) => git.resolve(dir),
-		projectOf: (where, dir) => projectOf(io.run, where, dir, machine, { names }),
+		projectOf: (where, dir) => projectOf(io.run, where, dir, machine, {
+			names,
+			strict
+		}),
 		stat: (p) => Promise.resolve(io.stat(p)),
 		listDir: (d) => io.listDir(d),
 		home: os.homedir(),
@@ -12328,6 +12408,69 @@ async function commitIn(run, repo, id, index, timeoutMs, pushAnyway, scan) {
 	return ready(commit, held, binary.map(inFolder));
 }
 //#endregion
+//#region src/runner/repo-folders.ts
+/**
+* Whether `folder` is one of Isoplan's own: anything inside <claude dir>/isoplan/, such as an
+* expert's read/ or a clone Isoplan keeps for itself. Never the person's clone, so never offered to
+* start a session in, nor the clone a take works beside (handoff/take.ts). Windows paths compare
+* case-insensitively.
+*/
+function isoplanFolder(claudeDir, folder) {
+	const own = join(claudeDir, "isoplan");
+	return pathKey(folder) === pathKey(own) || relativeTo(own, folder) !== null;
+}
+/** The repos `seen` is in, the most recently used first: each once, by its main checkout, at most MAX_FOLDER_REPOS, each with at most MAX_REPO_BRANCHES branches. */
+async function repoFolders(seen, o) {
+	const byRepo = /* @__PURE__ */ new Map();
+	const tried = /* @__PURE__ */ new Set();
+	const leftOut = /* @__PURE__ */ new Set();
+	const scanned = async (text, key, what, project) => {
+		const matched = await o.scan(text);
+		if (!matched) return true;
+		leftOut.add(key);
+		if (!o.leftOut.has(key)) o.log(`${what} of ${project} wasn't listed for starting sessions from the floor: it matches the secret pattern "${matched}"`);
+		return false;
+	};
+	const chosen = [];
+	for (const { folder } of [...seen].sort((a, b) => b.at - a.at)) {
+		if (byRepo.size >= 100) break;
+		if (isoplanFolder(o.claudeDir, folder)) continue;
+		const checkout = await o.checkout(folder).catch(() => null);
+		if (!checkout || isoplanFolder(o.claudeDir, checkout)) continue;
+		const key = pathKey(checkout);
+		if (tried.has(key)) continue;
+		tried.add(key);
+		if (checkout.length > 4096) continue;
+		const project = await o.home(checkout).catch(() => null);
+		if (!project || byRepo.has(project)) continue;
+		if (!await scanned(checkout, key, "a folder", project)) continue;
+		const repo = {
+			project,
+			folders: [checkout]
+		};
+		byRepo.set(project, repo);
+		chosen.push({
+			repo,
+			key
+		});
+	}
+	const listed = await Promise.all(chosen.map(({ repo }) => o.branches(repo.folders[0], repo.project).catch(() => null)));
+	for (const [i, { repo, key }] of chosen.entries()) {
+		const branches = listed[i];
+		if (!branches) continue;
+		repo.branches = [];
+		for (const branch of branches) {
+			if (repo.branches.length >= 100) break;
+			if (branch.length > 255) continue;
+			if (await scanned(branch, `${key}
+${branch}`, "a branch", repo.project)) repo.branches.push(branch);
+		}
+	}
+	o.leftOut.clear();
+	for (const key of leftOut) o.leftOut.add(key);
+	return [...byRepo.values()];
+}
+//#endregion
 //#region src/handoff/take.ts
 /** The repo's own labelled settings file, at its top. */
 const REPO_CONFIG = "isoplan.json";
@@ -12405,7 +12548,8 @@ async function findWorkspace(io, run, projectsDir, repos, since, timeoutMs, name
 	return null;
 }
 async function recentFolders(io, projectsDir, since) {
-	return (await sessionFolders(io, projectsDir, since)).map((f) => f.folder);
+	const claudeDir = path.dirname(projectsDir);
+	return (await sessionFolders(io, projectsDir, since)).map((f) => f.folder).filter((folder) => !isoplanFolder(claudeDir, folder));
 }
 /**
 * The folders the machine's Claude Code sessions since `since` ran in, still there (or, with `gone`,
@@ -14619,58 +14763,6 @@ ${fetched.stderr}` };
 	return typeof dir === "string" ? spelledAs(checkout, dir) : dir;
 }
 //#endregion
-//#region src/runner/repo-folders.ts
-/** The repos `seen` is in, the most recently used first: each once, by its main checkout, at most MAX_FOLDER_REPOS, each with at most MAX_REPO_BRANCHES branches. */
-async function repoFolders(seen, o) {
-	const byRepo = /* @__PURE__ */ new Map();
-	const tried = /* @__PURE__ */ new Set();
-	const leftOut = /* @__PURE__ */ new Set();
-	const scanned = async (text, key, what, project) => {
-		const matched = await o.scan(text);
-		if (!matched) return true;
-		leftOut.add(key);
-		if (!o.leftOut.has(key)) o.log(`${what} of ${project} wasn't listed for starting sessions from the floor: it matches the secret pattern "${matched}"`);
-		return false;
-	};
-	const chosen = [];
-	for (const { folder } of [...seen].sort((a, b) => b.at - a.at)) {
-		if (byRepo.size >= 100) break;
-		const checkout = await o.checkout(folder).catch(() => null);
-		if (!checkout) continue;
-		const key = pathKey(checkout);
-		if (tried.has(key)) continue;
-		tried.add(key);
-		if (checkout.length > 4096) continue;
-		const project = await o.home(checkout).catch(() => null);
-		if (!project || byRepo.has(project)) continue;
-		if (!await scanned(checkout, key, "a folder", project)) continue;
-		const repo = {
-			project,
-			folders: [checkout]
-		};
-		byRepo.set(project, repo);
-		chosen.push({
-			repo,
-			key
-		});
-	}
-	const listed = await Promise.all(chosen.map(({ repo }) => o.branches(repo.folders[0], repo.project).catch(() => null)));
-	for (const [i, { repo, key }] of chosen.entries()) {
-		const branches = listed[i];
-		if (!branches) continue;
-		repo.branches = [];
-		for (const branch of branches) {
-			if (repo.branches.length >= 100) break;
-			if (branch.length > 255) continue;
-			if (await scanned(branch, `${key}
-${branch}`, "a branch", repo.project)) repo.branches.push(branch);
-		}
-	}
-	o.leftOut.clear();
-	for (const key of leftOut) o.leftOut.add(key);
-	return [...byRepo.values()];
-}
-//#endregion
 //#region src/data-layer/titles.ts
 const ASK_EVERY_MS = 6e5;
 const MAX_FILES = 15;
@@ -14815,6 +14907,567 @@ function createNamer(o) {
 			for (const child of running) killTree(child, platform);
 			running.clear();
 		}
+	};
+}
+//#endregion
+//#region src/runner/expert-claude.ts
+/** The only tools a trunk or fork is offered. */
+const READ_TOOLS = [
+	"Read",
+	"Grep",
+	"Glob",
+	"Agent"
+];
+/** Tools that end a trunk or fork at once when offered or used. */
+const DISALLOWED_TOOLS = [
+	"Bash",
+	"PowerShell",
+	"Edit",
+	"Write",
+	"NotebookEdit",
+	"WebFetch",
+	"WebSearch"
+];
+const EXPLORING = /* @__PURE__ */ new Set([...READ_TOOLS, "Task"]);
+const READ_ONLY = [
+	"--tools",
+	READ_TOOLS.join(","),
+	"--disallowedTools",
+	DISALLOWED_TOOLS.join(","),
+	"--setting-sources",
+	"",
+	"--strict-mcp-config",
+	"--permission-mode",
+	"dontAsk",
+	"--autocompact",
+	"1000000"
+];
+const STREAM = [
+	"--input-format",
+	"stream-json",
+	"--output-format",
+	"stream-json",
+	"--verbose"
+];
+const EXIT_GRACE_MS$1 = 5e3;
+/** A new trunk's grounding: it is saved under `trunk`. */
+const trunkArgs = (trunk, model) => [
+	"-p",
+	"--session-id",
+	trunk,
+	"--model",
+	model,
+	...READ_ONLY,
+	...STREAM
+];
+/** One turn appended to a trunk: a learned note. */
+const appendArgs = (trunk, model) => [
+	"-p",
+	"--resume",
+	trunk,
+	"--model",
+	model,
+	...READ_ONLY,
+	...STREAM
+];
+/** A fork of a trunk for one question, never saved. */
+const expertForkArgs = (trunk, model) => [
+	"-p",
+	"--resume",
+	trunk,
+	"--fork-session",
+	"--no-session-persistence",
+	"--model",
+	model,
+	...READ_ONLY,
+	...STREAM
+];
+/** The proof's judge: no tools, never saved. */
+const judgeArgs = (model) => [
+	"-p",
+	"--no-session-persistence",
+	"--tools",
+	"",
+	"--setting-sources",
+	"",
+	"--strict-mcp-config",
+	"--permission-mode",
+	"dontAsk",
+	"--model",
+	model,
+	...STREAM
+];
+/**
+* `file` relative to `root` with forward slashes, or null when it isn't under it. Both are resolved
+* (a relative `file` against `root`) and compared lower-case on Windows. `root` itself is "".
+*/
+function inside(root, file, platform = process.platform) {
+	const p = platform === "win32" ? path.win32 : path.posix;
+	const slashed = (x) => x.replace(/\\/g, "/").replace(/\/+$/, "");
+	const r = slashed(p.resolve(root));
+	const f = slashed(p.resolve(root, file));
+	const [rk, fk] = platform === "win32" ? [r.toLowerCase(), f.toLowerCase()] : [r, f];
+	if (fk === rk) return "";
+	return fk.startsWith(rk + "/") ? f.slice(r.length + 1) : null;
+}
+const zero$1 = () => ({
+	input: 0,
+	output: 0,
+	cacheRead: 0,
+	cacheWrite: 0
+});
+const add$1 = (a, b) => ({
+	input: a.input + b.input,
+	output: a.output + b.output,
+	cacheRead: a.cacheRead + b.cacheRead,
+	cacheWrite: a.cacheWrite + b.cacheWrite
+});
+const usageOf = (u) => {
+	const o = u && typeof u === "object" ? u : {};
+	const n = (key) => Number.isFinite(o[key]) ? o[key] : 0;
+	return {
+		input: n("input_tokens"),
+		output: n("output_tokens"),
+		cacheRead: n("cache_read_input_tokens"),
+		cacheWrite: n("cache_creation_input_tokens")
+	};
+};
+/**
+* Runs a conversation over a started process: `first` is turn 1, and after each turn `next` gives
+* the next user turn, or null to close stdin and settle; it may take its time (a junior waiting on
+* its senior), with the time limit still running. Settles with a failure on a disallowed
+* tool, a compaction, an error result, an early exit, or `timeoutMs` for the whole conversation,
+* ending the process tree for each but an early exit.
+*/
+function converse(child, first, next, timeoutMs, o = {}) {
+	return new Promise((resolve) => {
+		const c = {
+			ok: false,
+			turns: [],
+			usage: zero$1(),
+			reads: /* @__PURE__ */ new Set(),
+			explored: false,
+			compacted: false
+		};
+		let messages = /* @__PURE__ */ new Map();
+		let context = 0;
+		let buffer = "";
+		let stderr = "";
+		let isDone = false;
+		const finish = (failure) => {
+			if (isDone) return;
+			isDone = true;
+			clearTimeout(timer);
+			if (failure) {
+				c.failure = failure;
+				c.usage = add$1(c.usage, [...messages.values()].reduce((sum, m) => add$1(sum, m.usage), zero$1()));
+			} else c.ok = true;
+			resolve(c);
+			setTimeout(() => killTree(child), EXIT_GRACE_MS$1).unref();
+		};
+		const fail = (kind, detail, kill = true) => {
+			finish({
+				kind,
+				detail
+			});
+			if (kill) killTree(child);
+		};
+		const timer = setTimeout(() => fail("timed-out", `no reply within ${Math.round(timeoutMs / 1e3)} s`), timeoutMs);
+		const onTools = (names) => {
+			const offered = Array.isArray(names) ? names.find((t) => DISALLOWED_TOOLS.includes(String(t))) : void 0;
+			if (offered !== void 0) fail("disallowed", `a disallowed tool was offered: ${String(offered)}`);
+		};
+		const onAssistant = (e) => {
+			const message = e.message && typeof e.message === "object" ? e.message : {};
+			const top = !e.parent_tool_use_id;
+			const u = usageOf(message.usage);
+			if (typeof message.id === "string") messages.set(message.id, {
+				usage: u,
+				top
+			});
+			if (top && message.usage) context = u.input + u.cacheRead + u.cacheWrite + u.output;
+			for (const block of Array.isArray(message.content) ? message.content : []) {
+				if (block?.type !== "tool_use" || typeof block.name !== "string") continue;
+				if (DISALLOWED_TOOLS.includes(block.name)) return fail("disallowed", `a disallowed tool was used: ${block.name}`);
+				if (EXPLORING.has(block.name)) c.explored = true;
+				const file = block.input?.file_path;
+				if (block.name === "Read" && typeof file === "string" && o.root !== void 0) {
+					const relative = inside(o.root, file, o.platform);
+					if (relative) c.reads.add(relative);
+				}
+			}
+		};
+		const onResult = (e) => {
+			if (!(typeof e.num_turns === "number" && e.num_turns >= 1)) return;
+			if (e.is_error || e.subtype !== "success") {
+				fail("failed", `turn ${c.turns.length + 1} stopped with ${String(e.subtype ?? "an error")}${typeof e.result === "string" && e.result ? `: ${e.result}` : ""}`);
+				return;
+			}
+			const subagents = [...messages.values()].filter((m) => !m.top).reduce((sum, m) => add$1(sum, m.usage), zero$1());
+			const turn = {
+				text: typeof e.result === "string" ? e.result.trim() : "",
+				usage: add$1(usageOf(e.usage), subagents),
+				context
+			};
+			messages = /* @__PURE__ */ new Map();
+			c.turns.push(turn);
+			c.usage = add$1(c.usage, turn.usage);
+			const said = (s) => {
+				if (isDone) return;
+				if (s === null) {
+					child.stdin.end();
+					finish();
+				} else child.stdin.write(userTurn(s));
+			};
+			const told = next(turn);
+			if (told instanceof Promise) told.then(said, (err) => fail("failed", `the runner couldn't go on: ${err.message}`));
+			else said(told);
+		};
+		child.stdout.setEncoding("utf8").on("data", (piece) => {
+			buffer += piece;
+			let nl;
+			while (!isDone && (nl = buffer.indexOf("\n")) >= 0) {
+				const text = buffer.slice(0, nl).trim();
+				buffer = buffer.slice(nl + 1);
+				if (!text) continue;
+				let e;
+				try {
+					e = JSON.parse(text);
+				} catch {
+					continue;
+				}
+				if (!e || typeof e !== "object") continue;
+				if (e.type === "system" && e.subtype === "init") {
+					if (typeof e.model === "string" && e.model) c.model = e.model;
+					onTools(e.tools);
+					const problem = !isDone && c.model && o.check ? o.check(c.model) : null;
+					if (problem) fail("failed", problem);
+				} else if (e.type === "system" && e.subtype === "compact_boundary") {
+					c.compacted = true;
+					fail("compacted", "the session compacted");
+				} else if (e.type === "assistant") onAssistant(e);
+				else if (e.type === "result") onResult(e);
+			}
+		});
+		child.stderr.setEncoding("utf8").on("data", (piece) => stderr = (stderr + piece).slice(-2e3));
+		child.stdin.on("error", () => {});
+		child.on("error", (err) => fail("not-set-up", `couldn't run claude: ${err.message}`, false));
+		child.on("close", (code) => fail("failed", `claude exited${code === null ? "" : ` with code ${code}`} before its last turn ended${stderr.trim() ? `: ${stderr.trim().split("\n").slice(-3).join(" ")}` : ""}`, false));
+		child.stdin.write(userTurn(first));
+	});
+}
+//#endregion
+//#region src/runner/expert-checkout.ts
+const NO_LFS = { GIT_LFS_SKIP_SMUDGE: "1" };
+async function renamed(from, to) {
+	for (let n = 1;; n++) try {
+		return await fs.rename(from, to);
+	} catch (err) {
+		const code = err.code;
+		if (n >= 5 || code !== "EPERM" && code !== "EBUSY" && code !== "EACCES") throw err;
+		await new Promise((r) => setTimeout(r, 200));
+	}
+}
+/** Where a clone of `repo` borrows objects from: its own .git folder, since git won't borrow from a linked worktree (Orca's, say); the repo itself when git can't say. */
+async function borrowFrom(run, repo) {
+	const common = await run(repo, [
+		"rev-parse",
+		"--path-format=absolute",
+		"--git-common-dir"
+	]);
+	return common.code === 0 && common.stdout.trim() ? common.stdout.trim() : repo;
+}
+function createExpertCheckout({ git, repo, dir, name, timeoutMs, log, fetchSeconds = () => 60, now = Date.now, onFetchFailed, cloneFrom = onTheWire }) {
+	const read = path.join(dir, "read");
+	const staging = path.join(dir, "read.new");
+	let branch = null;
+	let fetchedAt = null;
+	const run = async (cwd, args, env) => git([...await noHooks(), ...args], {
+		cwd,
+		...env && { env },
+		timeoutMs: typeof timeoutMs === "number" ? timeoutMs : await timeoutMs()
+	});
+	const must = async (cwd, args, env) => {
+		const r = await run(cwd, args, env);
+		if (r.code !== 0) throw new Error(`git ${args.join(" ")} failed${r.timedOut ? " (it took too long)" : ""}: ${r.stderr.trim()}`);
+		return r.stdout.trim();
+	};
+	const ownClone = () => fs.lstat(path.join(read, ".git")).then((s) => s.isDirectory(), () => false);
+	const defaultBranch = async () => {
+		const remote = await run(repo, [
+			"ls-remote",
+			"--symref",
+			"origin",
+			"HEAD"
+		]);
+		const named = remote.code === 0 ? /^ref: refs\/heads\/(\S+)\s+HEAD$/m.exec(remote.stdout)?.[1] : void 0;
+		if (named) return named;
+		const local = await run(repo, [
+			"symbolic-ref",
+			"--short",
+			"refs/remotes/origin/HEAD"
+		]);
+		if (local.code === 0 && local.stdout.trim().startsWith("origin/")) return local.stdout.trim().slice(7);
+		throw new Error(`couldn't find origin's default branch in ${repo}: ${(remote.stderr || local.stderr).trim()}`);
+	};
+	const tracking = () => `refs/remotes/origin/${branch}`;
+	const originTip = () => must(read, [
+		"rev-parse",
+		"--verify",
+		`${tracking()}^{commit}`
+	]);
+	const fetchOrigin = async () => {
+		fetchedAt = now();
+		const r = await run(read, [
+			"fetch",
+			"--no-tags",
+			"origin",
+			`+refs/heads/${branch}:${tracking()}`
+		]);
+		if (r.code !== 0) {
+			const why = `${r.timedOut ? "git took too long" : "git failed"}: ${r.stderr.trim()}`;
+			log(`couldn't fetch origin ${branch} for expert ${name}, so it answers from its checkout as it is (${why})`);
+			onFetchFailed?.(why);
+		}
+		return r.code === 0;
+	};
+	const head = () => must(read, ["rev-parse", "HEAD"]);
+	return {
+		async prepare() {
+			const url = await must(repo, [
+				"remote",
+				"get-url",
+				"origin"
+			]);
+			if (!cloneFrom(url)) throw new Error(`${repo}'s origin, ${url}, isn't an https, ssh or host:path remote, so expert ${name} wasn't cloned from it: an expert never clones from a local path, a file:// URL or a \\\\server share`);
+			branch = await defaultBranch();
+			const st = await fs.lstat(read).catch(() => null);
+			if (!st || st.isDirectory() && (await fs.readdir(read)).length === 0) {
+				await fs.mkdir(dir, { recursive: true });
+				await fs.rm(staging, {
+					recursive: true,
+					force: true,
+					maxRetries: 5,
+					retryDelay: 200
+				});
+				const reference = await borrowFrom(run, repo);
+				await must(dir, [
+					"clone",
+					"-q",
+					"--no-checkout",
+					"--reference-if-able",
+					reference,
+					"--dissociate",
+					"--single-branch",
+					"--branch",
+					branch,
+					"--no-tags",
+					"--",
+					url,
+					staging
+				], NO_LFS);
+				await must(staging, [
+					"checkout",
+					"-q",
+					"--detach",
+					tracking()
+				], NO_LFS);
+				if (st) await fs.rmdir(read);
+				await renamed(staging, read);
+				fetchedAt = now();
+				return {
+					branch,
+					commit: await head()
+				};
+			}
+			if (!st.isDirectory() || !await ownClone()) throw new Error(`${read} is there already and isn't a clone of its own (a worktree of ${repo} from an earlier Isoplan, say), so it was left as it is. Remove it (a worktree with \`git worktree remove --force ${read}\` in ${repo}), and the expert clones it again for its next question or at the runner's next start`);
+			await must(read, [
+				"remote",
+				"set-url",
+				"origin",
+				url
+			]);
+			if (!await fetchOrigin()) await originTip();
+			return {
+				branch,
+				commit: await head()
+			};
+		},
+		async fetch() {
+			if (fetchedAt === null || now() - fetchedAt >= fetchSeconds() * 1e3) await fetchOrigin();
+			const tip = await run(read, [
+				"rev-parse",
+				"--verify",
+				`${tracking()}^{commit}`
+			]);
+			if (tip.code !== 0) return null;
+			const commit = tip.stdout.trim();
+			return commit === await head() ? null : commit;
+		},
+		async move(commit) {
+			await must(read, [
+				"checkout",
+				"-q",
+				"--detach",
+				"--force",
+				commit
+			], NO_LFS);
+		},
+		head,
+		async dirty() {
+			const r = await run(read, ["status", "--porcelain"]);
+			return r.code !== 0 || r.stdout.trim() !== "";
+		},
+		async reset() {
+			await must(read, [
+				"reset",
+				"-q",
+				"--hard",
+				"HEAD"
+			], NO_LFS);
+			await must(read, ["clean", "-fd"]);
+		},
+		async changed(index) {
+			const byCommit = /* @__PURE__ */ new Map();
+			for (const [file, commit] of Object.entries(index)) byCommit.set(commit, [...byCommit.get(commit) ?? [], file]);
+			const out = /* @__PURE__ */ new Set();
+			for (const [commit, files] of byCommit) {
+				const r = await run(read, [
+					"diff",
+					"--name-only",
+					`${commit}..HEAD`
+				]);
+				const names = new Set(r.code === 0 ? r.stdout.split(/\r?\n/).filter(Boolean) : files);
+				for (const file of files) if (names.has(file)) out.add(file);
+			}
+			return out;
+		},
+		async remove() {
+			if (!await ownClone()) {
+				if (await fs.lstat(read).then(() => true, () => false)) log(`left ${read} as it is: it isn't expert ${name}'s own clone`);
+				return;
+			}
+			await fs.rm(read, {
+				recursive: true,
+				force: true,
+				maxRetries: 5,
+				retryDelay: 200
+			});
+			log(`removed expert ${name}'s clone of ${repo}`);
+		},
+		async list(folder) {
+			return (await fs.readdir(path.join(read, ...folder.split("/")), { withFileTypes: true }).catch(() => [])).filter((e) => e.isFile()).map((e) => e.name).sort();
+		},
+		async read(file, max) {
+			const real = await fs.realpath(path.join(read, ...file.split("/"))).catch(() => null);
+			if (real === null || inside(await fs.realpath(read), real) === null) return null;
+			const text = await fs.readFile(real, "utf8").catch(() => null);
+			return text === null ? null : text.slice(0, max);
+		},
+		has: (file) => fs.stat(path.join(read, ...file.split("/"))).then((s) => s.isFile(), () => false)
+	};
+}
+//#endregion
+//#region src/runner/isoplan-clone.ts
+const NO_REMOTE = "This repo has no remote, so Isoplan can't keep a copy of its own and nothing was started.";
+const NOT_ON_WIRE = "This repo's remote is a folder or a share, not an https or ssh address, so Isoplan can't keep a copy of its own and nothing was started.";
+const NOT_MADE = "Isoplan's own copy of this repo couldn't be made on this computer, so nothing was started. Its runner log says why.";
+const NOT_FETCHED = "Isoplan's own copy of this repo couldn't be brought up to date on this computer, so nothing was started. Its runner log says why.";
+/** Where Isoplan keeps its clones. */
+const clonesDir = (claudeDir) => path.join(claudeDir, "isoplan", "clones");
+/** A project id as a folder's name: letters, digits, . _ - kept, the rest as -, cut short, then a hash of the id, so two ids never share one. */
+function cloneName(project) {
+	const id = project.toLowerCase();
+	return `${id.replace(/[^a-z0-9._-]+/g, "-").replace(/^[.-]+|[.-]+$/g, "").slice(0, 60) || "repo"}-${createHash("sha256").update(id).digest("hex").slice(0, 8)}`;
+}
+function createIsoplanClones({ git, claudeDir, timeoutMs, log, cloneFrom = onTheWire }) {
+	const busy = /* @__PURE__ */ new Map();
+	const run = async (cwd, args) => git(args, {
+		cwd,
+		timeoutMs: await timeoutMs()
+	});
+	const why = (r) => `${r.timedOut ? "git took too long" : "git failed"}: ${r.stderr.trim()}`;
+	async function ready(checkout, project) {
+		const remote = await run(checkout, [
+			"remote",
+			"get-url",
+			"origin"
+		]);
+		if (remote.code === 2) return { problem: NO_REMOTE };
+		if (remote.code !== 0) {
+			log(`couldn't read the origin of ${checkout} for Isoplan's own clone of ${project} (${why(remote)})`);
+			return { problem: NOT_MADE };
+		}
+		const url = remote.stdout.trim();
+		if (!cloneFrom(url)) {
+			log(`didn't clone ${project} for a hidden start: ${checkout}'s origin, ${url}, isn't an https, ssh or host:path remote`);
+			return { problem: NOT_ON_WIRE };
+		}
+		const root = clonesDir(claudeDir);
+		const clone = path.join(root, cloneName(project));
+		if (await fs.lstat(clone).catch(() => null)) {
+			if (!await fs.lstat(path.join(clone, ".git")).then((s) => s.isDirectory(), () => false)) {
+				log(`${clone} is there already and isn't a clone of its own, so it was left as it is and the hidden start of ${project} was refused; remove it and Isoplan clones it again`);
+				return { problem: NOT_MADE };
+			}
+			const set = await run(clone, [
+				"remote",
+				"set-url",
+				"origin",
+				url
+			]);
+			const fetched = set.code === 0 ? await run(clone, [
+				"fetch",
+				"origin",
+				"+refs/heads/*:refs/remotes/origin/*"
+			]) : set;
+			if (fetched.code !== 0) {
+				log(`couldn't fetch origin in Isoplan's own clone ${clone} (${why(fetched)})`);
+				return { problem: NOT_FETCHED };
+			}
+			return clone;
+		}
+		const staging = `${clone}.new`;
+		await fs.mkdir(root, { recursive: true });
+		await fs.rm(staging, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 200
+		});
+		const made = await run(root, [
+			"clone",
+			"-q",
+			"--reference-if-able",
+			await borrowFrom(run, checkout),
+			"--dissociate",
+			"--",
+			url,
+			staging
+		]);
+		if (made.code !== 0) {
+			log(`couldn't clone ${project} into ${staging} for a hidden start (${why(made)})`);
+			await fs.rm(staging, {
+				recursive: true,
+				force: true,
+				maxRetries: 5,
+				retryDelay: 200
+			}).catch(() => {});
+			return { problem: NOT_MADE };
+		}
+		await renamed(staging, clone);
+		log(`made Isoplan's own clone of ${project} in ${clone}`);
+		return clone;
+	}
+	return (checkout, project) => {
+		const key = cloneName(project);
+		const next = (busy.get(key) ?? Promise.resolve()).then(() => ready(checkout, project)).catch((err) => {
+			log(`Isoplan's own clone of ${project} failed: ${err?.stack ?? String(err)}`);
+			return { problem: NOT_MADE };
+		});
+		busy.set(key, next);
+		next.then(() => busy.get(key) === next && busy.delete(key));
+		return next;
 	};
 }
 //#endregion
@@ -15044,6 +15697,12 @@ const driven = {
 function createDriver(o) {
 	const now = o.now ?? Date.now;
 	const spawn = o.spawn ?? hiddenSpawn;
+	const isoplanClone = o.isoplanClone ?? createIsoplanClones({
+		git: createRunGit(),
+		claudeDir: o.claudeDir,
+		timeoutMs: async () => (await o.settings()).gitTimeoutSeconds * 1e3,
+		log: o.log
+	});
 	const env = o.env ?? process.env;
 	const newId = o.newId ?? randomUUID;
 	const platform = o.platform ?? process.platform;
@@ -15635,13 +16294,20 @@ function createDriver(o) {
 			folder = own !== void 0 && await office.home(own).catch(() => null) === project ? own : null;
 			if (!folder) return refuse(server, m.id, "no-folder", { detail: NOT_LISTED });
 			if (m.branch !== void 0 && !repo.branches.has(m.branch)) return refuse(server, m.id, "no-folder", { detail: BRANCH_NOT_LISTED });
-			if (elsewhere) return startElsewhere(server, m, elsewhere, folder, bin);
-			if (m.branch !== void 0) {
+			if (!elsewhere && (m.hidden || m.branch !== void 0)) {
 				const cap = capOf(await o.settings());
 				if (heldIn(project) >= cap) return refuse(server, m.id, "cap-reached", {
 					limit: cap,
 					detail: capReached(cap)
 				});
+			}
+			if (m.hidden) {
+				const clone = await isoplanClone(folder, project);
+				if (typeof clone !== "string") return refuse(server, m.id, "unavailable", { detail: clone.problem });
+				folder = clone;
+			}
+			if (elsewhere) return startElsewhere(server, m, elsewhere, folder, bin);
+			if (m.branch !== void 0) {
 				const made = await office.branchFolder(folder, m.branch).catch((err) => ({ error: err?.stack ?? String(err) }));
 				if (typeof made !== "string") {
 					o.log(`start ${m.id}: no folder for branch ${m.branch} of ${folder}: ${made.error}`);
@@ -16561,7 +17227,7 @@ const updateLockPath = (claudeDir) => path.join(claudeDir, "isoplan", "update.lo
 const START_GAP_MS = 6e5;
 /** The most each `claude plugin` command may take. */
 const COMMAND_TIMEOUT_MS = 3e5;
-const EXIT_GRACE_MS$1 = 1e3;
+const EXIT_GRACE_MS = 1e3;
 /** The variables that turn updates off, and the one that turns plugin updates back on. */
 const OFF_VARIABLES = [
 	"DISABLE_UPDATES",
@@ -16667,7 +17333,7 @@ function runHidden(argv, cwd, { env = commandEnv(process.env), timeoutMs = COMMA
 				code,
 				output
 			};
-			const grace = setTimeout(done, EXIT_GRACE_MS$1);
+			const grace = setTimeout(done, EXIT_GRACE_MS);
 			child.on("close", () => (clearTimeout(grace), done()));
 		});
 	});
@@ -18551,7 +19217,6 @@ function expertText(code, a) {
 				return `queued: ${machineOf(a.host)} isn't connected. The answer arrives in this session when it reconnects, or a note says it was dropped and why. Carry on`;
 			case "EXPERT_STARTING": return "the expert is starting a new generation, and answers once the new junior's grounding is done, which takes longer. Carry on: the answer arrives as a note";
 			case "EXPERT_FORK_FAILED": return `the expert couldn't answer: ${a.words ?? "its fork failed"}. Ask a fresh Explore subagent instead`;
-			case "EXPERT_ANSWER_WITHHELD": return `the answer is held on ${machineOf(a.host)} until its owner releases it. Explore this yourself meanwhile; a later note follows if it is released`;
 			case "EXPERT_DROPPED": return `dropped: ${a.words ?? "it waited too long"}, so no answer will come. Explore it yourself, and ask again if it still matters`;
 		}
 	})()} (${code})`;
@@ -18612,22 +19277,40 @@ async function askExpertThrough(open, a, o) {
 			code: "EXPERT_RUNNER_UNREACHABLE"
 		};
 	}
+	const close = async () => {
+		const closing = link.close();
+		if (!a.blocking) await closing;
+	};
+	let told;
 	try {
-		return await askExpert(link, a, o);
+		told = await askExpert(link, a, o);
 	} catch (err) {
+		await close();
 		if (err instanceof TokenExpired) throw err;
 		return { text: mayBeAskedText({
 			expert: a.expert,
 			id: a.key,
 			words: `the link to the office server failed: ${String(err?.message ?? err)}`
 		}) };
-	} finally {
-		const close = link.close();
-		if (!a.blocking) await close;
 	}
+	const { shown } = told;
+	if (!shown) {
+		await close();
+		return told;
+	}
+	return {
+		...told,
+		shown: async (written) => {
+			try {
+				await shown(written);
+			} finally {
+				await close();
+			}
+		}
+	};
 }
 const isAsked = (id) => (m) => m.type === "asked" && (id === null || m.question === id);
-/** What the agent is told: the answer, where the question stands, or why it failed (`failed`, with its code). */
+/** What the agent is told: the answer, where the question stands, or why it failed (`failed`, with its code); an end with its `shown`. */
 async function askExpert(link, a, { deadline, now = Date.now, pollMs = 2e3 }) {
 	const left = () => a.blocking ? deadline - now() : ANSWER_MS;
 	const about = (id, more = {}) => ({
@@ -18675,13 +19358,25 @@ async function askExpert(link, a, { deadline, now = Date.now, pollMs = 2e3 }) {
 			latest = checked;
 		}
 	} catch {}
+	if (latest.state === "withheld") latest = {
+		...latest,
+		state: "dropped"
+	};
 	const told = tell(latest, about(id, { host: latest.owner }), a.blocking);
-	if (latest.state === "answered" || latest.state === "dropped" || latest.state === "withheld") link.send({
-		type: "asked-ack",
-		v: 1,
-		question: id
-	});
-	return told;
+	if (latest.state !== "answered" && latest.state !== "dropped") return told;
+	return {
+		...told,
+		shown: async (written) => {
+			if (!written) return;
+			try {
+				link.send({
+					type: "asked-ack",
+					v: 1,
+					question: id
+				});
+			} catch {}
+		}
+	};
 }
 const waits = (m) => m.state === "asking" && m.code !== "EXPERT_STARTING";
 function tell(m, about, blocking) {
@@ -18692,7 +19387,8 @@ function tell(m, about, blocking) {
 			commit: m.commit,
 			branch: m.branch
 		}) };
-		case "dropped": {
+		case "dropped":
+		case "withheld": {
 			const code = m.code ?? "EXPERT_DROPPED";
 			return {
 				text: expertText(code, {
@@ -18703,11 +19399,6 @@ function tell(m, about, blocking) {
 				code
 			};
 		}
-		case "withheld": return {
-			text: expertText("EXPERT_ANSWER_WITHHELD", about),
-			failed: true,
-			code: "EXPERT_ANSWER_WITHHELD"
-		};
 		case "queued": {
 			const code = m.code === "EXPERT_STARTING" ? "EXPERT_STARTING" : "EXPERT_QUEUED";
 			return {
@@ -18804,253 +19495,6 @@ function within(p, ms) {
 	return new Promise((resolve, reject) => {
 		const timer = setTimeout(() => resolve(null), ms);
 		p.then((value) => (clearTimeout(timer), resolve({ value })), (err) => (clearTimeout(timer), reject(err)));
-	});
-}
-//#endregion
-//#region src/runner/expert-claude.ts
-/** The only tools a trunk or fork is offered. */
-const READ_TOOLS = [
-	"Read",
-	"Grep",
-	"Glob",
-	"Agent"
-];
-/** Tools that end a trunk or fork at once when offered or used. */
-const DISALLOWED_TOOLS = [
-	"Bash",
-	"PowerShell",
-	"Edit",
-	"Write",
-	"NotebookEdit",
-	"WebFetch",
-	"WebSearch"
-];
-const EXPLORING = /* @__PURE__ */ new Set([...READ_TOOLS, "Task"]);
-const READ_ONLY = [
-	"--tools",
-	READ_TOOLS.join(","),
-	"--disallowedTools",
-	DISALLOWED_TOOLS.join(","),
-	"--setting-sources",
-	"",
-	"--strict-mcp-config",
-	"--permission-mode",
-	"dontAsk",
-	"--autocompact",
-	"1000000"
-];
-const STREAM = [
-	"--input-format",
-	"stream-json",
-	"--output-format",
-	"stream-json",
-	"--verbose"
-];
-const EXIT_GRACE_MS = 5e3;
-/** A new trunk's grounding: it is saved under `trunk`. */
-const trunkArgs = (trunk, model) => [
-	"-p",
-	"--session-id",
-	trunk,
-	"--model",
-	model,
-	...READ_ONLY,
-	...STREAM
-];
-/** One turn appended to a trunk: a learned note. */
-const appendArgs = (trunk, model) => [
-	"-p",
-	"--resume",
-	trunk,
-	"--model",
-	model,
-	...READ_ONLY,
-	...STREAM
-];
-/** A fork of a trunk for one question, never saved. */
-const expertForkArgs = (trunk, model) => [
-	"-p",
-	"--resume",
-	trunk,
-	"--fork-session",
-	"--no-session-persistence",
-	"--model",
-	model,
-	...READ_ONLY,
-	...STREAM
-];
-/** The proof's judge: no tools, never saved. */
-const judgeArgs = (model) => [
-	"-p",
-	"--no-session-persistence",
-	"--tools",
-	"",
-	"--setting-sources",
-	"",
-	"--strict-mcp-config",
-	"--permission-mode",
-	"dontAsk",
-	"--model",
-	model,
-	...STREAM
-];
-/**
-* `file` relative to `root` with forward slashes, or null when it isn't under it. Both are resolved
-* (a relative `file` against `root`) and compared lower-case on Windows. `root` itself is "".
-*/
-function inside(root, file, platform = process.platform) {
-	const p = platform === "win32" ? path.win32 : path.posix;
-	const slashed = (x) => x.replace(/\\/g, "/").replace(/\/+$/, "");
-	const r = slashed(p.resolve(root));
-	const f = slashed(p.resolve(root, file));
-	const [rk, fk] = platform === "win32" ? [r.toLowerCase(), f.toLowerCase()] : [r, f];
-	if (fk === rk) return "";
-	return fk.startsWith(rk + "/") ? f.slice(r.length + 1) : null;
-}
-const zero$1 = () => ({
-	input: 0,
-	output: 0,
-	cacheRead: 0,
-	cacheWrite: 0
-});
-const add$1 = (a, b) => ({
-	input: a.input + b.input,
-	output: a.output + b.output,
-	cacheRead: a.cacheRead + b.cacheRead,
-	cacheWrite: a.cacheWrite + b.cacheWrite
-});
-const usageOf = (u) => {
-	const o = u && typeof u === "object" ? u : {};
-	const n = (key) => Number.isFinite(o[key]) ? o[key] : 0;
-	return {
-		input: n("input_tokens"),
-		output: n("output_tokens"),
-		cacheRead: n("cache_read_input_tokens"),
-		cacheWrite: n("cache_creation_input_tokens")
-	};
-};
-/**
-* Runs a conversation over a started process: `first` is turn 1, and after each turn `next` gives
-* the next user turn, or null to close stdin and settle; it may take its time (a junior waiting on
-* its senior), with the time limit still running. Settles with a failure on a disallowed
-* tool, a compaction, an error result, an early exit, or `timeoutMs` for the whole conversation,
-* ending the process tree for each but an early exit.
-*/
-function converse(child, first, next, timeoutMs, o = {}) {
-	return new Promise((resolve) => {
-		const c = {
-			ok: false,
-			turns: [],
-			usage: zero$1(),
-			reads: /* @__PURE__ */ new Set(),
-			explored: false,
-			compacted: false
-		};
-		let messages = /* @__PURE__ */ new Map();
-		let context = 0;
-		let buffer = "";
-		let stderr = "";
-		let isDone = false;
-		const finish = (failure) => {
-			if (isDone) return;
-			isDone = true;
-			clearTimeout(timer);
-			if (failure) {
-				c.failure = failure;
-				c.usage = add$1(c.usage, [...messages.values()].reduce((sum, m) => add$1(sum, m.usage), zero$1()));
-			} else c.ok = true;
-			resolve(c);
-			setTimeout(() => killTree(child), EXIT_GRACE_MS).unref();
-		};
-		const fail = (kind, detail, kill = true) => {
-			finish({
-				kind,
-				detail
-			});
-			if (kill) killTree(child);
-		};
-		const timer = setTimeout(() => fail("timed-out", `no reply within ${Math.round(timeoutMs / 1e3)} s`), timeoutMs);
-		const onTools = (names) => {
-			const offered = Array.isArray(names) ? names.find((t) => DISALLOWED_TOOLS.includes(String(t))) : void 0;
-			if (offered !== void 0) fail("disallowed", `a disallowed tool was offered: ${String(offered)}`);
-		};
-		const onAssistant = (e) => {
-			const message = e.message && typeof e.message === "object" ? e.message : {};
-			const top = !e.parent_tool_use_id;
-			const u = usageOf(message.usage);
-			if (typeof message.id === "string") messages.set(message.id, {
-				usage: u,
-				top
-			});
-			if (top && message.usage) context = u.input + u.cacheRead + u.cacheWrite + u.output;
-			for (const block of Array.isArray(message.content) ? message.content : []) {
-				if (block?.type !== "tool_use" || typeof block.name !== "string") continue;
-				if (DISALLOWED_TOOLS.includes(block.name)) return fail("disallowed", `a disallowed tool was used: ${block.name}`);
-				if (EXPLORING.has(block.name)) c.explored = true;
-				const file = block.input?.file_path;
-				if (block.name === "Read" && typeof file === "string" && o.root !== void 0) {
-					const relative = inside(o.root, file, o.platform);
-					if (relative) c.reads.add(relative);
-				}
-			}
-		};
-		const onResult = (e) => {
-			if (!(typeof e.num_turns === "number" && e.num_turns >= 1)) return;
-			if (e.is_error || e.subtype !== "success") {
-				fail("failed", `turn ${c.turns.length + 1} stopped with ${String(e.subtype ?? "an error")}${typeof e.result === "string" && e.result ? `: ${e.result}` : ""}`);
-				return;
-			}
-			const subagents = [...messages.values()].filter((m) => !m.top).reduce((sum, m) => add$1(sum, m.usage), zero$1());
-			const turn = {
-				text: typeof e.result === "string" ? e.result.trim() : "",
-				usage: add$1(usageOf(e.usage), subagents),
-				context
-			};
-			messages = /* @__PURE__ */ new Map();
-			c.turns.push(turn);
-			c.usage = add$1(c.usage, turn.usage);
-			const said = (s) => {
-				if (isDone) return;
-				if (s === null) {
-					child.stdin.end();
-					finish();
-				} else child.stdin.write(userTurn(s));
-			};
-			const told = next(turn);
-			if (told instanceof Promise) told.then(said, (err) => fail("failed", `the runner couldn't go on: ${err.message}`));
-			else said(told);
-		};
-		child.stdout.setEncoding("utf8").on("data", (piece) => {
-			buffer += piece;
-			let nl;
-			while (!isDone && (nl = buffer.indexOf("\n")) >= 0) {
-				const text = buffer.slice(0, nl).trim();
-				buffer = buffer.slice(nl + 1);
-				if (!text) continue;
-				let e;
-				try {
-					e = JSON.parse(text);
-				} catch {
-					continue;
-				}
-				if (!e || typeof e !== "object") continue;
-				if (e.type === "system" && e.subtype === "init") {
-					if (typeof e.model === "string" && e.model) c.model = e.model;
-					onTools(e.tools);
-					const problem = !isDone && c.model && o.check ? o.check(c.model) : null;
-					if (problem) fail("failed", problem);
-				} else if (e.type === "system" && e.subtype === "compact_boundary") {
-					c.compacted = true;
-					fail("compacted", "the session compacted");
-				} else if (e.type === "assistant") onAssistant(e);
-				else if (e.type === "result") onResult(e);
-			}
-		});
-		child.stderr.setEncoding("utf8").on("data", (piece) => stderr = (stderr + piece).slice(-2e3));
-		child.stdin.on("error", () => {});
-		child.on("error", (err) => fail("not-set-up", `couldn't run claude: ${err.message}`, false));
-		child.on("close", (code) => fail("failed", `claude exited${code === null ? "" : ` with code ${code}`} before its last turn ended${stderr.trim() ? `: ${stderr.trim().split("\n").slice(-3).join(" ")}` : ""}`, false));
-		child.stdin.write(userTurn(first));
 	});
 }
 //#endregion
@@ -19189,6 +19633,7 @@ function parse(value, base) {
 //#region src/runner/expert-files.ts
 function watchExpertFiles({ dir, lookMs = 5e3, read = (file) => fs.readFile(file, "utf8"), log, onChange }) {
 	const known = /* @__PURE__ */ new Map();
+	const missing = /* @__PURE__ */ new Set();
 	let stopped = false;
 	let timer = null;
 	let said = "";
@@ -19238,7 +19683,15 @@ function watchExpertFiles({ dir, lookMs = 5e3, read = (file) => fs.readFile(file
 			});
 		}
 		for (const name of [...known.keys()]) {
-			if (present.has(name)) continue;
+			if (present.has(name)) {
+				missing.delete(name);
+				continue;
+			}
+			if (!missing.has(name)) {
+				missing.add(name);
+				continue;
+			}
+			missing.delete(name);
 			known.delete(name);
 			onChange({
 				name,
@@ -19317,213 +19770,6 @@ function expertOverCap(entries, asker, open, expected, now, caps, weights) {
 		...day.length && { frees: oldest(day) }
 	};
 	return null;
-}
-//#endregion
-//#region src/runner/expert-checkout.ts
-const NO_LFS = { GIT_LFS_SKIP_SMUDGE: "1" };
-async function renamed(from, to) {
-	for (let n = 1;; n++) try {
-		return await fs.rename(from, to);
-	} catch (err) {
-		const code = err.code;
-		if (n >= 5 || code !== "EPERM" && code !== "EBUSY" && code !== "EACCES") throw err;
-		await new Promise((r) => setTimeout(r, 200));
-	}
-}
-function createExpertCheckout({ git, repo, dir, name, timeoutMs, log, fetchSeconds = () => 60, now = Date.now, onFetchFailed, cloneFrom = onTheWire }) {
-	const read = path.join(dir, "read");
-	const staging = path.join(dir, "read.new");
-	let branch = null;
-	let fetchedAt = null;
-	const run = async (cwd, args, env) => git([...await noHooks(), ...args], {
-		cwd,
-		...env && { env },
-		timeoutMs: typeof timeoutMs === "number" ? timeoutMs : await timeoutMs()
-	});
-	const must = async (cwd, args, env) => {
-		const r = await run(cwd, args, env);
-		if (r.code !== 0) throw new Error(`git ${args.join(" ")} failed${r.timedOut ? " (it took too long)" : ""}: ${r.stderr.trim()}`);
-		return r.stdout.trim();
-	};
-	const ownClone = () => fs.lstat(path.join(read, ".git")).then((s) => s.isDirectory(), () => false);
-	const defaultBranch = async () => {
-		const remote = await run(repo, [
-			"ls-remote",
-			"--symref",
-			"origin",
-			"HEAD"
-		]);
-		const named = remote.code === 0 ? /^ref: refs\/heads\/(\S+)\s+HEAD$/m.exec(remote.stdout)?.[1] : void 0;
-		if (named) return named;
-		const local = await run(repo, [
-			"symbolic-ref",
-			"--short",
-			"refs/remotes/origin/HEAD"
-		]);
-		if (local.code === 0 && local.stdout.trim().startsWith("origin/")) return local.stdout.trim().slice(7);
-		throw new Error(`couldn't find origin's default branch in ${repo}: ${(remote.stderr || local.stderr).trim()}`);
-	};
-	const tracking = () => `refs/remotes/origin/${branch}`;
-	const originTip = () => must(read, [
-		"rev-parse",
-		"--verify",
-		`${tracking()}^{commit}`
-	]);
-	const fetchOrigin = async () => {
-		fetchedAt = now();
-		const r = await run(read, [
-			"fetch",
-			"--no-tags",
-			"origin",
-			`+refs/heads/${branch}:${tracking()}`
-		]);
-		if (r.code !== 0) {
-			const why = `${r.timedOut ? "git took too long" : "git failed"}: ${r.stderr.trim()}`;
-			log(`couldn't fetch origin ${branch} for expert ${name}, so it answers from its checkout as it is (${why})`);
-			onFetchFailed?.(why);
-		}
-		return r.code === 0;
-	};
-	const head = () => must(read, ["rev-parse", "HEAD"]);
-	return {
-		async prepare() {
-			const url = await must(repo, [
-				"remote",
-				"get-url",
-				"origin"
-			]);
-			if (!cloneFrom(url)) throw new Error(`${repo}'s origin, ${url}, isn't an https, ssh or host:path remote, so expert ${name} wasn't cloned from it: an expert never clones from a local path, a file:// URL or a \\\\server share`);
-			branch = await defaultBranch();
-			const st = await fs.lstat(read).catch(() => null);
-			if (!st || st.isDirectory() && (await fs.readdir(read)).length === 0) {
-				await fs.mkdir(dir, { recursive: true });
-				await fs.rm(staging, {
-					recursive: true,
-					force: true,
-					maxRetries: 5,
-					retryDelay: 200
-				});
-				const common = await run(repo, [
-					"rev-parse",
-					"--path-format=absolute",
-					"--git-common-dir"
-				]);
-				const reference = common.code === 0 && common.stdout.trim() ? common.stdout.trim() : repo;
-				await must(dir, [
-					"clone",
-					"-q",
-					"--no-checkout",
-					"--reference-if-able",
-					reference,
-					"--dissociate",
-					"--single-branch",
-					"--branch",
-					branch,
-					"--no-tags",
-					"--",
-					url,
-					staging
-				], NO_LFS);
-				await must(staging, [
-					"checkout",
-					"-q",
-					"--detach",
-					tracking()
-				], NO_LFS);
-				if (st) await fs.rmdir(read);
-				await renamed(staging, read);
-				fetchedAt = now();
-				return {
-					branch,
-					commit: await head()
-				};
-			}
-			if (!st.isDirectory() || !await ownClone()) throw new Error(`${read} is there already and isn't a clone of its own (a worktree of ${repo} from an earlier Isoplan, say), so it was left as it is. Remove it (a worktree with \`git worktree remove --force ${read}\` in ${repo}), and the expert clones it again for its next question or at the runner's next start`);
-			await must(read, [
-				"remote",
-				"set-url",
-				"origin",
-				url
-			]);
-			if (!await fetchOrigin()) await originTip();
-			return {
-				branch,
-				commit: await head()
-			};
-		},
-		async fetch() {
-			if (fetchedAt === null || now() - fetchedAt >= fetchSeconds() * 1e3) await fetchOrigin();
-			const tip = await run(read, [
-				"rev-parse",
-				"--verify",
-				`${tracking()}^{commit}`
-			]);
-			if (tip.code !== 0) return null;
-			const commit = tip.stdout.trim();
-			return commit === await head() ? null : commit;
-		},
-		async move(commit) {
-			await must(read, [
-				"checkout",
-				"-q",
-				"--detach",
-				"--force",
-				commit
-			], NO_LFS);
-		},
-		head,
-		async dirty() {
-			const r = await run(read, ["status", "--porcelain"]);
-			return r.code !== 0 || r.stdout.trim() !== "";
-		},
-		async reset() {
-			await must(read, [
-				"reset",
-				"-q",
-				"--hard",
-				"HEAD"
-			], NO_LFS);
-			await must(read, ["clean", "-fd"]);
-		},
-		async changed(index) {
-			const byCommit = /* @__PURE__ */ new Map();
-			for (const [file, commit] of Object.entries(index)) byCommit.set(commit, [...byCommit.get(commit) ?? [], file]);
-			const out = /* @__PURE__ */ new Set();
-			for (const [commit, files] of byCommit) {
-				const r = await run(read, [
-					"diff",
-					"--name-only",
-					`${commit}..HEAD`
-				]);
-				const names = new Set(r.code === 0 ? r.stdout.split(/\r?\n/).filter(Boolean) : files);
-				for (const file of files) if (names.has(file)) out.add(file);
-			}
-			return out;
-		},
-		async remove() {
-			if (!await ownClone()) {
-				if (await fs.lstat(read).then(() => true, () => false)) log(`left ${read} as it is: it isn't expert ${name}'s own clone`);
-				return;
-			}
-			await fs.rm(read, {
-				recursive: true,
-				force: true,
-				maxRetries: 5,
-				retryDelay: 200
-			});
-			log(`removed expert ${name}'s clone of ${repo}`);
-		},
-		async list(folder) {
-			return (await fs.readdir(path.join(read, ...folder.split("/")), { withFileTypes: true }).catch(() => [])).filter((e) => e.isFile()).map((e) => e.name).sort();
-		},
-		async read(file, max) {
-			const real = await fs.realpath(path.join(read, ...file.split("/"))).catch(() => null);
-			if (real === null || inside(await fs.realpath(read), real) === null) return null;
-			const text = await fs.readFile(real, "utf8").catch(() => null);
-			return text === null ? null : text.slice(0, max);
-		},
-		has: (file) => fs.stat(path.join(read, ...file.split("/"))).then((s) => s.isFile(), () => false)
-	};
 }
 //#endregion
 //#region src/runner/expert-lock.ts
@@ -19818,6 +20064,12 @@ function fingerprint(file) {
 const REMEMBER = 200;
 const JUDGE_MS = 12e4;
 const GROUNDING_FILE_MAX = 1e5;
+const RETRY_MINUTES = [
+	10,
+	30,
+	90
+];
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** What a fork that asks for a senior it hasn't got is told: the block is never honoured there. */
 const NO_SENIOR = "ask-senior isn't available here; answer from your own context";
 /** What a junior asking its senior a third time for one question is told. */
@@ -19897,6 +20149,8 @@ function createExpert(o) {
 	const finished = /* @__PURE__ */ new Map();
 	const waiters = /* @__PURE__ */ new Set();
 	const transcripts = /* @__PURE__ */ new Map();
+	const live = /* @__PURE__ */ new Map();
+	const discarded = /* @__PURE__ */ new Set();
 	let saved = {
 		version: 1,
 		fingerprint: "",
@@ -19913,6 +20167,9 @@ function createExpert(o) {
 	let lastFailed = false;
 	let lastFailure = "other";
 	let promotionBlocked = false;
+	let retries = 0;
+	let retryTimer = null;
+	let resetPending = false;
 	let stopped = false;
 	let epoch = 0;
 	let busy = 0;
@@ -19939,7 +20196,8 @@ function createExpert(o) {
 		name,
 		repo: file.repo,
 		subject: file.subject,
-		state: state()
+		state: state(),
+		senior: !!gen("junior") && !!gen("senior")
 	});
 	function changed() {
 		for (const wake of [...waiters]) wake();
@@ -20012,7 +20270,8 @@ function createExpert(o) {
 				cwd,
 				env: {
 					...forkEnv(env),
-					CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1"
+					CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
+					CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1"
 				}
 			});
 		} catch (err) {
@@ -20020,7 +20279,17 @@ function createExpert(o) {
 		}
 		children.add(child);
 		kids?.add(child);
-		child.on("close", () => (children.delete(child), kids?.delete(child)));
+		if (trunk) live.set(trunk, (live.get(trunk) ?? 0) + 1);
+		child.on("close", () => {
+			children.delete(child);
+			kids?.delete(child);
+			if (!trunk) return;
+			const left = live.get(trunk) - 1;
+			if (left) live.set(trunk, left);
+			else live.delete(trunk);
+			const g = saved.generations.find((x) => x.trunk === trunk);
+			if (g) discardIfDone(g);
+		});
 		if (trunk) o.track?.(child, {
 			kind: "fork",
 			session: `claude-code:${trunk}`,
@@ -20056,6 +20325,31 @@ function createExpert(o) {
 		});
 		log(`generation ${g.n} failed: ${why}`);
 		save();
+		discardIfDone(g);
+	}
+	function discardIfDone(g) {
+		if (g.state !== "retired" && g.state !== "failed" || live.has(g.trunk) || discarded.has(g.trunk)) return;
+		discarded.add(g.trunk);
+		discard(g);
+	}
+	async function discard(g) {
+		indexes.delete(g.n);
+		const n = g.n;
+		saving = saving.then(() => fs.rm(indexPath(o.dir, n), { force: true })).catch((err) => log(`couldn't delete generation ${n}'s index: ${err.message}`));
+		if (!UUID.test(g.trunk)) return;
+		const transcript = await transcriptOf(g.trunk);
+		transcripts.delete(g.trunk);
+		if (!transcript) return;
+		try {
+			await fs.rm(transcript, { force: true });
+			await fs.rm(path.join(path.dirname(transcript), g.trunk), {
+				recursive: true,
+				force: true
+			});
+			log(`deleted generation ${n}'s trunk transcript, as it is ${g.state}`);
+		} catch (err) {
+			log(`couldn't delete generation ${n}'s trunk transcript: ${err.message}`);
+		}
 	}
 	function brokeGeneration(g, why) {
 		const wasJunior = g.state === "junior";
@@ -20066,6 +20360,7 @@ function createExpert(o) {
 	/** Grounds a new generation and asks its proof question; one that passes becomes the junior. */
 	async function ground() {
 		if (groundingRun || stopped) return;
+		clearRetry();
 		const mine = epoch;
 		const f = file;
 		const fp = fingerprint(f);
@@ -20074,8 +20369,10 @@ function createExpert(o) {
 		lastFailed = false;
 		changed();
 		let passed = null;
+		let retry = null;
+		const failure = { repeats: false };
 		try {
-			if (!await prepare()) return void (lastFailed = true, lastFailure = "checkout");
+			if (!await prepare()) return void (lastFailed = true, lastFailure = "checkout", retry = true);
 			if (mine !== epoch) return;
 			const n = Math.max(0, ...saved.generations.map((g) => g.n)) + 1;
 			const g = {
@@ -20094,7 +20391,7 @@ function createExpert(o) {
 			const ok = await lock.shared(async () => {
 				holding++;
 				try {
-					return await groundAndProve(g, f, mine);
+					return await groundAndProve(g, f, mine, failure);
 				} finally {
 					holding--;
 				}
@@ -20106,22 +20403,52 @@ function createExpert(o) {
 				lastFailure = g.why === NOT_PASSED ? "proof" : "other";
 				if (gen("junior")) {
 					promotionBlocked = true;
-					log(`its new generation ${n} didn't pass, so it isn't tried again until its file changes or the runner restarts`);
+					log(`its new generation ${n} didn't pass, so the one before goes on answering`);
 				}
+				retry = !failure.repeats;
 			}
 		} catch (err) {
 			log(`its grounding failed: ${err?.stack ?? String(err)}`);
 			lastFailed = !gen("junior");
 			lastFailure = "other";
+			retry = true;
 		} finally {
+			if (resetPending && holding === 0) {
+				resetPending = false;
+				await lock.exclusive(() => checkout.reset()).catch((err) => log(`couldn't reset its checkout: ${err.message}`));
+			}
 			if (mine === epoch && passed) await promote(passed, fp);
 			if (groundingRun === me) groundingRun = null;
 			changed();
 			if (mine === epoch && !stopped && fingerprint(file) !== fp && file.repo === f.repo) ground();
+			else if (mine === epoch && retry !== null) retryLater(retry);
 			else checkPromotion();
 		}
 	}
-	async function groundAndProve(g, f, mine) {
+	function clearRetry() {
+		if (retryTimer) clearTimeout(retryTimer);
+		retryTimer = null;
+	}
+	function retryLater(retryable) {
+		if (stopped) return;
+		if (!retryable) return log("its grounding failed in a way that fails every time, so it isn't tried again until its file changes");
+		if (retries >= RETRY_MINUTES.length) return log(`its grounding failed ${retries + 1} times running, so it isn't tried again until its file changes or the runner restarts`);
+		const minutes = RETRY_MINUTES[retries++];
+		const attempt = retries;
+		log(`its grounding failed, so it is tried again in ${minutes} minutes`);
+		retryTimer = setTimeout(() => {
+			retryTimer = null;
+			say("retry", {
+				attempt,
+				of: RETRY_MINUTES.length,
+				after: `${minutes}m`
+			});
+			ground();
+		}, minutes * minute);
+		retryTimer.unref?.();
+	}
+	/** Sets `failure.repeats` when it fails in a way that fails every time: the expert file's numbers against the model. */
+	async function groundAndProve(g, f, mine, failure) {
 		const started = now();
 		const commit = await checkout.head();
 		g.commit = commit;
@@ -20137,9 +20464,10 @@ function createExpert(o) {
 		let windowed = false;
 		const check = (model) => {
 			const w = windowFor(model, f.window);
-			if (!w.ok) return w.why;
-			windowed = true;
-			return thresholdProblem(f.promoteAtTokens, w.compactAt ?? w.window);
+			windowed = w.ok;
+			const why = w.ok ? thresholdProblem(f.promoteAtTokens, w.compactAt ?? w.window) : w.why;
+			if (why) failure.repeats = true;
+			return why;
 		};
 		const c = await run(trunkArgs(g.trunk, f.model), readDir, g.trunk, fill(p.grounding, values), trunkNext([p.read]), f.groundingTimeLimitMinutes * minute, { check });
 		overhead(c.usage);
@@ -20150,7 +20478,9 @@ function createExpert(o) {
 		}
 		g.model = c.model ?? f.model;
 		g.last = await lastTurn(g.trunk);
-		const problem = (windowed ? null : check(g.model)) ?? (c.turns.length < 2 ? "its grounding ended before its second turn" : notesRoomProblem(f.promoteAtTokens, meterOf(c.turns.at(-1))));
+		const room = c.turns.length < 2 ? null : notesRoomProblem(f.promoteAtTokens, meterOf(c.turns.at(-1)));
+		if (room) failure.repeats = true;
+		const problem = (windowed ? null : check(g.model)) ?? (c.turns.length < 2 ? "its grounding ended before its second turn" : room);
 		g.meter = c.turns.length ? meterOf(c.turns.at(-1)) : 0;
 		if (problem) {
 			failGeneration(g, problem);
@@ -20198,9 +20528,13 @@ function createExpert(o) {
 		}), () => null, JUDGE_MS, { root: o.dir });
 		overhead(judged.usage);
 		if (mine !== epoch) return false;
-		const verdict = judged.ok ? judged.turns.at(-1)?.text ?? "" : `the judge failed: ${judged.failure.detail}`;
+		if (!judged.ok) {
+			failGeneration(g, `its proof's judge failed: ${judged.failure.detail}`);
+			return false;
+		}
+		const verdict = judged.turns.at(-1)?.text ?? "";
 		const line = verdict.split(/\r?\n/)[0];
-		const pass = judged.ok && /^\W*PASS\b/i.test(line) && !/\bFAIL\b/i.test(line);
+		const pass = /^\W*PASS\b/i.test(line) && !/\bFAIL\b/i.test(line);
 		g.proof = {
 			passed: pass,
 			at: now()
@@ -20226,7 +20560,10 @@ function createExpert(o) {
 			}
 			g.state = "junior";
 			saved.fingerprint = fp;
+			retries = 0;
+			promotionBlocked = false;
 			await save();
+			if (senior) discardIfDone(senior);
 			if (junior) say("promotion", {
 				junior: g.n,
 				senior: junior.n,
@@ -20264,6 +20601,7 @@ function createExpert(o) {
 			if (!a.senior) return asks === 1 ? NO_SENIOR : null;
 			if (asks === 3) return ANSWER_NOW;
 			if (asks > 3) return null;
+			if (!askedSenior) a.onSenior?.();
 			askedSenior = true;
 			const said = await askSenior(a.senior, asked, a.deadline, a.commit, a.kids, p);
 			usage = add(usage, said.usage);
@@ -20498,6 +20836,15 @@ function createExpert(o) {
 							await reservation.cancel();
 							return failed("its junior failed while the question waited", forkFailed("the expert's junior failed; a new one is grounding"));
 						}
+						const notNow = resetPending ? "the expert's checkout is being reset" : !await trusted(junior) ? "the expert's junior is being replaced" : null;
+						if (notNow) {
+							await reservation.cancel();
+							say("error", {
+								id: q.id,
+								cause: notNow
+							});
+							return deliver(q, unavailable(notNow), false);
+						}
 						const deadline = now() + file.forkTimeLimitMinutes * minute;
 						const senior = gen("senior");
 						const commit = await checkout.head();
@@ -20509,7 +20856,8 @@ function createExpert(o) {
 							id: q.id,
 							deadline,
 							commit,
-							kids
+							kids,
+							onSenior: () => q.senior?.(q.latest)
 						});
 						for (const kid of kids) killTree(kid);
 						freeSlot();
@@ -20577,7 +20925,8 @@ function createExpert(o) {
 				}
 			} finally {
 				inFlight.delete(q);
-				if (resetting) await lock.exclusive(() => checkout.reset()).catch((err) => log(`couldn't reset its checkout: ${err.message}`));
+				if (resetting && holding > 0) resetPending = true;
+				else if (resetting) await lock.exclusive(() => checkout.reset()).catch((err) => log(`couldn't reset its checkout: ${err.message}`));
 				checkPromotion();
 			}
 		} finally {
@@ -20587,13 +20936,19 @@ function createExpert(o) {
 	}
 	function append(g, note) {
 		const done = (appends.get(g.trunk) ?? Promise.resolve()).then(() => gate.closed(async () => {
-			if (stopped || g.state !== "junior") return false;
+			if (stopped || g.state !== "junior" || !await trusted(g)) return false;
 			appending++;
 			appendsStarted++;
 			try {
 				const p = await loadExpertPrompts(o.appDir);
-				const c = await run(appendArgs(g.trunk, g.model), readDir, g.trunk, fill(p.note, { note }), trunkNext([]), file.forkTimeLimitMinutes * minute, {});
+				const before = g.last ?? null;
+				const text = fill(p.note, { note });
+				const c = await run(appendArgs(g.trunk, g.model), readDir, g.trunk, text, trunkNext([]), file.forkTimeLimitMinutes * minute, {});
 				overhead(c.usage);
+				if (!await onlyOurs(g.trunk, before, [text, "ask-senior isn't available here; answer from your own context"])) {
+					retireChanged(g);
+					return false;
+				}
 				g.last = await lastTurn(g.trunk);
 				if (!c.ok) {
 					log(`couldn't append a learned note to generation ${g.n}: ${c.failure.detail}`);
@@ -20612,12 +20967,16 @@ function createExpert(o) {
 		appends.set(g.trunk, done.catch(() => false));
 		return done.catch((err) => (log(`couldn't append a learned note: ${err.message}`), false));
 	}
-	async function reset(oldRepo) {
+	async function reset(oldRepo, generations) {
 		epoch++;
 		killAll();
+		clearRetry();
 		const old = makeCheckout(oldRepo);
 		log(`its repo changed from ${oldRepo} to ${file.repo}, so it starts again`);
-		await lock.exclusive(() => old.remove()).catch((err) => log(`couldn't remove its clone of ${oldRepo}: ${err.message}`));
+		await lock.exclusive(async () => {
+			await old.remove().catch((err) => log(`couldn't remove its clone of ${oldRepo}: ${err.message}`));
+			for (const g of generations) if (!discarded.has(g.trunk)) discarded.add(g.trunk), await discard(g);
+		});
 		saved = {
 			version: 1,
 			fingerprint: "",
@@ -20632,6 +20991,8 @@ function createExpert(o) {
 		prepared = false;
 		lastFailed = false;
 		promotionBlocked = false;
+		retries = 0;
+		resetPending = false;
 		groundingRun = null;
 		changed();
 		ground();
@@ -20656,6 +21017,29 @@ function createExpert(o) {
 		} catch {}
 		return null;
 	}
+	async function onlyOurs(trunk, after, ours) {
+		const file = await transcriptOf(trunk);
+		const entries = (file ? await fs.readFile(file, "utf8").catch(() => "") : "").split("\n").flatMap((l) => {
+			try {
+				return [JSON.parse(l)];
+			} catch {
+				return [];
+			}
+		});
+		const from = after === null ? 0 : entries.findIndex((e) => e.uuid === after) + 1;
+		if (from === 0 && after !== null) return false;
+		const wanted = new Set(ours.map((t) => t.trim()));
+		return entries.slice(from).every((e) => {
+			if (e.type !== "user" || e.isMeta === true || e.isSidechain === true) return true;
+			const content = e.message?.content;
+			const blocks = typeof content === "string" ? [{
+				type: "text",
+				text: content
+			}] : Array.isArray(content) ? content : [];
+			if (blocks.some((b) => b?.type === "tool_result")) return true;
+			return wanted.has(blocks.map((b) => b?.type === "text" && typeof b.text === "string" ? b.text : "").join("").trim());
+		});
+	}
 	/** Whether a junior's or senior's trunk is as the runner left it; one that isn't is taken out of use. */
 	async function trusted(g) {
 		const started = appendsStarted;
@@ -20666,21 +21050,24 @@ function createExpert(o) {
 			return true;
 		}
 		if (last === g.last || appending > 0 || appendsStarted !== started) return true;
-		if (g.state === "junior" || g.state === "senior") {
-			const wasJunior = g.state === "junior";
-			g.state = "retired";
-			g.why = "its trunk was changed outside Isoplan";
-			say("generation", {
-				generation: g.n,
-				state: "retired",
-				why: g.why
-			});
-			log(`generation ${g.n}'s trunk was changed outside Isoplan (resumed by hand, say), so it isn't used again${wasJunior ? ", and a new generation grounds" : ""}`);
-			save();
-			changed();
-			if (wasJunior && !stopped) ground();
-		}
+		retireChanged(g);
 		return false;
+	}
+	function retireChanged(g) {
+		if (g.state !== "junior" && g.state !== "senior") return;
+		const wasJunior = g.state === "junior";
+		g.state = "retired";
+		g.why = "its trunk was changed outside Isoplan";
+		say("generation", {
+			generation: g.n,
+			state: "retired",
+			why: g.why
+		});
+		log(`generation ${g.n}'s trunk was changed outside Isoplan (resumed by hand, say), so it isn't used again${wasJunior ? ", and a new generation grounds" : ""}`);
+		save();
+		discardIfDone(g);
+		changed();
+		if (wasJunior && !stopped) ground();
 	}
 	return {
 		hosted,
@@ -20690,7 +21077,7 @@ function createExpert(o) {
 			if (was && was.repo !== file.repo) {
 				for (const g of was.generations) o.onTrunk?.(g.trunk);
 				changed();
-				reset(was.repo);
+				reset(was.repo, was.generations);
 				return;
 			}
 			if (was) {
@@ -20710,19 +21097,23 @@ function createExpert(o) {
 		update(f) {
 			const old = file;
 			file = f;
-			if (f.repo !== old.repo) return void reset(old.repo);
+			if (f.repo !== old.repo) return void reset(old.repo, saved.generations);
 			promotionBlocked = false;
+			clearRetry();
+			retries = 0;
 			changed();
 			if (fingerprint(f) !== saved.fingerprint) ground();
 			else checkPromotion();
 		},
 		owns: (request) => byRequest.has(request),
-		answer(request, send) {
+		answer(request, send, senior) {
 			const known = byRequest.get(request.id);
 			if (known !== void 0) {
 				const running = questions.get(known);
-				if (running) running.send = send;
-				else if (finished.has(known)) send(checked({
+				if (running) {
+					running.send = send;
+					running.senior = senior;
+				} else if (finished.has(known)) send(checked({
 					...finished.get(known),
 					id: request.id
 				}));
@@ -20735,6 +21126,7 @@ function createExpert(o) {
 				running.requests.add(request.id);
 				running.latest = request.id;
 				running.send = send;
+				running.senior = senior;
 				return;
 			}
 			const sent = finished.get(qid);
@@ -20752,7 +21144,8 @@ function createExpert(o) {
 				text: request.question,
 				latest: request.id,
 				requests: /* @__PURE__ */ new Set([request.id]),
-				send
+				send,
+				senior
 			};
 			questions.set(qid, q);
 			handle(q).catch((err) => {
@@ -20779,11 +21172,13 @@ function createExpert(o) {
 		stop() {
 			stopped = true;
 			epoch++;
+			clearRetry();
 			killAll();
 			for (const wake of [...waiters]) wake();
 		},
 		close() {
 			stopped = true;
+			clearRetry();
 			killAll();
 		}
 	};
@@ -20859,16 +21254,16 @@ function createExperts(o) {
 			if ((unlisted.get(server) ?? "") === text) return;
 			unlisted.set(server, text);
 			if (!missing.length) return;
-			o.log(`${server} doesn't list the experts ${missing.join(", ")}: their repo isn't in an office there, or another machine's expert has the name`);
+			o.log(`${server} doesn't list the experts ${missing.join(", ")}: their repo isn't in an office there, another machine's expert has the name, or the office has more experts than a session may be told of`);
 			for (const name of missing) health(name).say("listed", {
 				server,
 				unlisted: text
 			});
 		},
 		owns: (request) => owner(request) !== void 0,
-		answer(request, send) {
+		answer(request, send, senior) {
 			const expert = experts.get(request.expert);
-			if (expert) return expert.answer(request, send);
+			if (expert) return expert.answer(request, send, senior);
 			send({
 				type: "refusal",
 				v: 1,
@@ -20891,7 +21286,6 @@ function createExperts(o) {
 		},
 		drop: (request) => owner(request)?.drop(request),
 		isExpertSession: (sessionId) => trunks.has(sessionId),
-		isExpertFolder: (folder) => inside(o.expertsDir, folder) !== null,
 		idle: () => [...experts.values(), ...stopped].every((e) => e.idle()),
 		close() {
 			watcher?.stop();
@@ -20904,16 +21298,17 @@ const expertIgnored = (expertsDir, experts) => (id, cwd) => cwd !== null && insi
 /**
 * The experts as one office's runner asks them: a question for an expert whose repo that office
 * doesn't take (by `home`, as `listingFor` lists) is refused as for an unknown name, before the
-* expert sees it, so an office never gets an answer about another office's repo.
+* expert sees it, so an office never gets an answer about another office's repo. `senior` is that
+* office's (expert-link.ts), told when a junior first asks its senior for one of its requests.
 */
-function forOffice(experts, home, log) {
+function forOffice(experts, home, log, senior) {
 	return {
 		owns: (request) => experts.owns(request),
 		answer(request, send) {
 			const hosted = experts.hosted().find((h) => h.name === request.expert);
-			if (!hosted) return experts.answer(request, send);
+			if (!hosted) return experts.answer(request, send, senior);
 			home(hosted.repo).then((project) => {
-				if (project && !project.id.startsWith("local:")) return experts.answer(request, send);
+				if (project && !project.id.startsWith("local:")) return experts.answer(request, send, senior);
 				log(`expert ${request.expert}: refused ${request.id}, since this office doesn't take its repo`);
 				send({
 					type: "refusal",
@@ -20969,7 +21364,8 @@ async function listingFor(hosted, home, scan, log) {
 				name: project.name
 			},
 			subject: h.subject,
-			state: h.state
+			state: h.state,
+			...h.senior && { senior: true }
 		};
 		const parsed = ExpertListingSchema.safeParse(listing);
 		if (!parsed.success) {
@@ -20986,6 +21382,7 @@ async function listingFor(hosted, home, scan, log) {
 function hostExperts(o) {
 	let connection = 0;
 	let hosting = false;
+	let expertSenior = false;
 	let last = null;
 	let stopped = false;
 	let chain = Promise.resolve();
@@ -21033,6 +21430,7 @@ function hostExperts(o) {
 	const fresh = () => {
 		connection++;
 		hosting = false;
+		expertSenior = false;
 		last = null;
 	};
 	o.experts.onChange(() => hosting && queue(false));
@@ -21042,7 +21440,16 @@ function hostExperts(o) {
 		onHosting(m) {
 			o.experts.listed(o.server, m.listed);
 			hosting = true;
+			expertSenior = m.expertSenior === true;
 			queue(true);
+		},
+		senior(id) {
+			if (stopped || !hosting || !expertSenior) return;
+			o.sendSenior?.({
+				type: "expert-senior",
+				v: 1,
+				id
+			});
 		},
 		onOpen: fresh,
 		onClose: fresh,
@@ -21149,15 +21556,19 @@ async function createPipeServer(o) {
 			failed: true,
 			code: "EXPERT_RUNNER_UNREACHABLE"
 		});
-		const told = hooked ? await askExpert({
+		const { shown, ...told } = hooked ? await askExpert({
 			...request,
 			cwd: hooked.cwd
 		}).catch((err) => unreachable(String(err?.message ?? err))) : unreachable("this session isn't connected to it");
-		writeLine(socket, {
-			type: "answer",
-			...told
+		const written = await new Promise((resolve) => {
+			if (socket.destroyed || !socket.writable) return resolve(false);
+			socket.write(JSON.stringify({
+				type: "answer",
+				...told
+			}) + "\n", (err) => resolve(!err));
 		});
 		socket.end();
+		await shown?.(written);
 	};
 	const close = async (socket, request) => {
 		const closed = o.close ? await o.close(request.close, request.remove === true).catch((err) => (o.log(`couldn't close ${request.close}: ${String(err?.message ?? err)}`), false)) : false;
@@ -21782,6 +22193,7 @@ async function worker() {
 	setInterval(() => void checkDesktop().then(() => claude.check()).catch(() => {}), DESKTOP_CHECK_MS).unref();
 	const names = askingRemoteNames(claudeDir);
 	const homeIo = machineHomeIo(first.workspaceRepos, names);
+	const expertHomeIo = machineHomeIo(first.workspaceRepos, names, os.hostname(), true);
 	const ledger = await openLedger(path.join(isoplanDir, "runner", "ledger.json"));
 	const preparedFor = /* @__PURE__ */ new Map();
 	const forks = createForkSlots();
@@ -21828,12 +22240,13 @@ async function worker() {
 			},
 			repoFolders: async () => {
 				const since = Date.now() - (await settings()).cloneSearchDays * 864e5;
-				const seen = (await sessionFolders(io, path.join(claudeDir, "projects"), since, transcriptFolders, { gone: true })).filter((s) => !hosted.isExpertFolder(s.folder));
+				const seen = await sessionFolders(io, path.join(claudeDir, "projects"), since, transcriptFolders, { gone: true });
 				for (const r of registry.list()) if (r.kind === "driven" && r.folder) seen.push({
 					folder: r.folder,
 					at: Date.parse(r.lastActivity) || 0
 				});
 				const repos = await repoFolders(seen, {
+					claudeDir,
 					checkout: checkouts.of,
 					home,
 					branches: async (checkout, project) => !project.startsWith("local:") && await homeIo.resolve(checkout) ? remoteBranches(checkout) : null,
@@ -21861,8 +22274,8 @@ async function worker() {
 				isDir,
 				experts: forOffice(hosted, async (folder) => {
 					await approved.refresh();
-					return approvedHome(folder, homeIo, approved.repos());
-				}, log),
+					return approvedHome(folder, expertHomeIo, approved.repos());
+				}, log, (id) => hosts[index]?.senior(id)),
 				isReported: async (session, lead) => {
 					const id = forkableId(session);
 					if (!id || reporting.heldOff(id) || hosted.isExpertSession(id)) return false;
@@ -21942,10 +22355,11 @@ async function worker() {
 	const hosts = answering.map((office, index) => hostExperts({
 		experts: hosted,
 		approved: shared.get(office.server).approved,
-		home: (folder, repos) => approvedHome(folder, homeIo, repos),
+		home: (folder, repos) => approvedHome(folder, expertHomeIo, repos),
 		scan: scanText,
 		log,
 		send: (m) => live(index)(m),
+		sendSenior: (m) => live(index)(m),
 		server: office.server,
 		checkMs: first.approvedRefreshMinutes * 6e4
 	}));
@@ -22044,7 +22458,8 @@ async function worker() {
 					drive: true,
 					experts: true,
 					claude: claude.state(),
-					starts: startPlaces(process.platform, hasOrca, hasDesktop)
+					starts: startPlaces(process.platform, hasOrca, hasDesktop),
+					hiddenStarts: true
 				}
 			});
 		},

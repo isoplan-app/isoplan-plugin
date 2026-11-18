@@ -6067,6 +6067,10 @@ const HelloMessageSchema = object({
 * runner from before 0.10.0 drops the field it doesn't know and would run the session from the floor.
 * `experts` (protocol 0.13.0): this runner hosts experts. It answers `hosting` with `experts`, and
 * takes `answer-expert` requests; the server sends neither to a runner that didn't say it.
+* `hiddenStarts` (protocol 0.14.0, isoplan-app#315): this runner can start a session from the floor
+* hidden (a start's `hidden`), in a clone Isoplan keeps for itself. The server sends `hidden` only to
+* a runner that says it: a runner from before 0.14.0 drops the field it doesn't know and would start
+* the session in the person's own checkout.
 */
 const RunnerHelloMessageSchema = object({
 	type: literal("runner"),
@@ -6079,7 +6083,8 @@ const RunnerHelloMessageSchema = object({
 	drive: boolean().optional(),
 	claude: ClaudeCliSchema.optional(),
 	starts: array(StartModeSchema).max(4).optional(),
-	experts: literal(true).optional()
+	experts: literal(true).optional(),
+	hiddenStarts: literal(true).optional()
 });
 /** All of the session's facts. Sent on connect and on repair. */
 const FullMessageSchema = object({
@@ -6136,7 +6141,6 @@ const ExpertCodeSchema = _enum([
 	"EXPERT_QUEUED",
 	"EXPERT_STARTING",
 	"EXPERT_FORK_FAILED",
-	"EXPERT_ANSWER_WITHHELD",
 	"EXPERT_DROPPED"
 ]);
 /** `starting`: no generation of it has passed its proof question yet; `ready`: its junior answers; `failed`: its last grounding failed and none answers. */
@@ -6151,12 +6155,17 @@ const ExpertCapSchema = _enum([
 	"asker-open",
 	"expert-tokens"
 ]);
-/** One expert a runner hosts, as it lists it to an office server whose list takes its repo. */
+/**
+* One expert a runner hosts, as it lists it to an office server whose list takes its repo. `senior`
+* (protocol 0.14.0): it has a senior generation, which its junior can ask (see `expert-senior`);
+* absent from an older runner. An older server ignores it.
+*/
 const ExpertListingSchema = object({
 	name: ExpertNameSchema,
 	project: ProjectSchema,
 	subject: Subject,
-	state: ExpertStateSchema
+	state: ExpertStateSchema,
+	senior: boolean().optional()
 });
 /** One expert a session may ask: `repo` is its project's short name, `host` the hosting person's name. */
 const ExpertRightSchema = object({
@@ -6377,6 +6386,18 @@ const ExpertsMessageSchema = object({
 		});
 		seen.add(expert.name);
 	});
+});
+/**
+* The junior answering the `answer-expert` request `id` has asked its senior (protocol 0.14.0), so
+* the floor can show the senior joining the question's meeting. It carries no text: nothing of the
+* question or of what the junior asked. Sent once per request, when the junior first asks, only to a
+* server whose `hosting` says `expertSenior`, and only while the link is up (never through the reply
+* outbox): a server from before 0.14.0, which doesn't say it, is never sent one.
+*/
+const ExpertSeniorMessageSchema = object({
+	type: literal("expert-senior"),
+	v: Version,
+	id: RequestId
 });
 /**
 * A session asks an expert a question (protocol 0.13.0), on its own short link with the session's
@@ -6624,7 +6645,8 @@ discriminatedUnion("type", [
 		})
 	]),
 	ExpertsMessageSchema,
-	AskExpertMessageSchema
+	AskExpertMessageSchema,
+	ExpertSeniorMessageSchema
 ]);
 /** Asks the data layer to send its facts in full. */
 const RepairMessageSchema = object({
@@ -6862,11 +6884,14 @@ const ExpertRightsMessageSchema = object({
 * after each `experts` message, and whenever the offices change. The runner sends no `experts` on a
 * connection before that connection's first `hosting`, so a server from before experts, which sends
 * none, is never sent one.
+* `expertSenior` (protocol 0.14.0): this server reads `expert-senior`, so the runner may send it. A
+* server that reads it says it on every `hosting`; the runner goes by the connection's last one.
 */
 const HostingMessageSchema = object({
 	type: literal("hosting"),
 	v: Version,
-	listed: array(ExpertNameSchema).max(20)
+	listed: array(ExpertNameSchema).max(20),
+	expertSenior: literal(true).optional()
 });
 const drive = {
 	type: literal("drive"),
@@ -6904,8 +6929,14 @@ discriminatedUnion("type", [
 				"orca",
 				"desktop",
 				"driven"
-			]).optional()
+			]).optional(),
+			hidden: boolean().optional()
 		}).superRefine((message, context) => {
+			if (message.hidden && message.mode === "orca") context.addIssue({
+				code: "custom",
+				path: ["hidden"],
+				message: "a hidden start doesn't open in Orca, which would list its folder"
+			});
 			if (message.mode !== void 0 && message.mode !== "driven") {
 				if (message.folder === void 0) context.addIssue({
 					code: "custom",
@@ -6928,6 +6959,11 @@ discriminatedUnion("type", [
 					code: "custom",
 					path: ["branch"],
 					message: "a start names a branch only with a folder"
+				});
+				if (message.hidden) context.addIssue({
+					code: "custom",
+					path: ["hidden"],
+					message: "a start is hidden only with a folder"
 				});
 				return;
 			}
@@ -7195,11 +7231,16 @@ async function isHeld(file, now = Date.now(), isAlive = alive, rule = {}) {
 * written into the lock beside the pid.
 *
 * A new lock is created exclusively, so of two takers at once only one gets it. A stale one is
-* moved aside by rename, which only one taker can do to the same file, and the taker checks that
-* what it moved is the lock it judged stale, by its text and its write time, so a lock its holder
-* refreshed meanwhile isn't taken: one that moved another's lock instead puts it back and loses.
-* With `force` a lock that can't be moved (on Windows a scanner may have it open) is tried again
-* after a short wait, then overwritten, so the plugin's data layer always gets it.
+* taken over one taker at a time: only the taker that creates `<lock>.take` (exclusively too) may
+* remove it, after reading it again to check it is still the lock it judged stale, by its text and
+* its write time, so a lock its holder refreshed meanwhile, or another taker's new one, is never
+* removed. A taker that finds `.take` there loses; one older than TAKE_STALE_MS was left by a taker
+* that crashed holding it, and is cleared.
+*
+* With `force` a stale or held lock is moved aside by rename, and the taker checks that what it
+* moved is the lock it read: one that moved another's lock instead puts it back and looks again. A
+* lock that can't be moved (on Windows a scanner may have it open) is tried again after a short
+* wait, then overwritten, so the plugin's data layer always gets it.
 */
 async function takeLock(file, pid, isAlive = alive, force = false, now = Date.now(), { freshMs, extra = {} } = {}) {
 	await fs.mkdir(path.dirname(file), { recursive: true });
@@ -7222,16 +7263,15 @@ async function takeLock(file, pid, isAlive = alive, force = false, now = Date.no
 			isAlive,
 			freshMs
 		})) return false;
+		if (!force) {
+			if (!await removeStale(file, seen)) return false;
+			continue;
+		}
 		const aside = `${file}.${pid}-${Math.random().toString(36).slice(2)}`;
 		try {
 			await fs.rename(file, aside);
 		} catch (err) {
-			if ([
-				"ENOENT",
-				"EPERM",
-				"EBUSY",
-				"EACCES"
-			].includes(err.code ?? "")) continue;
+			if (["ENOENT", ...BUSY].includes(err.code ?? "")) continue;
 			throw err;
 		}
 		const moved = await fs.readFile(aside, "utf8").catch(() => null);
@@ -7239,13 +7279,43 @@ async function takeLock(file, pid, isAlive = alive, force = false, now = Date.no
 		if (moved !== seen.text || movedAt !== seen.mtimeMs) {
 			await fs.link(aside, file).catch(() => {});
 			await fs.rm(aside, { force: true });
-			if (!force) return false;
 			continue;
 		}
 		await fs.rm(aside, { force: true });
 	}
 	if (!force) return false;
 	await fs.writeFile(file, body);
+	return true;
+}
+const TAKE_STALE_MS = 5e3;
+const BUSY = [
+	"EPERM",
+	"EBUSY",
+	"EACCES"
+];
+/**
+* Removes the stale lock `seen` while holding `<lock>.take`, if it is still that one; false when
+* another taker holds `.take`. Either way the caller looks again.
+*/
+async function removeStale(file, seen) {
+	const take = `${file}.take`;
+	try {
+		await fs.writeFile(take, String(process.pid), { flag: "wx" });
+	} catch (err) {
+		if (err.code !== "EEXIST") throw err;
+		const st = await fs.stat(take).catch(() => null);
+		if (st && Date.now() - st.mtimeMs < TAKE_STALE_MS) return false;
+		await fs.rm(take, { force: true });
+		return true;
+	}
+	try {
+		const now = await readText(file);
+		if (now?.text === seen.text && now.mtimeMs === seen.mtimeMs) await fs.rm(file, { force: true });
+	} catch (err) {
+		if (!BUSY.includes(err.code ?? "")) throw err;
+	} finally {
+		await fs.rm(take, { force: true });
+	}
 	return true;
 }
 /** Removes the lock if it still names `pid`. */

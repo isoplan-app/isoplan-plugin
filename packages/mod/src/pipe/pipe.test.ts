@@ -309,6 +309,42 @@ test("pipe: a question for an expert is answered only for a session whose hooks 
   expect(ask.got).toEqual([]);
 });
 
+test("pipe: an expert's end is shown as written only once its line reached the script; a script that has gone gets none, so the end isn't acked", async () => {
+  const claudeDir = path.join(tempRoot(), "claude");
+  const shown: boolean[] = [];
+  let answer: () => void = () => {};
+  const answered = new Promise<void>((r) => (answer = r));
+  const server = await createPipeServer({
+    claudeDir,
+    log: () => {},
+    onChange: () => {},
+    ask: async () => ({ text: "" }),
+    askExpert: async (request) => {
+      if (request.key === "gone") await answered;
+      return { text: `answered: ${request.question}`, shown: async (written) => void shown.push(written) };
+    },
+  });
+  closing.push(() => server.close());
+  vi.stubEnv("CLAUDE_CONFIG_DIR", claudeDir);
+  closing.push(async () => vi.unstubAllEnvs());
+  const { token } = (await readPipeInfo(claudeDir))!;
+  const hooks = rawClient(server.address, { type: "hello", v: 1, token, session: "s1", cwd: "C:/w/repo", since: 1, messages: true, experts: true, root: "C:/p", version: "0.14.0" });
+  await until(() => !!server.hooked("s1"));
+
+  expect(await runAskExpert(["--session", "s1", "--cwd", "C:/w/repo", "--expert", "reporting", "--key", "k1", "--server", "ws://office/data-layer"], "How?")).toEqual({ text: "answered: How?", code: 0 });
+  await until(() => shown.length === 1);
+  expect(shown).toEqual([true]);
+
+  // The script is gone (its timeout, an interrupted call) before the answer comes.
+  const script = rawClient(server.address, { type: "ask-expert", v: 1, token, session: "s1", cwd: "C:/w", servers: [], expert: "reporting", question: "Why?", blocking: true, key: "gone" });
+  script.socket.on("connect", () => setTimeout(() => script.socket.destroy(), 50));
+  await script.closed;
+  answer();
+  await until(() => shown.length === 2);
+  expect(shown).toEqual([true, false]);
+  hooks.socket.destroy();
+});
+
 test("pipe: the desktop app's close, and its end and remove, reach the runner only with the token, and are told whether the session closed; with no runner it is told nothing", async () => {
   const claudeDir = path.join(tempRoot(), "claude");
   const asked: string[] = [];

@@ -12,9 +12,10 @@
 // - Requests go to their expert by name; one naming an expert this machine doesn't host is refused
 //   EXPERT_UNKNOWN, and so is one from an office that doesn't take the expert's repo (`forOffice`).
 //   Releases and drops go to the expert that owns the request.
-// - What each office server is told (`listingFor`, expert-link.ts): only experts whose repo that
-//   office takes, never one whose project has no remote (its id would name a path on this machine),
-//   never a subject that matches a secret pattern, at most MAX_EXPERTS, the first by name.
+// - What each office server is told (`listingFor`, expert-link.ts), with `senior` when the expert
+//   has a senior its junior can ask: only experts whose repo that office takes, never one whose
+//   project has no remote (its id would name a path on this machine), never a subject that matches
+//   a secret pattern, at most MAX_EXPERTS, the first by name.
 
 import path from "node:path";
 import { ExpertListingSchema, MAX_EXPERTS, PROTOCOL_VERSION, type ExpertListing, type Project, type RefusalMessage, type ReplyMessage } from "@isoplan/protocol";
@@ -63,12 +64,12 @@ export interface Experts {
   /** An office server's `hosting`: the experts it doesn't list are logged in their health logs. */
   listed(server: string, names: readonly string[]): void;
   owns(request: string): boolean;
-  answer(request: AnswerExpertRequest, send: (m: Outgoing) => void): void;
+  /** `senior` is told the request's id when the expert's junior first asks its senior for it. */
+  answer(request: AnswerExpertRequest, send: (m: Outgoing) => void, senior?: (id: string) => void): void;
   release(request: string, send: (m: Outgoing) => void): void;
   drop(request: string): void;
   /** A bare uuid of a trunk, any generation. */
   isExpertSession(sessionId: string): boolean;
-  isExpertFolder(folder: string): boolean;
   /** No grounding, fork, append or judge running. */
   idle(): boolean;
   /** Ends every process tree, the judge's included. */
@@ -142,13 +143,13 @@ export function createExperts(o: ExpertsOptions): Experts {
       if ((unlisted.get(server) ?? "") === text) return;
       unlisted.set(server, text);
       if (!missing.length) return;
-      o.log(`${server} doesn't list the experts ${missing.join(", ")}: their repo isn't in an office there, or another machine's expert has the name`);
+      o.log(`${server} doesn't list the experts ${missing.join(", ")}: their repo isn't in an office there, another machine's expert has the name, or the office has more experts than a session may be told of`);
       for (const name of missing) health(name).say("listed", { server, unlisted: text });
     },
     owns: (request) => owner(request) !== undefined,
-    answer(request, send) {
+    answer(request, send, senior) {
       const expert = experts.get(request.expert);
-      if (expert) return expert.answer(request, send);
+      if (expert) return expert.answer(request, send, senior);
       send({ type: "refusal", v: PROTOCOL_VERSION, id: request.id, reason: "unavailable", detail: `this machine hosts no expert named ${request.expert} now`, expert: { code: "EXPERT_UNKNOWN" } });
     },
     release(request, send) {
@@ -158,7 +159,6 @@ export function createExperts(o: ExpertsOptions): Experts {
     },
     drop: (request) => owner(request)?.drop(request),
     isExpertSession: (sessionId) => trunks.has(sessionId),
-    isExpertFolder: (folder) => inside(o.expertsDir, folder) !== null,
     idle: () => [...experts.values(), ...stopped].every((e) => e.idle()),
     close() {
       watcher?.stop();
@@ -176,17 +176,18 @@ export const expertIgnored =
 /**
  * The experts as one office's runner asks them: a question for an expert whose repo that office
  * doesn't take (by `home`, as `listingFor` lists) is refused as for an unknown name, before the
- * expert sees it, so an office never gets an answer about another office's repo.
+ * expert sees it, so an office never gets an answer about another office's repo. `senior` is that
+ * office's (expert-link.ts), told when a junior first asks its senior for one of its requests.
  */
-export function forOffice(experts: Pick<Experts, "hosted" | "owns" | "answer" | "release" | "drop">, home: (folder: string) => Promise<Project | null>, log: (text: string) => void): Pick<Experts, "owns" | "answer" | "release" | "drop"> {
+export function forOffice(experts: Pick<Experts, "hosted" | "owns" | "answer" | "release" | "drop">, home: (folder: string) => Promise<Project | null>, log: (text: string) => void, senior?: (id: string) => void): Pick<Experts, "owns" | "answer" | "release" | "drop"> {
   return {
     owns: (request) => experts.owns(request),
     answer(request, send) {
       const hosted = experts.hosted().find((h) => h.name === request.expert);
-      if (!hosted) return experts.answer(request, send);
+      if (!hosted) return experts.answer(request, send, senior);
       void home(hosted.repo).then(
         (project) => {
-          if (project && !project.id.startsWith("local:")) return experts.answer(request, send);
+          if (project && !project.id.startsWith("local:")) return experts.answer(request, send, senior);
           log(`expert ${request.expert}: refused ${request.id}, since this office doesn't take its repo`);
           send({ type: "refusal", v: PROTOCOL_VERSION, id: request.id, reason: "unavailable", detail: `this machine hosts no expert named ${request.expert} now`, expert: { code: "EXPERT_UNKNOWN" } });
         },
@@ -225,7 +226,7 @@ export async function listingFor(hosted: HostedExpert[], home: (folder: string) 
       log(`expert ${h.name} isn't listed: its subject matches the secret pattern "${matched}"`);
       continue;
     }
-    const listing = { name: h.name, project: { id: project.id, name: project.name }, subject: h.subject, state: h.state };
+    const listing = { name: h.name, project: { id: project.id, name: project.name }, subject: h.subject, state: h.state, ...(h.senior && { senior: true }) };
     const parsed = ExpertListingSchema.safeParse(listing);
     if (!parsed.success) {
       log(`expert ${h.name} isn't listed: its listing doesn't fit the protocol: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);

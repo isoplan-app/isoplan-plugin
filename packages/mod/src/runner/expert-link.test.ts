@@ -1,28 +1,30 @@
-import { PROTOCOL_VERSION, type ExpertsMessage, type HostingMessage } from "@isoplan/protocol";
+import { PROTOCOL_VERSION, type ExpertSeniorMessage, type ExpertsMessage, type HostingMessage } from "@isoplan/protocol";
 import { expect, test } from "vitest";
 import { hostExperts } from "./expert-link.js";
 import type { HostedExpert } from "./experts.js";
 import { UNREADABLE } from "./scan.js";
 
-const hosting = (listed: string[] = []): HostingMessage => ({ type: "hosting", v: PROTOCOL_VERSION, listed });
-const expert = (name: string, state: HostedExpert["state"] = "ready"): HostedExpert => ({ name, repo: `/work/${name}`, subject: `The ${name} rules.`, state });
+const hosting = (listed: string[] = [], o: Partial<HostingMessage> = {}): HostingMessage => ({ type: "hosting", v: PROTOCOL_VERSION, listed, ...o });
+const expert = (name: string, state: HostedExpert["state"] = "ready"): HostedExpert => ({ name, repo: `/work/${name}`, subject: `The ${name} rules.`, state, senior: false });
 
 // A link that is up, a list that takes every repo, and experts whose hosted() is set by hand.
-function setUp(o: { repos?: ReadonlySet<string> | null; send?: () => boolean; scan?: () => Promise<string | null> } = {}) {
+function setUp(o: { repos?: ReadonlySet<string> | null; send?: () => boolean; scan?: () => Promise<string | null>; home?: () => Promise<void> } = {}) {
   let hosted: HostedExpert[] = [expert("adr")];
   const listeners: (() => void)[] = [];
   const refreshed: (boolean | undefined)[] = [];
   const listed: string[][] = [];
   const sent: ExpertsMessage[] = [];
+  const seniors: ExpertSeniorMessage[] = [];
   const logs: string[] = [];
   let repos = o.repos === undefined ? new Set(["github.com/acme/app"]) : o.repos;
   const host = hostExperts({
     experts: { hosted: () => hosted, onChange: (l) => void listeners.push(l), listed: (_server, names) => void listed.push([...names]) },
     approved: { refresh: async (force) => void refreshed.push(force), repos: () => repos },
-    home: async (folder) => ({ id: "github.com/acme/app", name: folder.split("/").at(-1)! }),
+    home: async (folder) => (await o.home?.(), { id: "github.com/acme/app", name: folder.split("/").at(-1)! }),
     scan: async () => (o.scan ? o.scan() : null),
     log: (t) => void logs.push(t),
     send: (m) => (sent.push(m), o.send ? o.send() : true),
+    sendSenior: (m) => (seniors.push(m), true),
     server: "wss://office.example",
     checkMs: 3600000,
   });
@@ -30,6 +32,7 @@ function setUp(o: { repos?: ReadonlySet<string> | null; send?: () => boolean; sc
   return {
     host,
     sent,
+    seniors,
     logs,
     refreshed,
     listed,
@@ -99,6 +102,24 @@ test("while the secret patterns can't be read nothing more is sent, so the serve
   t.host.stop();
 });
 
+test("while git can't read an expert repo's remote nothing is sent, so the server keeps the listing it has", async () => {
+  let gitFails = false;
+  const t = setUp({ home: async () => (gitFails ? Promise.reject(new Error("git couldn't read the remote of /work/adr (exit 128)")) : undefined) });
+  t.host.onHosting(hosting());
+  await settle();
+  gitFails = true;
+  t.set([expert("adr", "starting")]);
+  t.change();
+  await settle();
+  expect(t.sent.map(names)).toEqual([["adr:ready"]]);
+  expect(t.logs).toEqual(["couldn't list the experts to wss://office.example: git couldn't read the remote of /work/adr (exit 128)"]);
+  gitFails = false;
+  t.change();
+  await settle();
+  expect(t.sent.map(names)).toEqual([["adr:ready"], ["adr:starting"]]);
+  t.host.stop();
+});
+
 test("two changes close together send in order, the last one's experts last", async () => {
   const t = setUp();
   t.host.onHosting(hosting());
@@ -130,5 +151,21 @@ test("a reconnect sends the listing again after its first hosting; one the link 
   t.change();
   await settle();
   expect(t.sent.map(names)).toEqual([["adr:ready"], ["adr:ready"], ["adr:failed"], ["adr:failed"]]);
+  t.host.stop();
+});
+
+test("a junior asking its senior is told only after a hosting that says expertSenior, and not after a reconnect until the next one says it", async () => {
+  const t = setUp();
+  t.host.senior("expert-x-1-1"); // before any hosting
+  t.host.onHosting(hosting());
+  t.host.senior("expert-x-1-2"); // a hosting that doesn't say it
+  t.host.onHosting(hosting([], { expertSenior: true }));
+  t.host.senior("expert-x-1-3");
+  t.host.onClose();
+  t.host.onOpen();
+  t.host.senior("expert-x-1-4"); // a new connection, no hosting yet
+  t.host.onHosting(hosting());
+  t.host.senior("expert-x-1-5");
+  expect(t.seniors).toEqual([{ type: "expert-senior", v: PROTOCOL_VERSION, id: "expert-x-1-3" }]);
   t.host.stop();
 });

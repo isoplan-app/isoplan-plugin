@@ -33,8 +33,7 @@
 // checked against the rights as they are now. The question goes through dist/ask-expert.js, which asks through the
 // runner, and its end, when it comes after the call returned, arrives as an `asked` line with
 // `expert` and takes ask_earlier_session's path: kept for the agent that asked, shown on its next
-// tool result, then acked through dist/ask.js. A withheld answer is shown as a note too, but not
-// acked, so the answer or drop after it still comes.
+// tool result, then acked through dist/ask.js.
 //
 // An agent's question to its owner (AskUserQuestion) is in the terminal and on the floor at once,
 // and the first answer wins (#50): the call goes ahead at once, so its dialog shows, while the hook
@@ -122,8 +121,8 @@ let started = false;
 const notes = new Map<string, string[]>();
 // Late replies from the room waiting for a tool result, by question id, each for the agent that
 // asked (null for the lead) and the office it came through; those shown; and which agent made each
-// ask, by its key (the call's id). An expert's withheld answer is kept as `<question>:withheld`.
-type Reply = { agent: string | null; text: string; server?: string; withheld?: true };
+// ask, by its key (the call's id).
+type Reply = { agent: string | null; text: string; server?: string };
 const replies = new Map<string, Reply>();
 const shown = new Set<string>();
 const askedBy = new Map<string, string | null>();
@@ -196,7 +195,7 @@ export function register(on: On): void {
       for (const [question, reply] of late) {
         replies.delete(question);
         shown.add(question);
-        if (!reply.withheld) ack($, question, reply.server);
+        ack($, question, reply.server);
       }
       if (!waiting.length && !late.length) return r;
       return { ...r, context: [...(r.context ?? []), ...waiting, ...late.map(([, reply]) => reply.text)] };
@@ -664,12 +663,6 @@ function addNote(line: ConflictMessage): void {
 // result, or, already shown, acked again. The server sends only ends down this link.
 function addReply($: Host, line: FromOffice<AskedMessage>): void {
   const agent = (line.key && askedBy.get(line.key)) ?? null;
-  // An expert's withheld answer is a note of its own, never acked, so its answer or drop still shows after it.
-  if (line.expert && line.state === "withheld") {
-    const withheld = `${line.question}:withheld`;
-    if (!shown.has(line.question) && !shown.has(withheld)) replies.set(withheld, { agent, text: lateExpertText({ ...line, expert: line.expert }), withheld: true });
-    return;
-  }
   if (line.state !== "answered" && line.state !== "dropped") return;
   if (shown.has(line.question)) return ack($, line.question, line.server);
   replies.set(line.question, { agent, text: line.expert ? lateExpertText({ ...line, expert: line.expert }) : endText(line, true), server: line.server });

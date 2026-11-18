@@ -99,6 +99,7 @@ import { normalize, pathKey } from "../data-layer/git.js";
 import type { NodeIo } from "../data-layer/io.js";
 import { atLeast, claudeCommand, claudeVersion, DESKTOP_MIN_VERSION, desktopPlatform } from "../runner/claude-binary.js";
 import { forkEnv, killTree, type Track } from "../runner/claude.js";
+import { isoplanFolder } from "../runner/repo-folders.js";
 import type { PreparedTake } from "../runner/session.js";
 import type { RemoteNames } from "../data-layer/remote-names.js";
 import { handoffBranch, remotesOf, sameRepo, type RunGit } from "./git.js";
@@ -245,9 +246,12 @@ export async function findWorkspace(io: NodeIo, run: RunGit, projectsDir: string
   return null;
 }
 
-// The folders the machine's Claude Code sessions since `since` ran in, the most recent first, each once.
+// The folders the machine's Claude Code sessions since `since` ran in, the most recent first, each
+// once: never one of Isoplan's own (an expert's read/ has the person's remote too), under the Claude
+// folder `projectsDir` is in.
 async function recentFolders(io: NodeIo, projectsDir: string, since: number): Promise<string[]> {
-  return (await sessionFolders(io, projectsDir, since)).map((f) => f.folder);
+  const claudeDir = path.dirname(projectsDir);
+  return (await sessionFolders(io, projectsDir, since)).map((f) => f.folder).filter((folder) => !isoplanFolder(claudeDir, folder));
 }
 
 /**

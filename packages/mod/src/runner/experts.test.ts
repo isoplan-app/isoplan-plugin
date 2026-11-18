@@ -11,7 +11,7 @@ import { UNREADABLE } from "./scan.js";
 const T1 = "11111111-1111-4111-8111-111111111111";
 const settings = { ...JSON.parse(fs.readFileSync(path.join(modDir, "runner.json"), "utf8")), expertJudgeModel: "haiku" } as ExpertSettings;
 
-const hostedExpert = (name: string, o: Partial<HostedExpert> = {}): HostedExpert => ({ name, repo: `/work/${name}`, subject: `The ${name} rules.`, state: "ready", ...o });
+const hostedExpert = (name: string, o: Partial<HostedExpert> = {}): HostedExpert => ({ name, repo: `/work/${name}`, subject: `The ${name} rules.`, state: "ready", senior: false, ...o });
 
 test("listingFor: only experts whose repo the office takes, with a remote, a clean subject and a listing the protocol takes; at most 20, by name", async () => {
   const logs: string[] = [];
@@ -20,13 +20,15 @@ test("listingFor: only experts whose repo the office takes, with a remote, a cle
     hostedExpert("local"),
     hostedExpert("secret", { subject: "Ask with the key AKIA" + "ABCDEFGHIJKLMNOP." }),
     hostedExpert("Bad-Name"),
-    ...Array.from({ length: 21 }, (_, i) => hostedExpert(`e${String(i).padStart(2, "0")}`)),
+    ...Array.from({ length: 21 }, (_, i) => hostedExpert(`e${String(i).padStart(2, "0")}`, { senior: i === 1 })),
   ];
   const home = async (folder: string) => (folder.endsWith("untaken") ? null : { id: folder.endsWith("local") ? "local:machine:/work/local" : `github.com/acme/${path.basename(folder)}`, name: path.basename(folder) });
   const scan = async (text: string) => (text.includes("AKIA") ? "AWS access key" : null);
   const listing = (await listingFor(hosted, home, scan, (t) => void logs.push(t)))!;
   expect(listing.map((l) => l.name)).toEqual(Array.from({ length: 20 }, (_, i) => `e${String(i).padStart(2, "0")}`));
   expect(listing[0]).toEqual({ name: "e00", project: { id: "github.com/acme/e00", name: "e00" }, subject: "The e00 rules.", state: "ready" });
+  // `senior` only when the expert has one.
+  expect(listing[1]).toMatchObject({ name: "e01", senior: true });
   expect(logs).toEqual([
     expect.stringMatching(/^expert Bad-Name isn't listed: its listing doesn't fit the protocol: name: /),
     "expert local isn't listed: its repo /work/local has no remote, so its project would name a folder on this machine",
@@ -38,12 +40,13 @@ test("listingFor: only experts whose repo the office takes, with a remote, a cle
   expect(await listingFor(hosted, home, async () => UNREADABLE, () => {})).toBe(null);
 });
 
-test("forOffice: an office whose list doesn't take an expert's repo is refused as for an unknown name; one that takes it is answered", async () => {
+test("forOffice: an office whose list doesn't take an expert's repo is refused as for an unknown name; one that takes it is answered, telling that office of its senior", async () => {
   const asked: string[] = [];
-  const hosted = { hosted: () => [hostedExpert("billing")], owns: () => false, answer: (r: { id: string }) => void asked.push(r.id), release: () => {}, drop: () => {} };
+  const seniors: string[] = [];
+  const hosted = { hosted: () => [hostedExpert("billing")], owns: () => false, answer: (r: { id: string }, _send: unknown, senior?: (id: string) => void) => (asked.push(r.id), senior?.(r.id)), release: () => {}, drop: () => {} };
   const home = (takes: boolean) => async (folder: string) => (takes ? { id: `github.com/acme/${path.basename(folder)}`, name: "billing" } : null);
   const a = forOffice(hosted, home(false), () => {});
-  const b = forOffice(hosted, home(true), () => {});
+  const b = forOffice(hosted, home(true), () => {}, (id) => void seniors.push(id));
   const sent: (ReplyMessage | RefusalMessage)[] = [];
   const request = (id: string) => ({ type: "request", v: PROTOCOL_VERSION, id, kind: "answer-expert", expert: "billing", questionId: "x-1", question: "Q?", blocking: false, from: { id: "claude:sam", name: "Sam" }, asker: "s-1" }) as const;
   a.answer(request("expert-x-1-1"), (m) => void sent.push(m));
@@ -51,6 +54,20 @@ test("forOffice: an office whose list doesn't take an expert's repo is refused a
   await new Promise((r) => setTimeout(r, 20));
   expect(sent).toEqual([{ type: "refusal", v: PROTOCOL_VERSION, id: "expert-x-1-1", reason: "unavailable", detail: "this machine hosts no expert named billing now", expert: { code: "EXPERT_UNKNOWN" } }]);
   expect(asked).toEqual(["expert-x-1-2"]);
+  expect(seniors).toEqual(["expert-x-1-2"]);
+});
+
+test("forOffice: a home that can't be worked out is refused plain unavailable, with no expert code, so the server asks again", async () => {
+  const asked: string[] = [];
+  const logs: string[] = [];
+  const hosted = { hosted: () => [hostedExpert("billing")], owns: () => false, answer: (r: { id: string }) => void asked.push(r.id), release: () => {}, drop: () => {} };
+  const office = forOffice(hosted, () => Promise.reject(new Error("git couldn't read the remote of /work/billing (exit 128)")), (t) => void logs.push(t));
+  const sent: (ReplyMessage | RefusalMessage)[] = [];
+  office.answer({ type: "request", v: PROTOCOL_VERSION, id: "expert-x-1-1", kind: "answer-expert", expert: "billing", questionId: "x-1", question: "Q?", blocking: false, from: { id: "claude:sam", name: "Sam" }, asker: "s-1" }, (m) => void sent.push(m));
+  await new Promise((r) => setTimeout(r, 20));
+  expect(sent).toEqual([{ type: "refusal", v: PROTOCOL_VERSION, id: "expert-x-1-1", reason: "unavailable", detail: "the expert's host couldn't check this office's repos; ask again later" }]);
+  expect(asked).toEqual([]);
+  expect(logs).toEqual([expect.stringContaining("couldn't tell whether this office takes its repo")]);
 });
 
 // The experts folder with one expert file, whose expert is resumed from its state, and a claude
@@ -80,15 +97,13 @@ function setUp() {
   return { experts, expertsDir, logsDir, logs };
 }
 
-test("start() settles once the files and states are read, while the grounding's claude never answers; trunks and folders are known as the experts'", async () => {
+test("start() settles once the files and states are read, while the grounding's claude never answers; trunks are known as the experts'", async () => {
   const t = setUp();
   await t.experts.start();
   try {
-    expect(t.experts.hosted()).toEqual([{ name: "adr", repo: path.resolve("/work/app"), subject: "What may leave a machine.", state: "starting" }]);
+    expect(t.experts.hosted()).toEqual([{ name: "adr", repo: path.resolve("/work/app"), subject: "What may leave a machine.", state: "starting", senior: false }]);
     expect(t.experts.isExpertSession(T1)).toBe(true);
     expect(t.experts.isExpertSession("22222222-2222-4222-8222-222222222222")).toBe(false);
-    expect(t.experts.isExpertFolder(path.join(t.expertsDir, "adr", "read", "src"))).toBe(true);
-    expect(t.experts.isExpertFolder(path.resolve("/work/app"))).toBe(false);
     // The new generation's trunk is known from before its claude starts.
     const second = (): string | null => {
       try {

@@ -8,8 +8,12 @@
 // sent, so the server keeps what it has; nor while the secret patterns can't be read, which would
 // leave every expert out. Each working-out runs after the one before, so listings
 // go out in order, each built from the experts as they are when it runs.
+//
+// When a junior first asks its senior for one of this server's requests, the server is told
+// (`expert-senior`, with the request's id alone), live too: only while the link is up and only when
+// the connection's last `hosting` said it reads them (`expertSenior`). One that can't go is dropped.
 
-import { ExpertsMessageSchema, PROTOCOL_VERSION, type ExpertsMessage, type HostingMessage, type Project } from "@isoplan/protocol";
+import { ExpertsMessageSchema, PROTOCOL_VERSION, type ExpertSeniorMessage, type ExpertsMessage, type HostingMessage, type Project } from "@isoplan/protocol";
 import type { Approved } from "../data-layer/approved.js";
 import { listingFor, type Experts } from "./experts.js";
 
@@ -22,12 +26,16 @@ export interface HostExpertsOptions {
   log: (text: string) => void;
   /** Sends on the link while it is up; false when it isn't. */
   send: (m: ExpertsMessage) => boolean;
+  /** The same live send, for `expert-senior`; without it none goes. */
+  sendSenior?: (m: ExpertSeniorMessage) => boolean;
   server: string;
   checkMs: number;
 }
 
 export interface HostExperts {
   onHosting(m: HostingMessage): void;
+  /** A junior first asked its senior for the request `id`, which this server sent. */
+  senior(id: string): void;
   onOpen(): void;
   onClose(): void;
   stop(): void;
@@ -36,6 +44,7 @@ export interface HostExperts {
 export function hostExperts(o: HostExpertsOptions): HostExperts {
   let connection = 0; // moves on with each open and close, so work for an old connection sends nothing
   let hosting = false; // this connection has had a `hosting`
+  let expertSenior = false; // its last `hosting` said it reads `expert-senior`
   let last: string | null = null; // the listing last sent on this connection
   let stopped = false;
   let chain: Promise<void> = Promise.resolve();
@@ -83,6 +92,7 @@ export function hostExperts(o: HostExpertsOptions): HostExperts {
   const fresh = () => {
     connection++;
     hosting = false;
+    expertSenior = false;
     last = null;
   };
 
@@ -94,7 +104,12 @@ export function hostExperts(o: HostExpertsOptions): HostExperts {
     onHosting(m) {
       o.experts.listed(o.server, m.listed);
       hosting = true;
+      expertSenior = m.expertSenior === true;
       queue(true);
+    },
+    senior(id) {
+      if (stopped || !hosting || !expertSenior) return;
+      o.sendSenior?.({ type: "expert-senior", v: PROTOCOL_VERSION, id });
     },
     onOpen: fresh,
     onClose: fresh,

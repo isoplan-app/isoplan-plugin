@@ -50,3 +50,18 @@ test("project: the remote names it; without one, the main checkout's folder on t
   expect(await projectOf(null, null, "C:\\W\\Loose", "Sevengill", { caseless: true })).toEqual({ id: "local:sevengill/c:/w/loose", name: "Loose" });
   expect(await projectOf(git({ "remote get-url origin": "git@github.com:Adam/Isoplan.git" }), where, "C:/w/repo-wt", "sevengill", { caseless: true })).toEqual({ id: "github.com/adam/isoplan", name: "Isoplan" });
 });
+
+test("project: strict, a remote git can't read rejects; exit 2 (no such remote) is still a local project", async () => {
+  const where = { toplevel: "C:/w/repo", commonDir: "C:/w/repo/.git", branch: "x" };
+  const exits = (code: number): Run => () => ({ code, stdout: "" });
+  const throws: Run = () => Promise.reject(new Error("spawn git ENOENT"));
+  const local = { id: "local:sevengill/C:/w/repo", name: "repo" };
+  expect(await projectOf(exits(2), where, "C:/w/repo", "sevengill", { caseless: false, strict: true })).toEqual(local);
+  expect(await projectOf(exits(0), where, "C:/w/repo", "sevengill", { caseless: false, strict: true })).toEqual(local);
+  await expect(projectOf(exits(128), where, "C:/w/repo", "sevengill", { strict: true })).rejects.toThrow(/exit 128/);
+  await expect(projectOf(exits(1), where, "C:/w/repo", "sevengill", { strict: true })).rejects.toThrow(/exit 1/);
+  await expect(projectOf(throws, where, "C:/w/repo", "sevengill", { strict: true })).rejects.toThrow(/ENOENT/);
+  // Without strict, as before: any of those is a local project.
+  expect(await projectOf(exits(128), where, "C:/w/repo", "sevengill", { caseless: false })).toEqual(local);
+  expect(await projectOf(throws, where, "C:/w/repo", "sevengill", { caseless: false })).toEqual(local);
+});

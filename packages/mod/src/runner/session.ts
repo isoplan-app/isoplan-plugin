@@ -70,6 +70,11 @@
 //   its instruction the first message and nothing from any room; it is answered `opened` with the
 //   session's id and room, or `refused` `unavailable` with why. Its `permissions` and the cap don't
 //   count: the runner doesn't hold it, and its own data layer reports it to the floor.
+// - A start with `hidden` (isoplan-app#315), in a folder listed as above, works in the clone Isoplan
+//   keeps for itself of the folder's repo instead (isoplan-clone.ts), made or fetched now: in a
+//   worktree of it for a branch (`office.branchFolder` on the clone), else in the clone's own
+//   checkout, and otherwise as any start. One that can't have that clone is refused `unavailable`
+//   with why, before any folder is made, as is one the cap would refuse.
 // - A turn is named by the instruction that started it; one at a time (`busy`). Each tool use is
 //   sent as `tool` with a short summary of what for; the turn's `result` text as `reply`; then
 //   `turn-ended`. The turn's full output (instruction, the agent's words, tools and their results) is
@@ -181,8 +186,10 @@ import {
   type StartMode,
 } from "@isoplan/protocol";
 import { pathKey } from "../data-layer/git.js";
+import { createRunGit } from "../handoff/git.js";
 import { claudeCommand } from "./claude-binary.js";
 import { forkEnv, hiddenSpawn, killTree, userTurn, type Spawn } from "./claude.js";
+import { createIsoplanClones, type IsoplanClone } from "./isoplan-clone.js";
 import type { DrivenFields, ProcessRecord, Registry } from "./registry.js";
 import type { RepoFolders } from "./repo-folders.js";
 import { MAX_HELD } from "./runner.js";
@@ -203,6 +210,8 @@ export interface DriveSettings {
   repoFoldersCheckMinutes: number;
   /** How often, at most, the branches on each repo's remote are listed again, and the folders sent when they changed. */
   branchRefreshMinutes: number;
+  /** How long a git command may take: making or fetching Isoplan's own clone for a hidden start. */
+  gitTimeoutSeconds: number;
 }
 
 /** One office server's side of the driver. */
@@ -262,6 +271,8 @@ export interface DriverOptions {
   projectOf: (folder: string) => Promise<string | null>;
   /** Opens a start outside the floor (start-where.ts): `opened`, and what still needs the person, or why it didn't open. */
   elsewhere?: (start: StartElsewhere, bin: string) => Promise<{ opened: boolean; problem: string | null }>;
+  /** Isoplan's own clone of a project, for a hidden start (isoplan-clone.ts); by default, under claudeDir, made with git. */
+  isoplanClone?: IsoplanClone;
   /** Writes a short name for a session from its first instruction (naming.ts); without one, sessions keep their folder's name. */
   namer?: { name(instruction: string): Promise<string | null> };
   /** The session was ended and removed: its reporting ends, so its agent leaves the floor once the office supports it (isoplan-app#245). */
@@ -591,6 +602,7 @@ const driven = { type: "driven", v: PROTOCOL_VERSION } as const;
 export function createDriver(o: DriverOptions): Driver {
   const now = o.now ?? Date.now;
   const spawn = o.spawn ?? hiddenSpawn;
+  const isoplanClone = o.isoplanClone ?? createIsoplanClones({ git: createRunGit(), claudeDir: o.claudeDir, timeoutMs: async () => (await o.settings()).gitTimeoutSeconds * 1000, log: o.log });
   const env = o.env ?? process.env;
   const newId = o.newId ?? randomUUID;
   const platform = o.platform ?? process.platform;
@@ -1053,12 +1065,19 @@ export function createDriver(o: DriverOptions): Driver {
       folder = own !== undefined && (await office.home(own).catch(() => null)) === project ? own : null;
       if (!folder) return refuse(server, m.id, "no-folder", { detail: NOT_LISTED });
       if (m.branch !== undefined && !repo!.branches.has(m.branch)) return refuse(server, m.id, "no-folder", { detail: BRANCH_NOT_LISTED });
-      if (elsewhere) return startElsewhere(server, m, elsewhere, folder, bin);
-      if (m.branch !== undefined) {
-        // A start the cap refuses now makes no worktree. One made for a start refused later (the cap
-        // reached meanwhile, or the session not opening) is kept, and the next start on that branch reuses it.
+      // A start the cap refuses now makes no clone or worktree. One made for a start refused later (the
+      // cap reached meanwhile, or the session not opening) is kept, and the next start on that branch reuses it.
+      if (!elsewhere && (m.hidden || m.branch !== undefined)) {
         const cap = capOf(await o.settings());
         if (heldIn(project) >= cap) return refuse(server, m.id, "cap-reached", { limit: cap, detail: capReached(cap) });
+      }
+      if (m.hidden) {
+        const clone = await isoplanClone(folder, project);
+        if (typeof clone !== "string") return refuse(server, m.id, "unavailable", { detail: clone.problem });
+        folder = clone;
+      }
+      if (elsewhere) return startElsewhere(server, m, elsewhere, folder, bin);
+      if (m.branch !== undefined) {
         const made = await office.branchFolder(folder, m.branch).catch((err: Error) => ({ error: err?.stack ?? String(err) }));
         if (typeof made !== "string") {
           o.log(`start ${m.id}: no folder for branch ${m.branch} of ${folder}: ${made.error}`);

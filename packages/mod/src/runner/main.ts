@@ -63,7 +63,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { PROTOCOL_VERSION, type DrivenMessage, type ExpertsMessage, type RefusalMessage, type ReplyMessage, type TakenMessage } from "@isoplan/protocol";
+import { PROTOCOL_VERSION, type DrivenMessage, type ExpertSeniorMessage, type ExpertsMessage, type RefusalMessage, type ReplyMessage, type TakenMessage } from "@isoplan/protocol";
 import { loadConfig, loadSettings, officesOf, type Office } from "../data-layer/config.js";
 import { approvedPath, createApproved } from "../data-layer/approved.js";
 import { approvedHome, machineHomeIo, takesFrom } from "../data-layer/home.js";
@@ -394,13 +394,16 @@ async function worker(): Promise<number> {
   // A GitHub repo's current name, asked for before a remote first seen is used (remote-names.ts).
   const names = askingRemoteNames(claudeDir);
   const homeIo = machineHomeIo(first.workspaceRepos, names);
+  // For experts alone, a git that can't read a repo's remote rejects rather than making it a local
+  // project: their listing keeps the last one sent, and a question is refused so the server asks again.
+  const expertHomeIo = machineHomeIo(first.workspaceRepos, names, os.hostname(), true);
   const ledger = await openLedger(path.join(isoplanDir, "runner", "ledger.json"));
   // What each brief's prepare found, by handoff, for its push and any push anyway after it.
   const preparedFor = new Map<string, Prepared>();
   // One fork cap for the machine, whichever office asks.
   const forks = createForkSlots();
   let send = (_index: number): Parameters<typeof createRunner>[0]["send"] => () => {};
-  let live = (_index: number) => (_message: DrivenMessage | ExpertsMessage): boolean => false;
+  let live = (_index: number) => (_message: DrivenMessage | ExpertsMessage | ExpertSeniorMessage): boolean => false;
   const isDir = (p: string) => fs.stat(p).then((s) => s.isDirectory(), () => false);
   const drives: DriveOffice[] = [];
   // What each transcript says its folder is, read once, for every office's list of folders.
@@ -443,10 +446,11 @@ async function worker(): Promise<number> {
       // The repos of the folders Claude Code sessions here ran in, within cloneSearchDays, gone or not, and those of the sessions driven from here.
       repoFolders: async () => {
         const since = Date.now() - (await settings()).cloneSearchDays * 86400000;
-        // Never an expert trunk's: its repo isn't one a person worked in here.
-        const seen = (await sessionFolders(io, path.join(claudeDir, "projects"), since, transcriptFolders, { gone: true })).filter((s) => !hosted.isExpertFolder(s.folder));
+        const seen = await sessionFolders(io, path.join(claudeDir, "projects"), since, transcriptFolders, { gone: true });
         for (const r of registry.list()) if (r.kind === "driven" && r.folder) seen.push({ folder: r.folder, at: Date.parse(r.lastActivity) || 0 });
+        // Never one of Isoplan's own folders, such as an expert trunk's: not one a person worked in here.
         const repos = await repoFolders(seen, {
+          claudeDir,
           checkout: checkouts.of,
           home,
           // Only a git checkout of a repo with a remote has branches to offer: not a folder above several repos.
@@ -476,9 +480,11 @@ async function worker(): Promise<number> {
         hosted,
         async (folder) => {
           await approved.refresh();
-          return approvedHome(folder, homeIo, approved.repos());
+          return approvedHome(folder, expertHomeIo, approved.repos());
         },
         log,
+        // A junior asking its senior is told to this office alone, over its own link (expert-link.ts).
+        (id) => hosts[index]?.senior(id),
       ),
       // Only the rooms the data layer would report: inside the askable window, and not held off, as
       // the runner holds a session off when the server doesn't want its project (or git can't place
@@ -548,10 +554,11 @@ async function worker(): Promise<number> {
     hostExperts({
       experts: hosted,
       approved: shared.get(office.server)!.approved,
-      home: (folder, repos) => approvedHome(folder, homeIo, repos),
+      home: (folder, repos) => approvedHome(folder, expertHomeIo, repos),
       scan: scanText,
       log,
       send: (m) => live(index)(m),
+      sendSenior: (m) => live(index)(m),
       server: office.server,
       checkMs: first.approvedRefreshMinutes * 60000,
     }),
@@ -627,7 +634,7 @@ async function worker(): Promise<number> {
 
   // The supervisor holds stdin open; it closes when the supervisor has gone.
   const gone = new Promise<void>((resolve) => process.stdin.on("end", resolve).on("error", resolve).resume());
-  const links = answerOffices<Office, ReplyMessage | RefusalMessage | TakenMessage, DrivenMessage | ExpertsMessage>({
+  const links = answerOffices<Office, ReplyMessage | RefusalMessage | TakenMessage, DrivenMessage | ExpertsMessage | ExpertSeniorMessage>({
     offices: answering,
     name: (office) => office.server,
     open: (office, said) => {
@@ -665,6 +672,7 @@ async function worker(): Promise<number> {
           experts: true,
           claude: claude.state(),
           starts: startPlaces(process.platform, hasOrca, hasDesktop),
+          hiddenStarts: true,
         },
       });
     },
