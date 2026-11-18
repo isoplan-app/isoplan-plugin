@@ -8,7 +8,7 @@ const hosting = (listed: string[] = []): HostingMessage => ({ type: "hosting", v
 const expert = (name: string, state: HostedExpert["state"] = "ready"): HostedExpert => ({ name, repo: `/work/${name}`, subject: `The ${name} rules.`, state });
 
 // A link that is up, a list that takes every repo, and experts whose hosted() is set by hand.
-function setUp(o: { repos?: ReadonlySet<string> | null; send?: () => boolean; scan?: () => Promise<string | null> } = {}) {
+function setUp(o: { repos?: ReadonlySet<string> | null; send?: () => boolean; scan?: () => Promise<string | null>; home?: () => Promise<void> } = {}) {
   let hosted: HostedExpert[] = [expert("adr")];
   const listeners: (() => void)[] = [];
   const refreshed: (boolean | undefined)[] = [];
@@ -19,7 +19,7 @@ function setUp(o: { repos?: ReadonlySet<string> | null; send?: () => boolean; sc
   const host = hostExperts({
     experts: { hosted: () => hosted, onChange: (l) => void listeners.push(l), listed: (_server, names) => void listed.push([...names]) },
     approved: { refresh: async (force) => void refreshed.push(force), repos: () => repos },
-    home: async (folder) => ({ id: "github.com/acme/app", name: folder.split("/").at(-1)! }),
+    home: async (folder) => (await o.home?.(), { id: "github.com/acme/app", name: folder.split("/").at(-1)! }),
     scan: async () => (o.scan ? o.scan() : null),
     log: (t) => void logs.push(t),
     send: (m) => (sent.push(m), o.send ? o.send() : true),
@@ -96,6 +96,24 @@ test("while the secret patterns can't be read nothing more is sent, so the serve
   await settle();
   expect(t.sent.map(names)).toEqual([["adr:ready"]]);
   expect(t.logs).toEqual(["the secret patterns can't be read, so the experts listing for wss://office.example isn't changed"]);
+  t.host.stop();
+});
+
+test("while git can't read an expert repo's remote nothing is sent, so the server keeps the listing it has", async () => {
+  let gitFails = false;
+  const t = setUp({ home: async () => (gitFails ? Promise.reject(new Error("git couldn't read the remote of /work/adr (exit 128)")) : undefined) });
+  t.host.onHosting(hosting());
+  await settle();
+  gitFails = true;
+  t.set([expert("adr", "starting")]);
+  t.change();
+  await settle();
+  expect(t.sent.map(names)).toEqual([["adr:ready"]]);
+  expect(t.logs).toEqual(["couldn't list the experts to wss://office.example: git couldn't read the remote of /work/adr (exit 128)"]);
+  gitFails = false;
+  t.change();
+  await settle();
+  expect(t.sent.map(names)).toEqual([["adr:ready"], ["adr:starting"]]);
   t.host.stop();
 });
 

@@ -475,6 +475,23 @@ test("findClone: the most recently used clone, with a remote whose path has spac
   expect(await findClone(nodeIo(), run, projects, remote, Date.now() - 86400000, 30000)).toEqual({ dir: path.resolve(newer), remote: "origin" });
 });
 
+test("findClone: an expert's read/, used more recently, is never taken for the person's own clone", async () => {
+  const claudeDir = tempRoot();
+  const { remote, clone } = remoteAndClone(claudeDir, "mine");
+  const read = path.join(claudeDir, "isoplan", "experts", "adr", "read");
+  fs.mkdirSync(path.dirname(read), { recursive: true });
+  git(claudeDir, "clone", "-q", remote, read);
+  const projects = path.join(claudeDir, "projects");
+  for (const [name, cwd, age] of [["a", clone, 60], ["b", read, 10]] as const) {
+    fs.mkdirSync(path.join(projects, name), { recursive: true });
+    const file = path.join(projects, name, "s.jsonl");
+    fs.writeFileSync(file, JSON.stringify({ cwd }) + "\n");
+    const at = new Date(Date.now() - age * 1000);
+    fs.utimesSync(file, at, at);
+  }
+  expect(await findClone(nodeIo(), run, projects, remote, Date.now() - 86400000, 30000)).toEqual({ dir: path.resolve(clone), remote: "origin" });
+});
+
 test("findClone: a clone whose remote names the handoff's GitHub repo by its old name", async () => {
   const root = tempRoot();
   const { clone } = remoteAndClone(root);

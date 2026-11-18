@@ -45,7 +45,7 @@
 // the runner (#50). A focus request (Focus this session, for a handoff this machine took into Orca)
 // goes to `focus`, and is answered with a focus reply, or refused `unavailable` saying why. A
 // question for one of the machine's experts (answer-expert), and the release or drop of one, goes
-// to `experts` (experts.ts), which keeps its own queue, caps and held answers.
+// to `experts` (experts.ts), which keeps its own queue and caps.
 
 import { PROTOCOL_VERSION, type HandoffMessage, type HandoffRepo, type RefusalMessage, type ReplyMessage, type RequestMessage, type TakenMessage } from "@isoplan/protocol";
 import type { ServerAsk } from "../data-layer/link.js";
@@ -103,7 +103,7 @@ export interface RunnerOptions {
   focus?: (handoff: string) => Promise<string | null>;
   /** The fork slots, shared by every office's runner on the machine; without it, this runner's own. */
   forks?: ForkSlots;
-  /** This machine's experts (experts.ts), which answer answer-expert requests with their own queue, caps and held answers; without it they are refused. */
+  /** This machine's experts (experts.ts), which answer answer-expert requests with their own queue and caps; without it they are refused. */
   experts?: Pick<Experts, "owns" | "answer" | "release" | "drop">;
   now?: () => number;
 }

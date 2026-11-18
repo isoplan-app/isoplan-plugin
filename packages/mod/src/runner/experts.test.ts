@@ -53,6 +53,19 @@ test("forOffice: an office whose list doesn't take an expert's repo is refused a
   expect(asked).toEqual(["expert-x-1-2"]);
 });
 
+test("forOffice: a home that can't be worked out is refused plain unavailable, with no expert code, so the server asks again", async () => {
+  const asked: string[] = [];
+  const logs: string[] = [];
+  const hosted = { hosted: () => [hostedExpert("billing")], owns: () => false, answer: (r: { id: string }) => void asked.push(r.id), release: () => {}, drop: () => {} };
+  const office = forOffice(hosted, () => Promise.reject(new Error("git couldn't read the remote of /work/billing (exit 128)")), (t) => void logs.push(t));
+  const sent: (ReplyMessage | RefusalMessage)[] = [];
+  office.answer({ type: "request", v: PROTOCOL_VERSION, id: "expert-x-1-1", kind: "answer-expert", expert: "billing", questionId: "x-1", question: "Q?", blocking: false, from: { id: "claude:sam", name: "Sam" }, asker: "s-1" }, (m) => void sent.push(m));
+  await new Promise((r) => setTimeout(r, 20));
+  expect(sent).toEqual([{ type: "refusal", v: PROTOCOL_VERSION, id: "expert-x-1-1", reason: "unavailable", detail: "the expert's host couldn't check this office's repos; ask again later" }]);
+  expect(asked).toEqual([]);
+  expect(logs).toEqual([expect.stringContaining("couldn't tell whether this office takes its repo")]);
+});
+
 // The experts folder with one expert file, whose expert is resumed from its state, and a claude
 // that never answers.
 function setUp() {
@@ -80,15 +93,13 @@ function setUp() {
   return { experts, expertsDir, logsDir, logs };
 }
 
-test("start() settles once the files and states are read, while the grounding's claude never answers; trunks and folders are known as the experts'", async () => {
+test("start() settles once the files and states are read, while the grounding's claude never answers; trunks are known as the experts'", async () => {
   const t = setUp();
   await t.experts.start();
   try {
     expect(t.experts.hosted()).toEqual([{ name: "adr", repo: path.resolve("/work/app"), subject: "What may leave a machine.", state: "starting" }]);
     expect(t.experts.isExpertSession(T1)).toBe(true);
     expect(t.experts.isExpertSession("22222222-2222-4222-8222-222222222222")).toBe(false);
-    expect(t.experts.isExpertFolder(path.join(t.expertsDir, "adr", "read", "src"))).toBe(true);
-    expect(t.experts.isExpertFolder(path.resolve("/work/app"))).toBe(false);
     // The new generation's trunk is known from before its claude starts.
     const second = (): string | null => {
       try {

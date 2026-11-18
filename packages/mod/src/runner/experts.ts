@@ -68,7 +68,6 @@ export interface Experts {
   drop(request: string): void;
   /** A bare uuid of a trunk, any generation. */
   isExpertSession(sessionId: string): boolean;
-  isExpertFolder(folder: string): boolean;
   /** No grounding, fork, append or judge running. */
   idle(): boolean;
   /** Ends every process tree, the judge's included. */
@@ -142,7 +141,7 @@ export function createExperts(o: ExpertsOptions): Experts {
       if ((unlisted.get(server) ?? "") === text) return;
       unlisted.set(server, text);
       if (!missing.length) return;
-      o.log(`${server} doesn't list the experts ${missing.join(", ")}: their repo isn't in an office there, or another machine's expert has the name`);
+      o.log(`${server} doesn't list the experts ${missing.join(", ")}: their repo isn't in an office there, another machine's expert has the name, or the office has more experts than a session may be told of`);
       for (const name of missing) health(name).say("listed", { server, unlisted: text });
     },
     owns: (request) => owner(request) !== undefined,
@@ -158,7 +157,6 @@ export function createExperts(o: ExpertsOptions): Experts {
     },
     drop: (request) => owner(request)?.drop(request),
     isExpertSession: (sessionId) => trunks.has(sessionId),
-    isExpertFolder: (folder) => inside(o.expertsDir, folder) !== null,
     idle: () => [...experts.values(), ...stopped].every((e) => e.idle()),
     close() {
       watcher?.stop();

@@ -714,7 +714,7 @@ const INTERNAL = "wss://isoplan-internal.example/data-layer";
 const DEV = "ws://127.0.0.1:4747/data-layer";
 const expertRight = (name: string, subject = `How ${name} works.`) => ({ name, subject, repo: "isoplan-app", host: "Ada" });
 const expertRights = (server: string, ...names: string[]): DataLayerLine => ({ type: "expert-rights", v: PROTOCOL_VERSION, experts: names.map((n) => expertRight(n)), server });
-const expertAsked = (state: "answered" | "withheld" | "dropped", more: Record<string, unknown> = {}): DataLayerLine =>
+const expertAsked = (state: "answered" | "dropped", more: Record<string, unknown> = {}): DataLayerLine =>
   ({ type: "asked", v: PROTOCOL_VERSION, question: "x-1", text: "How are sessions reported?", state, owner: "Ada", key: "k1", expert: "reporting", server: INTERNAL, ...more }) as DataLayerLine;
 const commit = "a1b2c3d".padEnd(40, "0");
 const enumOf = (h: ReturnType<typeof host>, i = -1) => (h.specs.filter((s) => s.name === "ask_expert").at(i)!.inputSchema as { properties: { expert: { enum: string[] } } }).properties.expert.enum;
@@ -795,21 +795,6 @@ test("hooks: a late answer from an expert goes on the next tool result as the ex
     ],
   });
   await vi.waitFor(() => expect(h.ran.at(-1)).toEqual({ argv: ["node", "C:/plugins/isoplan/dist/ask.js", "--session", "s1", "--cwd", "C:/w/repo", "--server", INTERNAL, "--ack", "x-1"], stdin: undefined }));
-});
-
-test("hooks: an expert's withheld answer becomes a note that isn't acked, and the answer after it still shows", async () => {
-  let arrive: (lines: DataLayerLine[]) => void = () => {};
-  const h = await start([connected, expertAsked("withheld")], { stays: true, later: new Promise((r) => (arrive = r)) });
-  await vi.waitFor(() => expect(h.spawned).toHaveLength(1));
-  await new Promise((r) => setTimeout(r, 10));
-  expect(await call(h, {})).toEqual({ result: "ok", context: [expect.stringContaining("the answer is held on Ada's machine until its owner releases it")] });
-  await new Promise((r) => setTimeout(r, 10));
-  expect(h.ran).toEqual([]);
-  arrive([expertAsked("withheld"), expertAsked("answered", { answer: "Released.", commit, branch: "main" })]);
-  await new Promise((r) => setTimeout(r, 10));
-  // The withheld one sent again isn't shown twice.
-  expect(await call(h, {})).toEqual({ result: "ok", context: [expect.stringContaining("> Released.")] });
-  await vi.waitFor(() => expect(h.ran.map((r) => r.argv.at(-1))).toEqual(["x-1"]));
 });
 
 test("hooks: a late answer from an expert goes to the subagent that asked while it runs", async () => {

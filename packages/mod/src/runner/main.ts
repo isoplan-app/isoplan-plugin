@@ -394,6 +394,9 @@ async function worker(): Promise<number> {
   // A GitHub repo's current name, asked for before a remote first seen is used (remote-names.ts).
   const names = askingRemoteNames(claudeDir);
   const homeIo = machineHomeIo(first.workspaceRepos, names);
+  // For experts alone, a git that can't read a repo's remote rejects rather than making it a local
+  // project: their listing keeps the last one sent, and a question is refused so the server asks again.
+  const expertHomeIo = machineHomeIo(first.workspaceRepos, names, os.hostname(), true);
   const ledger = await openLedger(path.join(isoplanDir, "runner", "ledger.json"));
   // What each brief's prepare found, by handoff, for its push and any push anyway after it.
   const preparedFor = new Map<string, Prepared>();
@@ -443,10 +446,11 @@ async function worker(): Promise<number> {
       // The repos of the folders Claude Code sessions here ran in, within cloneSearchDays, gone or not, and those of the sessions driven from here.
       repoFolders: async () => {
         const since = Date.now() - (await settings()).cloneSearchDays * 86400000;
-        // Never an expert trunk's: its repo isn't one a person worked in here.
-        const seen = (await sessionFolders(io, path.join(claudeDir, "projects"), since, transcriptFolders, { gone: true })).filter((s) => !hosted.isExpertFolder(s.folder));
+        const seen = await sessionFolders(io, path.join(claudeDir, "projects"), since, transcriptFolders, { gone: true });
         for (const r of registry.list()) if (r.kind === "driven" && r.folder) seen.push({ folder: r.folder, at: Date.parse(r.lastActivity) || 0 });
+        // Never one of Isoplan's own folders, such as an expert trunk's: not one a person worked in here.
         const repos = await repoFolders(seen, {
+          claudeDir,
           checkout: checkouts.of,
           home,
           // Only a git checkout of a repo with a remote has branches to offer: not a folder above several repos.
@@ -476,7 +480,7 @@ async function worker(): Promise<number> {
         hosted,
         async (folder) => {
           await approved.refresh();
-          return approvedHome(folder, homeIo, approved.repos());
+          return approvedHome(folder, expertHomeIo, approved.repos());
         },
         log,
       ),
@@ -548,7 +552,7 @@ async function worker(): Promise<number> {
     hostExperts({
       experts: hosted,
       approved: shared.get(office.server)!.approved,
-      home: (folder, repos) => approvedHome(folder, homeIo, repos),
+      home: (folder, repos) => approvedHome(folder, expertHomeIo, repos),
       scan: scanText,
       log,
       send: (m) => live(index)(m),

@@ -18,7 +18,7 @@ import { nodeIo } from "../data-layer/io.js";
 import { openSideLink } from "../handoff/connection.js";
 import type { Told } from "../pipe/pipe.js";
 import { TokenExpired } from "./ask.js";
-import { askExpertThrough } from "./expert.js";
+import { askExpertThrough, type ExpertTold } from "./expert.js";
 import { expertText, notSentText } from "./expert-text.js";
 import { askIn, CONNECT_MS, hello, machinePairing, type MachineAsk } from "./machine.js";
 
@@ -30,7 +30,7 @@ export interface ExpertSettings {
 export type MachineExpertAsk = MachineAsk & { expert: string; blocking: boolean; key: string };
 
 /** What the agent is told, `failed` with its code when the question couldn't be asked. */
-export async function askExpertFromMachine(a: MachineExpertAsk): Promise<Told> {
+export async function askExpertFromMachine(a: MachineExpertAsk): Promise<ExpertTold> {
   const received = Date.now();
   const about = { expert: a.expert, id: a.key };
   const unreachable = (words: string): Told => ({ text: expertText("EXPERT_RUNNER_UNREACHABLE", { ...about, words }), failed: true, code: "EXPERT_RUNNER_UNREACHABLE" });

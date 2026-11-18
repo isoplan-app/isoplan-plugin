@@ -10,10 +10,11 @@ const API = "github.com/ada/api";
 
 // Each folder's main checkout and each checkout's repo, by key, as checkouts.ts and the office's home
 // would say; a folder with no checkout given is its own; a checkout with no repo is in none the office takes.
-const options = ({ checkouts = {}, homes, branches = {}, logs = [] }: { checkouts?: Record<string, string>; homes: Record<string, string>; branches?: Record<string, string[] | null>; logs?: string[] }): RepoFoldersOptions => {
+const options = ({ checkouts = {}, homes, branches = {}, logs = [], claudeDir = "/Users/ada/.claude" }: { checkouts?: Record<string, string>; homes: Record<string, string>; branches?: Record<string, string[] | null>; logs?: string[]; claudeDir?: string }): RepoFoldersOptions => {
   const by = <T>(o: Record<string, T>) => new Map(Object.entries(o).map(([k, v]) => [pathKey(k), v]));
   const [c, h, b] = [by(checkouts), by(homes), by(branches)];
   return {
+    claudeDir,
     checkout: async (folder) => c.get(pathKey(folder)) ?? folder,
     home: async (folder) => h.get(pathKey(folder)) ?? null,
     branches: async (checkout) => b.get(pathKey(checkout)) ?? null,
@@ -75,6 +76,15 @@ test("a folder with no checkout to list, or whose checkout is in no repo the off
   const o = options({ checkouts: {}, homes: { "/Users/ada/app": APP } });
   o.checkout = async (folder) => (folder.endsWith("gone") ? null : folder);
   expect(await repoFolders([{ folder: "/Users/ada/wt-gone", at: 3 }, { folder: "/Users/ada/notes", at: 2 }, { folder: "/Users/ada/app", at: 1 }], o)).toEqual([{ project: APP, folders: ["/Users/ada/app"] }]);
+});
+
+test.each([
+  // Spelt in another case, as Windows allows.
+  ["Windows", "C:\\Users\\Ada\\.claude", "C:\\Users\\Ada\\code\\app", ["c:/users/ada/.CLAUDE/Isoplan/experts/adr/read", "C:\\Users\\Ada\\.claude\\isoplan\\clones\\app"]],
+  ["macOS", "/Users/ada/.claude", "/Users/ada/code/app", ["/Users/ada/.claude/isoplan/experts/adr/read", "/Users/ada/.claude/isoplan/clones/app"]],
+])("%s: Isoplan's own folders, an expert's read/ or Isoplan's clone, are never listed, even used more recently than the person's clone", async (_, claudeDir, app, own) => {
+  const o = options({ claudeDir, homes: Object.fromEntries([app, ...own].map((f) => [f, APP])) });
+  expect(await repoFolders([...own.map((folder, i) => ({ folder, at: 10 - i })), { folder: app, at: 1 }], o)).toEqual([{ project: APP, folders: [app] }]);
 });
 
 test("every repo's remote is asked at once: two slow ones hold the list up by one wait, not two, and the order is kept", async () => {

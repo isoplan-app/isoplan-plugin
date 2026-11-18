@@ -44,11 +44,15 @@ export async function accountOf(io: IdentityIo, claudeJson: string, cwd: string)
  * (Windows, macOS) a local project's id is lower-cased, so one folder reached in two spellings is
  * one project, in the hello and in every edit alike. With `names`, a remote naming a GitHub repo by
  * an old name gives the repo's current id (remote-names.ts), so an old clone is the same project.
+ * With `strict`, a git that can't say (it fails, or exits other than 0 or 2, git's "no such remote")
+ * throws instead of reading as no remote, for callers that must not mistake a hiccup for a local repo.
  */
-export async function projectOf(run: Run | null, where: Where | null, cwd: string, machine: string, { caseless = process.platform === "win32" || process.platform === "darwin", names = null }: { caseless?: boolean; names?: RemoteNames | null } = {}): Promise<Project> {
+export async function projectOf(run: Run | null, where: Where | null, cwd: string, machine: string, { caseless = process.platform === "win32" || process.platform === "darwin", names = null, strict = false }: { caseless?: boolean; names?: RemoteNames | null; strict?: boolean } = {}): Promise<Project> {
   let remote: string | null = null;
   if (run && where) {
-    const r = await Promise.resolve(run(["git", "remote", "get-url", "origin"], { cwd: where.toplevel })).catch(() => null);
+    const ran = Promise.resolve(run(["git", "remote", "get-url", "origin"], { cwd: where.toplevel }));
+    const r = strict ? await ran : await ran.catch(() => null);
+    if (strict && r!.code !== 0 && r!.code !== 2) throw new Error(`git couldn't read the remote of ${where.toplevel} (exit ${r!.code})`);
     if (r && r.code === 0 && r.stdout.trim()) remote = r.stdout.trim();
   }
   const root = !where ? normalize(cwd) : /\/\.git$/.test(where.commonDir) ? dirname(where.commonDir) : where.toplevel;
