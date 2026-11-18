@@ -51,6 +51,9 @@ export const SessionFactSchema = z.object({
   // answered from the floor. Absent: only the runner sees the session (from its transcript), and
   // nothing from the floor reaches it.
   hooks: z.literal(true).optional(),
+  // `asksExperts` (protocol 0.13.0 on): the hooks module in this session gives its agent ask_expert
+  // once the server says whom it may ask (`expert-rights`).
+  asksExperts: z.literal(true).optional(),
   extra: Extra,
 });
 

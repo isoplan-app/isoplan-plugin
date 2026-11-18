@@ -1498,6 +1498,15 @@ const RUNNER_FILES = [
 	"prompts/brief.md",
 	"prompts/spin-off.md",
 	"prompts/naming.md",
+	"prompts/expert-grounding.md",
+	"prompts/expert-read.md",
+	"prompts/expert-question.md",
+	"prompts/expert-role-junior.md",
+	"prompts/expert-role-first.md",
+	"prompts/expert-role-senior.md",
+	"prompts/expert-senior-answer.md",
+	"prompts/expert-note.md",
+	"prompts/expert-judge.md",
 	"dist/connect.js",
 	"dist/runner.js"
 ];

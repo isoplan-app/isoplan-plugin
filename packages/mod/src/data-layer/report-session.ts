@@ -29,7 +29,9 @@
 // (`takesMessages`), it says `takesMessages` too, and a message its owner sends from the floor goes
 // to that hooks module, which submits it as the session's next turn (src/data-layer/owner-messages.ts);
 // when that hooks module can also end the running turn (`endsTurns`), its open questions it didn't
-// see asked are answerable as the owner's message.
+// see asked are answerable as the owner's message. One that gives its agent ask_expert once told
+// whom it may ask (`asksExperts`, protocol 0.13.0) says `asksExperts`, so the server sends it the
+// experts it may ask (`expert-rights`).
 //
 // Its log lines go to <claude dir>/isoplan/logs/<session>.log (the runner's sessionLog), and without
 // a hooks module the other lines are dropped. Without one it reports only while the session is at work, and the
@@ -187,6 +189,8 @@ export interface ReportSessionOptions {
   takesMessages?: boolean;
   /** With a hooks module: it can end the running turn. */
   endsTurns?: boolean;
+  /** With a hooks module: it gives its agent ask_expert once the server says whom it may ask. */
+  asksExperts?: boolean;
   /** Whether Claude Code lists the plugin as uninstalled or disabled for the session; by default, for the hooks module's copy (or this one's). */
   isOff?: () => Promise<boolean>;
   /** Without a hooks module: the offices that didn't want the session, each until when, from an earlier run. */
@@ -533,7 +537,7 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
           // A link that drops has the list of repos the office takes read again, in case that is why.
           if (line.state === "disconnected") c.watch(run.approved.refresh(true));
         }
-        emit(line.type === "status" || line.type === "pair" ? { ...line, label } : line.type === "asked" || line.type === "ask-rights" ? { ...line, server } : line);
+        emit(line.type === "status" || line.type === "pair" ? { ...line, label } : line.type === "asked" || line.type === "ask-rights" || line.type === "expert-rights" ? { ...line, server } : line);
       });
       // The runner's own, shared by every session it reports: one pairing for the office, which a session's link closing leaves answering.
       const shared = o.shared?.(office);
@@ -735,7 +739,7 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
     const given: string | null | undefined = named ?? (read.facts.session.titleFrom === "branch" ? title?.title : null);
     const titled = given ? { ...read.facts, session: { ...read.facts.session, title: given } } : read.facts;
     const sized: Facts = contextWindow ? { ...titled, session: { ...titled.session, contextWindow } } : titled;
-    const facts: Facts = hooked ? { ...sized, session: { ...sized.session, hooks: true, ...(takesMessages && { takesMessages: true as const }) } } : sized;
+    const facts: Facts = hooked ? { ...sized, session: { ...sized.session, hooks: true, ...(takesMessages && { takesMessages: true as const }), ...(hooked && o.asksExperts && { asksExperts: true as const }) } } : sized;
     if (facts.session.title) o.titled?.(facts.session.title);
 
     checkouts = read.checkouts ?? {};

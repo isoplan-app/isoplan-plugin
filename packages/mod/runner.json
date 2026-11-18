@@ -37,5 +37,7 @@
   "drivenStartSeconds": 120,
   "drivenPromptMinutes": 10,
   "repoFoldersCheckMinutes": 5,
-  "branchRefreshMinutes": 5
+  "branchRefreshMinutes": 5,
+  "expertJudgeModel": "haiku",
+  "expertWaitSeconds": 10
 }

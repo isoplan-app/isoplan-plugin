@@ -43,13 +43,16 @@
 // sends it now, or after the next hello) and the server hadn't dropped it, nor the runner given it
 // up: a take as a driven session opens only then, and frees its place otherwise (session.ts). owner-answer requests go to the live session, not
 // the runner (#50). A focus request (Focus this session, for a handoff this machine took into Orca)
-// goes to `focus`, and is answered with a focus reply, or refused `unavailable` saying why.
+// goes to `focus`, and is answered with a focus reply, or refused `unavailable` saying why. A
+// question for one of the machine's experts (answer-expert), and the release or drop of one, goes
+// to `experts` (experts.ts), which keeps its own queue, caps and held answers.
 
 import { PROTOCOL_VERSION, type HandoffMessage, type HandoffRepo, type RefusalMessage, type ReplyMessage, type RequestMessage, type TakenMessage } from "@isoplan/protocol";
 import type { ServerAsk } from "../data-layer/link.js";
 import type { Answerer, FailureKind, Lead } from "./answerer.js";
 import { estimate, overCap, type Cap, type CapSettings, type Ledger } from "./caps.js";
 import { untrackedLine } from "../handoff/git.js";
+import type { Experts } from "./experts.js";
 import { fill, type Prompts } from "./prompts.js";
 
 /** What runner.json says, as the runner uses it. */
@@ -100,6 +103,8 @@ export interface RunnerOptions {
   focus?: (handoff: string) => Promise<string | null>;
   /** The fork slots, shared by every office's runner on the machine; without it, this runner's own. */
   forks?: ForkSlots;
+  /** This machine's experts (experts.ts), which answer answer-expert requests with their own queue, caps and held answers; without it they are refused. */
+  experts?: Pick<Experts, "owns" | "answer" | "release" | "drop">;
   now?: () => number;
 }
 
@@ -152,7 +157,7 @@ const FAILED: Record<FailureKind, string> = {
 // Ids of replies dropped from the held set, remembered so a release for one says so.
 const REMEMBER_DROPPED = 200;
 
-export function createRunner({ answerer, ledger, settings, prompts, scan, send, log, isDir, isReported, push, prepareBrief, take, onTaken, focus, forks = createForkSlots(), now = Date.now }: RunnerOptions): Runner {
+export function createRunner({ answerer, ledger, settings, prompts, scan, send, log, isDir, isReported, push, prepareBrief, take, onTaken, focus, forks = createForkSlots(), experts, now = Date.now }: RunnerOptions): Runner {
   const rooms = new Map<string, Promise<void>>(); // each room's last queued request
   const running = new Set<string>(); // ids queued or running
   const finished = new Map<string, Outgoing>(); // id → what was last sent for it
@@ -321,6 +326,14 @@ export function createRunner({ answerer, ledger, settings, prompts, scan, send, 
 
   return {
     take(message) {
+      // An expert's requests, and the release or drop of one, are the experts module's.
+      if (message.type === "release" && experts?.owns(message.id)) return experts.release(message.id, send);
+      if (message.type === "drop" && experts?.owns(message.id)) return experts.drop(message.id);
+      if (message.type === "request" && message.kind === "answer-expert") {
+        if (experts) experts.answer(message, send);
+        else send(unavailable(message.id, "this machine hosts no experts"));
+        return;
+      }
       if (message.type === "release") {
         void release(message.id);
         return;

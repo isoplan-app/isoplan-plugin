@@ -69,7 +69,7 @@ export async function pipeMain(argv: string[], appDir: string): Promise<number> 
   await relay({
     claudeDir,
     // The session's own plugin folders and update switches go with it: the runner's environment isn't the session's.
-    hello: { session, cwd, since: Number(value(argv, "--since")) || Date.now(), messages: argv.includes("--messages"), endsTurns: argv.includes("--ends-turns"), root: appDir, version, env: sessionEnv(process.env) },
+    hello: { session, cwd, since: Number(value(argv, "--since")) || Date.now(), messages: argv.includes("--messages"), endsTurns: argv.includes("--ends-turns"), experts: true, root: appDir, version, env: sessionEnv(process.env) },
     out,
     goOn,
     startRunner: () => startRunner({ claudeDir, spawn: spawnHidden }),

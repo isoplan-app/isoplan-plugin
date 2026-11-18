@@ -456,6 +456,8 @@ test("the session's context window reaches the office only once the hooks module
   expect(sent().find((m) => m.type === "full")!.facts!.session).not.toHaveProperty("contextWindow");
   // Without messages, the session doesn't say it takes messages from the floor.
   expect(sent().find((m) => m.type === "full")!.facts!.session).not.toHaveProperty("takesMessages");
+  // Nor that it asks experts, unless its hooks module says so.
+  expect(sent().find((m) => m.type === "full")!.facts!.session).not.toHaveProperty("asksExperts");
   // It says its hooks module runs in it.
   expect(sent().find((m) => m.type === "full")!.facts!.session.hooks).toBe(true);
   expect(sent().some((m) => m.upsert?.session && "contextWindow" in m.upsert.session)).toBe(false);
@@ -500,6 +502,15 @@ test("a session whose hooks module can submit says it takes messages; its owner'
   fs.writeFileSync(line.file, JSON.stringify({ taken: true, queued: true }));
   await until(() => sent().some((m) => m.id === "m2"));
   expect(sent().find((m) => m.id === "m2")).toEqual({ type: "reply", v: 1, id: "m2", kind: "owner-message", queued: true });
+});
+
+test("a session whose hooks module gives its agent ask_expert says asksExperts, so the server sends it the experts it may ask", async () => {
+  const o = await office();
+  o.state.repos = ["github.com/team/app"];
+  versions(o.url).hooked("0.2.0", { asksExperts: true });
+  const sent = () => (o.state.connections[0]?.messages ?? []) as { type: string; facts?: { session: Record<string, unknown> } }[];
+  await until(() => sent().some((m) => m.type === "full"));
+  expect(sent().find((m) => m.type === "full")!.facts!.session.asksExperts).toBe(true);
 });
 
 test("several messages the owner sends back to back reach the hooks module in the order they were sent", async () => {

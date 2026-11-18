@@ -193,6 +193,89 @@ Once you have taken a handoff, your session's agent gets the plugin's `ask_earli
 
 Your agent is never held up for long: when their machine is off, their runner is away, a cap is reached or the answer is held, it checks `askPolls` times, `askPollSeconds` apart, then is told to carry on. The question stays queued and is asked again when their runner is back; an answer that comes later reaches your agent as a note on one of its next tool results. The tool asks through the machine's runner, and only for a session whose hooks module is connected to it; a question that looks like it holds a secret isn't sent. When the office signs people in, it asks with this machine's pairing, as the session reports; on a machine that isn't paired, or whose pairing has ended, your agent is told so and carries on.
 
+## Experts
+
+An expert is a read-only agent on your machine that knows one subject in one repo well, and answers other agents' questions about it, from any machine in the office. It never writes code or acts. Its trunk is a Claude Code session the runner grounds once in the subject, in a checkout of the repo's default branch of its own, and never compacts; each question runs on a fork of the trunk, which leaves no transcript, and the answer cites the files it read, at a commit. You host it, so your Claude subscription pays for its answers, within the caps below. Its trunks and forks are never reported to the floor.
+
+### The expert file
+
+You start an expert by writing `~/.claude/isoplan/experts/<name>.json`, the one file of it you edit:
+
+```json
+{
+  "version": 1,
+  "name": "what-leaves-a-machine",
+  "repo": "C:/Users/adamr/Projects/Isoplan/isoplan-app",
+  "subject": "What session text may leave a person's machine and under what rules (ADR 0004), and how one session asks another (asks.ts). Ask before you add anything that sends data off a machine or stores session text on the office server.",
+  "model": "sonnet",
+  "promoteAtTokens": 45000,
+  "forkTimeLimitMinutes": 5,
+  "caps": { "perAskerPerDay": 30, "openPerAsker": 3, "tokenBudgetPerDay": 2000000 },
+  "proof": {
+    "question": "If a session runs in a repo the office doesn't take, what does the plugin send to the office server about it?",
+    "answer": "Nothing at all, not even its hello or its repo's id."
+  }
+}
+```
+
+| Field | Required | What |
+|---|---|---|
+| `version` | yes | `1`. A file written for a newer runner is refused. |
+| `name` | yes | Lowercase letters, digits and dashes, at most 63, the same as the file's name. Agents ask it by this name, which is unique in the office: the first host to list a name keeps it. |
+| `repo` | yes | An absolute path to a git checkout whose `origin` remote is a repo the office takes, at an https, ssh or host:path URL. |
+| `subject` | yes | Up to 1,000 characters: what to ask it about, and before which changes. Every agent in the office sees it, so it is checked for secrets before it leaves. |
+| `model` | yes | The model it grounds and answers with. |
+| `promoteAtTokens` | yes | The size of its junior's context at which a new generation takes over (below). It must leave at least 100,000 tokens before the model's compaction point. |
+| `forkTimeLimitMinutes` | no | 5: how long one question may take. |
+| `groundingTimeLimitMinutes` | no | 15: how long a grounding may take. |
+| `fetchSeconds` | no | 60: how often, at most, it fetches the default branch before a question; 0 fetches before every one. |
+| `maxForks` | no | 3: how many questions it answers at once. |
+| `caps` | no | `perAskerPerDay` 30, `openPerAsker` 3, `tokenBudgetPerDay` 2,000,000 (in `runner.json`'s weighted token units). |
+| `proof` | yes | A question with its expected answer, asked after every grounding. |
+| `window` | no | The model's context window, when the runner's table doesn't know it (at least 100,000). |
+| `areas` | no | Globs of the files it covers, kept for later and unused now. |
+
+Every number is a whole number of at least 1, except `fetchSeconds` and `window`. A field the runner doesn't know is logged, not fatal; a file that doesn't parse is logged, to `runner.log` and the expert's health log, with the field and the reason, and that expert doesn't start (one already running keeps running). The runner looks at the folder every few seconds. A change to `subject`, `model`, `proof` or `window` grounds a new generation in the background while the old one keeps answering; a new `repo` starts the expert over, removing its old clone first. Other fields apply at once. Removing the file stops the expert and keeps its folder.
+
+### Where things are
+
+Its state (the ids of its trunks, and which files each read at which commit) and its caps ledger are in `~/.claude/isoplan/experts/<name>/`. Its health log is `~/.claude/isoplan/logs/expert-<name>.log`: each grounding, proof question, promotion, question (by id, with its time and cost), cap reached and error. Its own clone of your `repo`'s origin is there too, `read/`, detached at the default branch, where every trunk and fork runs. It is a clone, not a worktree of your checkout, so it doesn't show under your repo in Orca or `git worktree list`, and its sessions aren't among yours; it borrows your checkout's objects while it is made, so little comes over the network. Your checkout is only read, for its origin's URL and default branch. A `read/` that isn't a clone of its own, such as a worktree an earlier plugin made, is left as it is and the expert doesn't start until you remove it.
+
+### Generations and the proof question
+
+A generation is one trunk, from its grounding to its retirement. After each grounding, a fork answers the proof question, and a model with no tools (`expertJudgeModel` in `runner.json`, Haiku) compares its answer with yours; both answers and the verdict go to the health log. A generation that passes becomes the junior and answers questions. One that fails takes none: the generation before it keeps answering, and with none, questions fail with `EXPERT_FORK_FAILED` until you change the file or the runner restarts. A fork that asked the senior or explored adds what it found to the junior's trunk as a learned note, so the trunk grows. Once it reaches `promoteAtTokens`, a new generation grounds; when it passes, it becomes the junior, the old junior becomes its senior, which the junior asks before exploring, and the one before that retires. A generation that compacts fails, and a new one grounds. Don't resume a trunk yourself: every later fork would inherit what you add, so a trunk with turns the runner didn't add is no longer used, and a junior's is replaced by a new generation. While it hosts an expert, the runner stays up, lit or not, so its experts can answer.
+
+### Asking
+
+Once the office tells a session which experts it may ask, its agent gets the `ask_expert` tool, which lists them with their subjects; a session in an office with no experts, or on an older plugin, doesn't have it. The agent sets `blocking` itself: true only when it can do nothing else until the answer comes. A blocking call waits up to `expertWaitSeconds` (10, in `runner.json`) and then tells the agent to explore meanwhile; any other returns once the office has the question. An answer that comes later reaches the agent as a note on one of its next tool results, as ask_earlier_session's do. The question goes from the runner on the asker's machine, which checks it for secrets first, to the office server, and on to the runner hosting the expert. While that machine is away, the question waits and is asked again when it reconnects, or is dropped after `maxAttempts` tries or `maxAgeHours`, with a note saying why.
+
+### Caps
+
+The host's caps are the expert file's: questions per asking session per day, open questions per asking session, and the expert's daily token budget, counted in its own ledger, apart from the caps in `runner.json`. Raise them in the expert file. The office's are in its `asks.json`, raised by an admin: `openPerAskerPerRoom` is also how many questions one person may have waiting for one expert, and `perAskerPerDay` how many expert questions one person may ask in a day, counted apart from questions to earlier sessions.
+
+### What leaves the machine
+
+From the host: each expert's name, subject and repo, only to an office that takes the repo, and its answers, each checked for secrets first; an answer that matches is refused at once, never held. The trunks, forks and learned notes stay on the machine. From the asker: the question, checked for secrets first. The office server holds a question and its answer only while it is in flight: their words are deleted once the asker has seen its end, or after twice `maxAgeHours` when it never does, and a record without words stays a day, for the daily cap.
+
+### What ask_expert's replies mean
+
+Every reply names the expert and the question's id, which the host's health log uses too, and ends with a code:
+
+| Code | What happened | Fix |
+|---|---|---|
+| `EXPERT_RUNNER_UNREACHABLE` | The runner on the asker's machine, or its way to the office, can't be reached; nothing was sent. | Check that the runner is up and the machine is paired, and ask again. |
+| `EXPERT_REFUSED` | The office server refused the question, for the reason the reply gives (the session isn't held yet after a reconnect, say); it wasn't asked. | Do what the reason says, then ask again. |
+| `EXPERT_UNKNOWN` | No expert of that name in the session's office. | Ask one of the names the reply lists. |
+| `EXPERT_CAP` | A cap was reached, the office's or the host's; the reply says which, and when it frees. | Wait, or raise it: the office's in `asks.json` (an admin), the host's in the expert file (its owner). |
+| `EXPERT_QUESTION_HELD` | The question looked like it held a secret, so it wasn't sent. | Ask again without it. |
+| `EXPERT_PLUGIN_OLD` | This machine's plugin, or the host's, is from before experts. | Update the Isoplan plugin on the machine the reply names. |
+| `EXPERT_QUEUED` | The host's machine isn't connected; the question waits. | Nothing: the answer, or why it was dropped, comes as a note. |
+| `EXPERT_STARTING` | The expert is grounding a new generation. | Nothing: the answer comes as a note. |
+| `EXPERT_FORK_FAILED` | The fork failed, timed out or ran out of room, the expert hasn't passed its proof question, or its answer looked like it held a secret; the reply gives the host's cause. | The host looks at the health log; the agent explores instead. |
+| `EXPERT_DROPPED` | The question was dropped: too many tries, too old, the host gone too long, or the expert or its repo gone. | Ask again if it still matters. |
+
+An answer that matches the host's secret check is refused at once with `EXPERT_FORK_FAILED`, and the asker explores instead: an expert runs on its own, so nothing is held for a person to release. The match is logged, so it can be looked into: a `question id=… outcome=secret` line in `~/.claude/isoplan/logs/expert-<name>.log`, and the pattern's name, never the answer, in the runner's log.
+
 ## Answering from the floor
 
 When an agent asks you something (`AskUserQuestion`), the question shows in the terminal and on the floor at once, and the first answer wins: answer it in the agent's details on the floor and the terminal's dialog closes, and the agent gets your answers as if you had picked them in the terminal. Only you can answer your own sessions' questions there, and only you, and an admin with Overview on, can read them; everyone else sees that your agent is waiting on you. The floor offers a question only while the plugin is waiting for it in that session, so one in a session the runner reports, without the plugin, or asked before the plugin loaded, is read-only there: answer it in its terminal. A question is secret-checked before it leaves, as reports are: one that matches, and every one while the patterns can't be read, goes as a placeholder and is answered in the terminal. A report the secret check held is released from the same place.
@@ -203,9 +286,9 @@ This rests on how Claude Code's dialog behaves while a hook waits, which `script
 
 ## What leaves your machine
 
-Nothing at all of a session in a repo the office doesn't take. An admin lists the company's repos on the floor (Repos), and the plugin reads that list from the office server (`/data-layer/repos`, beside the `server` address: every approved repo's id, with this machine's pairing token when the office signs people in) every `approvedRefreshMinutes` (5), whenever its link drops, and before every reconnect, keeping a copy in `~/.claude/isoplan/offices/<id>/approved.json`, one per server. With several servers, each server's list decides for that server alone. A copy the server hasn't confirmed for `approvedMaxAgeMinutes` (15) approves nothing. A session in any other repo opens no connection and sends nothing, not even a hello or its repo's id; the status line says "this repo isn't in the office", and the plugin's log says why. A session the plugin doesn't run in, which the runner reports, is then left alone, and reported again once this machine's copy of the list takes its repo. Once an admin adds the repo, its sessions connect at the next check, or soon after `/isoplan:repos`, which asks every office at once and keeps its answer in the same copy: each running session and the runner take it at their next pass (within a minute), and a session the runner isn't reporting at its next message; once one is taken out, their links close. With no list (the server can't be reached and there is no fresh copy, or the server is too old to give one), nothing is sent. The handoff and ask-the-earlier-session commands go by the same copy; taking a handoff with its code looks up the work's repo by the code and says hello as that, so the folder you take it in is never named. What isn't a session's carries no repo id: pairing sends this machine's name, its random id and the Claude account's label, and the runner's link says hello with the account and the machine's name; the runner answers only for sessions in repos the office takes.
+Nothing at all of a session in a repo the office doesn't take. An admin lists the company's repos on the floor (Repos), and the plugin reads that list from the office server (`/data-layer/repos`, beside the `server` address: every approved repo's id, with this machine's pairing token when the office signs people in) every `approvedRefreshMinutes` (5), whenever its link drops, and before every reconnect, keeping a copy in `~/.claude/isoplan/offices/<id>/approved.json`, one per server. With several servers, each server's list decides for that server alone. A copy the server hasn't confirmed for `approvedMaxAgeMinutes` (15) approves nothing. A session in any other repo opens no connection and sends nothing, not even a hello or its repo's id; the status line says "this repo isn't in the office", and the plugin's log says why. A session the plugin doesn't run in, which the runner reports, is then left alone, and reported again once this machine's copy of the list takes its repo. Once an admin adds the repo, its sessions connect at the next check, or soon after `/isoplan:repos`, which asks every office at once and keeps its answer in the same copy: each running session and the runner take it at their next pass (within a minute), and a session the runner isn't reporting at its next message; once one is taken out, their links close. With no list (the server can't be reached and there is no fresh copy, or the server is too old to give one), nothing is sent. The handoff and ask-the-earlier-session commands go by the same copy; taking a handoff with its code looks up the work's repo by the code and says hello as that, so the folder you take it in is never named. What isn't a session's carries no repo id: pairing sends this machine's name, its random id and the Claude account's label, and the runner's link says hello with the account and the machine's name, and, while it hosts experts, lists each one's name, subject and project, only for repos the office takes and never for a repo with no remote; the runner answers only for sessions in repos the office takes.
 
-For a repo the office takes, by default only facts: which sessions and agents are running and what kind of work each is doing, in which repository and branch, which files they touched, and when they wait. Session-derived text leaves only in named cases, each kept by the server for a set period and then deleted: an agent's final report, questions an agent asks its owner, and the questions, answers and briefs of work that was handed over. A report, and a question an agent asks you, is checked for secrets on your machine before it is sent, as answers and briefs are. A report that matches stays a placeholder, a note saying it is held, until you release it from the floor; with several offices, a release on one office's floor lets it out to that office alone, and the others keep the placeholder until it is released on theirs. A question that matches is answered in the terminal. A pattern you add after a report went out can't recall it.
+For a repo the office takes, by default only facts: which sessions and agents are running and what kind of work each is doing, in which repository and branch, which files they touched, and when they wait. Session-derived text leaves only in named cases, each kept by the server for a set period and then deleted: an agent's final report, questions an agent asks its owner, the questions, answers and briefs of work that was handed over, and questions asked of an expert and its answers, which the server holds only while they are in flight (see Experts). A report, and a question an agent asks you, is checked for secrets on your machine before it is sent, as answers, briefs and expert questions are. A report that matches stays a placeholder, a note saying it is held, until you release it from the floor; with several offices, a release on one office's floor lets it out to that office alone, and the others keep the placeholder until it is released on theirs. A question that matches is answered in the terminal. A pattern you add after a report went out can't recall it.
 
 An agent often works in more than one repo: editing files with Edit or Write, or with shell commands (Bash, zsh, PowerShell or cmd) that cd somewhere else or point a tool at another folder (`git -C`, `npm --prefix`, `pnpm -C`, `make -C`). The plugin works out which repo each file and command is in, but a file, command or subagent's worktree in a repo other than the session's own leaves your machine only when the office it reports to holds that repo, and only to an office server that says it reads them: when it lets a session in, the server names the office's repos (and, of repos with no remote, only this machine's). Everything else stays on the machine, as before. A session in a plain folder above several repos (a workspace, holding between one and `workspaceRepos` repos, never your home folder or one above it) is reported like a repo with no remote: its project is the folder's path on this machine, lower-cased on Windows and macOS. It reports once the office takes any repo inside it, as the first of those by name (its session stands in that repo's district), and sends only its work inside repos the office takes, each named by its repo; its own files, outside every repo, stay on the machine, and the folder's own path is never sent. A hand-over from it takes only the repos the office takes, and names the others to you alone.
 
