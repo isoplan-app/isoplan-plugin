@@ -211,6 +211,10 @@ export const HelloMessageSchema = z.object({
  * runner from before 0.10.0 drops the field it doesn't know and would run the session from the floor.
  * `experts` (protocol 0.13.0): this runner hosts experts. It answers `hosting` with `experts`, and
  * takes `answer-expert` requests; the server sends neither to a runner that didn't say it.
+ * `hiddenStarts` (protocol 0.14.0, isoplan-app#315): this runner can start a session from the floor
+ * hidden (a start's `hidden`), in a clone Isoplan keeps for itself. The server sends `hidden` only to
+ * a runner that says it: a runner from before 0.14.0 drops the field it doesn't know and would start
+ * the session in the person's own checkout.
  */
 export const RunnerHelloMessageSchema = z.object({
   type: z.literal("runner"),
@@ -224,6 +228,7 @@ export const RunnerHelloMessageSchema = z.object({
   claude: ClaudeCliSchema.optional(),
   starts: z.array(StartModeSchema).max(4).optional(),
   experts: z.literal(true).optional(),
+  hiddenStarts: z.literal(true).optional(),
 });
 
 /** All of the session's facts. Sent on connect and on repair. */
@@ -287,7 +292,6 @@ export const ExpertCodeSchema = z.enum([
   "EXPERT_QUEUED",
   "EXPERT_STARTING",
   "EXPERT_FORK_FAILED",
-  "EXPERT_ANSWER_WITHHELD",
   "EXPERT_DROPPED",
 ]);
 /** `starting`: no generation of it has passed its proof question yet; `ready`: its junior answers; `failed`: its last grounding failed and none answers. */
@@ -295,8 +299,12 @@ export const ExpertStateSchema = z.enum(["starting", "ready", "failed"]);
 /** The host's caps, from the expert file: questions per asking session per day, open questions per asking session, the expert's daily token budget. */
 export const ExpertCapSchema = z.enum(["asker-day", "asker-open", "expert-tokens"]);
 
-/** One expert a runner hosts, as it lists it to an office server whose list takes its repo. */
-export const ExpertListingSchema = z.object({ name: ExpertNameSchema, project: ProjectSchema, subject: Subject, state: ExpertStateSchema });
+/**
+ * One expert a runner hosts, as it lists it to an office server whose list takes its repo. `senior`
+ * (protocol 0.14.0): it has a senior generation, which its junior can ask (see `expert-senior`);
+ * absent from an older runner. An older server ignores it.
+ */
+export const ExpertListingSchema = z.object({ name: ExpertNameSchema, project: ProjectSchema, subject: Subject, state: ExpertStateSchema, senior: z.boolean().optional() });
 /** One expert a session may ask: `repo` is its project's short name, `host` the hosting person's name. */
 export const ExpertRightSchema = z.object({ name: ExpertNameSchema, subject: Subject, repo: z.string().min(1), host: z.string() });
 
@@ -478,6 +486,19 @@ export const ExpertsMessageSchema = z
       seen.add(expert.name);
     });
   });
+
+/**
+ * The junior answering the `answer-expert` request `id` has asked its senior (protocol 0.14.0), so
+ * the floor can show the senior joining the question's meeting. It carries no text: nothing of the
+ * question or of what the junior asked. Sent once per request, when the junior first asks, only to a
+ * server whose `hosting` says `expertSenior`, and only while the link is up (never through the reply
+ * outbox): a server from before 0.14.0, which doesn't say it, is never sent one.
+ */
+export const ExpertSeniorMessageSchema = z.object({
+  type: z.literal("expert-senior"),
+  v: Version,
+  id: RequestId,
+});
 
 /**
  * A session asks an expert a question (protocol 0.13.0), on its own short link with the session's
@@ -669,6 +690,7 @@ export const DataLayerMessageSchema = z.discriminatedUnion("type", [
   DrivenMessageSchema,
   ExpertsMessageSchema,
   AskExpertMessageSchema,
+  ExpertSeniorMessageSchema,
 ]);
 
 // Office server → data layer.
@@ -928,11 +950,14 @@ export const ExpertRightsMessageSchema = z.object({
  * after each `experts` message, and whenever the offices change. The runner sends no `experts` on a
  * connection before that connection's first `hosting`, so a server from before experts, which sends
  * none, is never sent one.
+ * `expertSenior` (protocol 0.14.0): this server reads `expert-senior`, so the runner may send it. A
+ * server that reads it says it on every `hosting`; the runner goes by the connection's last one.
  */
 export const HostingMessageSchema = z.object({
   type: z.literal("hosting"),
   v: Version,
   listed: z.array(ExpertNameSchema).max(MAX_EXPERTS),
+  expertSenior: z.literal(true).optional(),
 });
 
 const drive = { type: z.literal("drive"), v: Version, id: DriveId, by: Account };
@@ -964,6 +989,10 @@ export const DriveMessageSchema = z.discriminatedUnion("kind", [
   // folder isn't on it), the Claude app, a terminal window or a background session, in the folder and
   // on the branch above, with `instruction` its first message. Such a start is answered `opened`, or
   // `refused`; `permissions` counts only for `driven`, and the runner's cap is for those alone.
+  // With `hidden: true` (protocol 0.14.0, isoplan-app#315, only with `folder`, never with mode `orca`,
+  // which would list it, and only to a runner whose hello says `hiddenStarts`): the session works in
+  // a clone of the repo Isoplan keeps for itself, not in the folder named, so the person's other tools
+  // (Orca, IDEs) don't list its folder; with `branch`, in a worktree of that clone on it.
   z
     .object({
       ...drive,
@@ -976,8 +1005,10 @@ export const DriveMessageSchema = z.discriminatedUnion("kind", [
       instruction: Instruction.optional(),
       permissions: DrivePermissionsSchema,
       mode: z.enum(["terminal", "headless", "orca", "desktop", "driven"]).optional(),
+      hidden: z.boolean().optional(),
     })
     .superRefine((message, context) => {
+      if (message.hidden && message.mode === "orca") context.addIssue({ code: "custom", path: ["hidden"], message: "a hidden start doesn't open in Orca, which would list its folder" });
       if (message.mode !== undefined && message.mode !== "driven") {
         if (message.folder === undefined) context.addIssue({ code: "custom", path: ["folder"], message: "a start that opens outside the floor names a folder" });
         if (message.instruction === undefined) context.addIssue({ code: "custom", path: ["instruction"], message: "a start that opens outside the floor names its first instruction" });
@@ -985,6 +1016,7 @@ export const DriveMessageSchema = z.discriminatedUnion("kind", [
       if (message.folder === undefined) {
         if (message.room === undefined) context.addIssue({ code: "custom", path: ["room"], message: "a start names a room, or a folder" });
         if (message.branch !== undefined) context.addIssue({ code: "custom", path: ["branch"], message: "a start names a branch only with a folder" });
+        if (message.hidden) context.addIssue({ code: "custom", path: ["hidden"], message: "a start is hidden only with a folder" });
         return;
       }
       for (const key of ["room", "roomSessions"] as const) {
@@ -1117,6 +1149,7 @@ export type ExpertsMessage = z.infer<typeof ExpertsMessageSchema>;
 export type AskExpertMessage = z.infer<typeof AskExpertMessageSchema>;
 export type ExpertRightsMessage = z.infer<typeof ExpertRightsMessageSchema>;
 export type HostingMessage = z.infer<typeof HostingMessageSchema>;
+export type ExpertSeniorMessage = z.infer<typeof ExpertSeniorMessageSchema>;
 /**
  * The reasons the floor shows for a refused drive request: a runner's, and `offline`, the server's
  * own, for a request it refused at once because the owner's runner isn't linked (nothing is queued).
