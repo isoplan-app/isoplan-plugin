@@ -19,7 +19,7 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { RunGit } from "../handoff/git.js";
+import type { GitResult, RunGit } from "../handoff/git.js";
 import { noHooks, onTheWire } from "../handoff/take.js";
 import { inside } from "./expert-claude.js";
 
@@ -27,7 +27,7 @@ import { inside } from "./expert-claude.js";
 const NO_LFS = { GIT_LFS_SKIP_SMUDGE: "1" };
 
 // A rename, tried again for a moment: on Windows a scanner can hold a folder just written.
-async function renamed(from: string, to: string) {
+export async function renamed(from: string, to: string) {
   for (let n = 1; ; n++) {
     try {
       return await fs.rename(from, to);
@@ -37,6 +37,12 @@ async function renamed(from: string, to: string) {
       await new Promise((r) => setTimeout(r, 200));
     }
   }
+}
+
+/** Where a clone of `repo` borrows objects from: its own .git folder, since git won't borrow from a linked worktree (Orca's, say); the repo itself when git can't say. */
+export async function borrowFrom(run: (cwd: string, args: string[]) => Promise<GitResult>, repo: string): Promise<string> {
+  const common = await run(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  return common.code === 0 && common.stdout.trim() ? common.stdout.trim() : repo;
 }
 
 export interface ExpertCheckoutOptions {
@@ -132,9 +138,7 @@ export function createExpertCheckout({ git, repo, dir, name, timeoutMs, log, fet
         // gitTimeoutSeconds, say) never leaves a read/ that looks like a clone of its own.
         await fs.mkdir(dir, { recursive: true });
         await fs.rm(staging, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-        // Borrowed from the repo's own .git folder: git won't borrow from a linked worktree (Orca's, say).
-        const common = await run(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
-        const reference = common.code === 0 && common.stdout.trim() ? common.stdout.trim() : repo;
+        const reference = await borrowFrom(run, repo);
         await must(dir, ["clone", "-q", "--no-checkout", "--reference-if-able", reference, "--dissociate", "--single-branch", "--branch", branch, "--no-tags", "--", url, staging], NO_LFS);
         await must(staging, ["checkout", "-q", "--detach", tracking()], NO_LFS);
         if (st) await fs.rmdir(read);

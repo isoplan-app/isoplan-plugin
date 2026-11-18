@@ -8,9 +8,13 @@ import { MAX_DETAIL_LENGTH, MAX_TOOL_NAME_LENGTH, PROTOCOL_VERSION, type DriveMe
 import { afterEach, expect, test, vi } from "vitest";
 import { WebSocketServer, type WebSocket as ServerSocket } from "ws";
 import { modDir, tempRoot } from "../data-layer/fixture.js";
+import { git, remoteAndClone } from "../handoff/fixture.js";
+import { createRunGit } from "../handoff/git.js";
 import { createLink, type Link, type ServerAsk } from "../data-layer/link.js";
 import { alive } from "../wake/lock.js";
+import { branchFolder } from "./checkouts.js";
 import type { Spawn } from "./claude.js";
+import { clonesDir, createIsoplanClones } from "./isoplan-clone.js";
 import { createRegistry, registryPath, type ProcessRecord } from "./registry.js";
 import { loadPatterns, scan } from "./scan.js";
 import type { RepoFolders } from "./repo-folders.js";
@@ -25,7 +29,7 @@ const SERVER = "wss://office.example";
 const ADA = { id: "claude:ada", name: "Ada" };
 const PROJECT = { id: "github.com/ada/app", name: "app" };
 const UUIDS = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333"];
-const SETTINGS: DriveSettings = { drivenIdleMinutes: 30, drivenPerProject: 4, drivenCloseSeconds: 5, drivenStartSeconds: 20, drivenPromptMinutes: 10, repoFoldersCheckMinutes: 5, branchRefreshMinutes: 5 };
+const SETTINGS: DriveSettings = { drivenIdleMinutes: 30, drivenPerProject: 4, drivenCloseSeconds: 5, drivenStartSeconds: 20, drivenPromptMinutes: 10, repoFoldersCheckMinutes: 5, branchRefreshMinutes: 5, gitTimeoutSeconds: 30 };
 
 // A stand-in for `claude -p --input-format stream-json --output-format stream-json`, shaped as the
 // probe in session.ts found it: it logs its argv and folder, then answers each user line with a
@@ -173,7 +177,7 @@ type Of<K extends Kind> = Extract<DrivenMessage, { kind: K }>;
 
 // `policy`: the drive-policy the office's server sends first on the connection, as a server that
 // drives sessions does; null for none yet. What it sends with it (holding) isn't kept in `sent`.
-async function setUp({ settings = {}, linger = false, records = [] as ProcessRecord[], spawn, policy: first = [] as string[] | null, setup, elsewhere, namer }: { settings?: Partial<DriveSettings>; linger?: boolean; records?: ProcessRecord[]; spawn?: Spawn; policy?: string[] | null; setup?: DriverOptions["setup"]; elsewhere?: DriverOptions["elsewhere"]; namer?: DriverOptions["namer"] } = {}) {
+async function setUp({ settings = {}, linger = false, records = [] as ProcessRecord[], spawn, policy: first = [] as string[] | null, setup, elsewhere, namer, hiddenClones = false }: { settings?: Partial<DriveSettings>; linger?: boolean; records?: ProcessRecord[]; spawn?: Spawn; policy?: string[] | null; setup?: DriverOptions["setup"]; elsewhere?: DriverOptions["elsewhere"]; namer?: DriverOptions["namer"]; hiddenClones?: boolean } = {}) {
   const root = tempRoot();
   const claudeDir = path.join(root, ".claude");
   const state = path.join(root, "state");
@@ -222,7 +226,7 @@ async function setUp({ settings = {}, linger = false, records = [] as ProcessRec
           return listing.repos;
         },
         home: async (f) => (listing.gone.has(f) ? null : (listing.repos.find((r) => r.folders.includes(f))?.project ?? null)),
-        branchFolder: async (f, branch) => (listing.branchAsked.push(`${f} ${branch}`), listing.branchFolders.get(`${f} ${branch}`) ?? { error: "no worktree" }),
+        branchFolder: async (f, branch) => (listing.branchAsked.push(`${f} ${branch}`), hiddenClones ? branchFolder(createRunGit(), f, branch, 30000) : (listing.branchFolders.get(`${f} ${branch}`) ?? { error: "no worktree" })),
       },
     ],
     registry,
@@ -237,6 +241,8 @@ async function setUp({ settings = {}, linger = false, records = [] as ProcessRec
     ...(setup ? { setup } : {}),
     ...(elsewhere ? { elsewhere } : {}),
     ...(namer ? { namer } : {}),
+    // Isoplan's own clones made with real git, from a local origin standing in for GitHub; worktrees too.
+    ...(hiddenClones ? { isoplanClone: createIsoplanClones({ git: createRunGit(), claudeDir, timeoutMs: async () => 30000, log, cloneFrom: () => true }) } : {}),
     removed: async (session) => void removed.push(session),
   });
   const fakeLog = () => (fs.existsSync(path.join(state, "log.jsonl")) ? fs.readFileSync(path.join(state, "log.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l)) : []);
@@ -323,6 +329,56 @@ test("start on a branch: a listed one opens in the folder the office gives for i
   expect(t.logs.some((l) => l.includes("git worktree add failed"))).toBe(true);
   expect(t.fakeLog().filter((l) => l.argv)).toHaveLength(1);
 });
+
+// The person's clone of a repo with a branch on its remote, listed for new sessions, for a hidden start.
+async function hiddenSetUp() {
+  const t = await setUp({ policy: null, hiddenClones: true });
+  const { remote, clone: person } = remoteAndClone(t.root, "person");
+  git(person, "push", "-q", "origin", "main:feat/dark");
+  const plain = path.join(t.root, "plain");
+  git(t.root, "init", "-q", "-b", "main", plain);
+  t.listing.repos = [
+    { project: PROJECT.id, folders: [person], branches: ["main", "feat/dark"] },
+    { project: "local:plain", folders: [plain], branches: [] },
+  ];
+  t.policy([]);
+  await t.until(() => t.folders.length === 1);
+  // Spelled as the fake's folder will be, with Windows' short names long.
+  const clones = path.join(fs.realpathSync(t.root), path.relative(t.root, clonesDir(t.claudeDir)));
+  return { ...t, remote, person, plain, clones };
+}
+
+test("hidden start on a branch: it runs in a worktree of Isoplan's own clone, in the clones folder, never in the person's clone", async () => {
+  const t = await hiddenSetUp();
+  const before = git(t.person, "worktree", "list");
+  t.drive({ id: "d1", kind: "start", folder: t.person, branch: "feat/dark", hidden: true, project: PROJECT, permissions: "auto", instruction: "first" });
+  await t.until(() => t.of("turn-ended").length === 1);
+  const cwd = fs.realpathSync(t.fakeLog()[0].cwd);
+  expect(path.dirname(cwd)).toBe(t.clones);
+  expect(path.basename(cwd)).toMatch(/-branch-feat-dark$/);
+  expect(git(cwd, "symbolic-ref", "--short", "HEAD")).toBe("feat/dark");
+  expect(fs.realpathSync(t.registry.list()[0]!.folder)).toBe(cwd);
+  expect(git(t.person, "worktree", "list")).toBe(before);
+}, 60000);
+
+test("hidden start with no branch: it runs in Isoplan's own clone's checkout, on the default branch", async () => {
+  const t = await hiddenSetUp();
+  t.drive({ id: "d1", kind: "start", folder: t.person, hidden: true, project: PROJECT, permissions: "auto", instruction: "first" });
+  await t.until(() => t.of("turn-ended").length === 1);
+  const cwd = fs.realpathSync(t.fakeLog()[0].cwd);
+  expect(path.dirname(cwd)).toBe(t.clones);
+  expect(git(cwd, "symbolic-ref", "--short", "HEAD")).toBe("main");
+  expect(t.listing.branchAsked).toEqual([]);
+}, 60000);
+
+test("hidden start that can't have Isoplan's own clone: refused unavailable with why, nothing started", async () => {
+  const t = await hiddenSetUp();
+  t.drive({ id: "d1", kind: "start", folder: t.plain, hidden: true, project: { id: "local:plain", name: "plain" }, permissions: "auto", instruction: "first" });
+  await t.until(() => t.of("refused").length === 1);
+  expect(t.of("refused")[0]).toMatchObject({ id: "d1", reason: "unavailable", detail: expect.stringContaining("This repo has no remote, so Isoplan can't keep a copy of its own") });
+  expect(t.fakeLog()).toEqual([]);
+  expect(t.registry.list()).toEqual([]);
+}, 60000);
 
 test("start elsewhere: in a listed folder, on a listed branch, it opens where asked with its instruction and is answered opened, in a room of its own, held nowhere here and whatever permissions it asked for; a branch not listed opens nothing", async () => {
   const asked: StartElsewhere[] = [];
