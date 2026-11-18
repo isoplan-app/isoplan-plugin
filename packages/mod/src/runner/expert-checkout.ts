@@ -132,7 +132,10 @@ export function createExpertCheckout({ git, repo, dir, name, timeoutMs, log, fet
         // gitTimeoutSeconds, say) never leaves a read/ that looks like a clone of its own.
         await fs.mkdir(dir, { recursive: true });
         await fs.rm(staging, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-        await must(dir, ["clone", "-q", "--no-checkout", "--reference-if-able", repo, "--dissociate", "--single-branch", "--branch", branch, "--no-tags", "--", url, staging], NO_LFS);
+        // Borrowed from the repo's own .git folder: git won't borrow from a linked worktree (Orca's, say).
+        const common = await run(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+        const reference = common.code === 0 && common.stdout.trim() ? common.stdout.trim() : repo;
+        await must(dir, ["clone", "-q", "--no-checkout", "--reference-if-able", reference, "--dissociate", "--single-branch", "--branch", branch, "--no-tags", "--", url, staging], NO_LFS);
         await must(staging, ["checkout", "-q", "--detach", tracking()], NO_LFS);
         if (st) await fs.rmdir(read);
         await renamed(staging, read);

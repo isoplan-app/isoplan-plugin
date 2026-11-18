@@ -482,7 +482,7 @@ test("a fetch that moved origin during a grounding doesn't move the checkout unt
 });
 
 // What the runner may ask in a person's repo: it only ever reads there.
-const READS = ["remote get-url origin", "ls-remote --symref origin HEAD", "symbolic-ref --short refs/remotes/origin/HEAD"];
+const READS = ["remote get-url origin", "ls-remote --symref origin HEAD", "symbolic-ref --short refs/remotes/origin/HEAD", "rev-parse --path-format=absolute --git-common-dir"];
 
 test("a change of repo deletes the old clone, then clones the new repo's origin and grounds afresh, only reading in either repo", async () => {
   const t = await setUp({ restored: { generations: [gen(1, T1, "junior")] } });

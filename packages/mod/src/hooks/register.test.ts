@@ -904,12 +904,18 @@ test("hooks: a registration of ask_expert that fails is tried again 5 s later, t
   expect(h.tools).toEqual(["failed", "failed", "ask_expert"]);
   expect(delays).toEqual([2000, 5000, 5000]);
 
-  // One that keeps failing is tried four times in all, then left until the rights change.
+  // One that keeps failing is tried four times in all, then left until the rights change again.
   fails = Infinity;
   more.push([expertRights(INTERNAL, "reporting", "billing")]);
   await runDue();
   expect(h.tools).toEqual(["failed", "failed", "ask_expert", "failed", "failed", "failed", "failed"]);
   expect(delays).toEqual([2000, 5000, 5000, 2000, 5000, 5000, 5000]);
+
+  // Rights that change after that get their own four tries.
+  more.push([expertRights(INTERNAL, "reporting", "billing", "search")]);
+  await runDue();
+  expect(h.tools.slice(7)).toEqual(["failed", "failed", "failed", "failed"]);
+  expect(delays.slice(7)).toEqual([2000, 5000, 5000, 5000]);
 });
 
 test("hooks: after a new session id, the expert rights are cleared and ask_expert is registered again on that id's own rights", async () => {

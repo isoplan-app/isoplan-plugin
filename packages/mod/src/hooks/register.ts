@@ -138,6 +138,7 @@ let expertToolName: string | null = null; // the ask_expert tool's full name, as
 // "" once a new session id has it say its own rights afresh.
 let expertListed: string | null = null;
 let expertFailures = 0; // registrations of ask_expert that failed in a row
+let expertTried: string | null = null; // the description the last registration tried
 let expertSettling: { cancel(): void } | null = null; // the registration waiting for the rights to settle
 let asking = false; // one title call at a time
 let lastError: string | null = null;
@@ -783,6 +784,9 @@ function addExpertTool($: Host): void {
   const rights = experts();
   const names = rights.map((r) => r.name);
   const description = expertToolDescription(rights);
+  // New rights get their own retries, whatever happened to the last ones.
+  if (description !== expertTried) expertFailures = 0;
+  expertTried = description;
   const before = expertListed;
   expertListed = description;
   void $.tool

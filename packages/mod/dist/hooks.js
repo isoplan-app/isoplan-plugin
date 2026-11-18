@@ -103,6 +103,7 @@ const expertRights = /* @__PURE__ */ new Map();
 let expertToolName = null;
 let expertListed = null;
 let expertFailures = 0;
+let expertTried = null;
 let expertSettling = null;
 let asking = false;
 let lastError = null;
@@ -746,6 +747,8 @@ function addExpertTool($) {
 	const rights = experts();
 	const names = rights.map((r) => r.name);
 	const description = expertToolDescription(rights);
+	if (description !== expertTried) expertFailures = 0;
+	expertTried = description;
 	const before = expertListed;
 	expertListed = description;
 	$.tool.register({

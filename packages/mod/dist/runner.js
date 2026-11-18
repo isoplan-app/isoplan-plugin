@@ -19403,12 +19403,18 @@ function createExpertCheckout({ git, repo, dir, name, timeoutMs, log, fetchSecon
 					maxRetries: 5,
 					retryDelay: 200
 				});
+				const common = await run(repo, [
+					"rev-parse",
+					"--path-format=absolute",
+					"--git-common-dir"
+				]);
+				const reference = common.code === 0 && common.stdout.trim() ? common.stdout.trim() : repo;
 				await must(dir, [
 					"clone",
 					"-q",
 					"--no-checkout",
 					"--reference-if-able",
-					repo,
+					reference,
 					"--dissociate",
 					"--single-branch",
 					"--branch",

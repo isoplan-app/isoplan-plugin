@@ -55,6 +55,8 @@ test("prepare: only reads in the person's repo, then clones read/ from origin bo
   const t = setUp((args) => {
     if (args[0] === "remote") return ok(URL + "\n");
     if (args[0] === "ls-remote") return ok(`ref: refs/heads/trunk\tHEAD\n${MAIN}\tHEAD\n`);
+    // The person's repo is a linked worktree: its objects are in the main checkout's .git.
+    if (args.at(-1) === "--git-common-dir") return ok(path.join(t.dir, "main", ".git") + "\n");
     if (args[0] === "clone") makeClone(args.at(-1)!);
     if (args.at(-1) === "HEAD") return ok(MAIN + "\n");
   });
@@ -62,7 +64,8 @@ test("prepare: only reads in the person's repo, then clones read/ from origin bo
   expect(t.calls).toEqual([
     { cwd: t.repo, args: ["remote", "get-url", "origin"] },
     { cwd: t.repo, args: ["ls-remote", "--symref", "origin", "HEAD"] },
-    { cwd: t.dir, args: ["clone", "-q", "--no-checkout", "--reference-if-able", t.repo, "--dissociate", "--single-branch", "--branch", "trunk", "--no-tags", "--", URL, t.staging], env: NO_LFS },
+    { cwd: t.repo, args: ["rev-parse", "--path-format=absolute", "--git-common-dir"] },
+    { cwd: t.dir, args: ["clone", "-q", "--no-checkout", "--reference-if-able", path.join(t.dir, "main", ".git"), "--dissociate", "--single-branch", "--branch", "trunk", "--no-tags", "--", URL, t.staging], env: NO_LFS },
     { cwd: t.staging, args: ["checkout", "-q", "--detach", "refs/remotes/origin/trunk"], env: NO_LFS },
     { cwd: t.read, args: ["rev-parse", "HEAD"] },
   ]);
