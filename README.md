@@ -255,7 +255,7 @@ The host's caps are the expert file's: questions per asking session per day, ope
 
 ### What leaves the machine
 
-From the host: each expert's name, subject and repo, only to an office that takes the repo, and its answers, each checked for secrets first; an answer that matches is withheld until you release it. The trunks, forks and learned notes stay on the machine. From the asker: the question, checked for secrets first. The office server holds a question and its answer only while it is in flight: their words are deleted once the asker has seen its end, or after twice `maxAgeHours` when it never does, and a record without words stays a day, for the daily cap.
+From the host: each expert's name, subject and repo, only to an office that takes the repo, and its answers, each checked for secrets first; an answer that matches is refused at once, never held. The trunks, forks and learned notes stay on the machine. From the asker: the question, checked for secrets first. The office server holds a question and its answer only while it is in flight: their words are deleted once the asker has seen its end, or after twice `maxAgeHours` when it never does, and a record without words stays a day, for the daily cap.
 
 ### What ask_expert's replies mean
 
@@ -271,11 +271,10 @@ Every reply names the expert and the question's id, which the host's health log 
 | `EXPERT_PLUGIN_OLD` | This machine's plugin, or the host's, is from before experts. | Update the Isoplan plugin on the machine the reply names. |
 | `EXPERT_QUEUED` | The host's machine isn't connected; the question waits. | Nothing: the answer, or why it was dropped, comes as a note. |
 | `EXPERT_STARTING` | The expert is grounding a new generation. | Nothing: the answer comes as a note. |
-| `EXPERT_FORK_FAILED` | The fork failed, timed out or ran out of room, or the expert hasn't passed its proof question; the reply gives the host's cause. | The host looks at the health log; the agent explores instead. |
-| `EXPERT_ANSWER_WITHHELD` | The host's secret check withheld the answer. | The host releases it (below), or it stays held. |
+| `EXPERT_FORK_FAILED` | The fork failed, timed out or ran out of room, the expert hasn't passed its proof question, or its answer looked like it held a secret; the reply gives the host's cause. | The host looks at the health log; the agent explores instead. |
 | `EXPERT_DROPPED` | The question was dropped: too many tries, too old, the host gone too long, or the expert or its repo gone. | Ask again if it still matters. |
 
-To release a withheld answer, find its question id on the `question id=… outcome=withheld` line of `~/.claude/isoplan/logs/expert-<name>.log`, then, signed in to the office as the host, send `POST /api/experts/release` with `{"question":"x-…"}`. The floor has no button for it yet. The answer then reaches the asker as a note.
+An answer that matches the host's secret check is refused at once with `EXPERT_FORK_FAILED`, and the asker explores instead: an expert runs on its own, so nothing is held for a person to release. The match is logged, so it can be looked into: a `question id=… outcome=secret` line in `~/.claude/isoplan/logs/expert-<name>.log`, and the pattern's name, never the answer, in the runner's log.
 
 ## Answering from the floor
 

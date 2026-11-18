@@ -19816,7 +19816,6 @@ function fingerprint(file) {
 //#endregion
 //#region src/runner/expert.ts
 const REMEMBER = 200;
-const MAX_HELD = 50;
 const JUDGE_MS = 12e4;
 const GROUNDING_FILE_MAX = 1e5;
 /** What a fork that asks for a senior it hasn't got is told: the block is never honoured there. */
@@ -19896,7 +19895,6 @@ function createExpert(o) {
 	const inFlight = /* @__PURE__ */ new Set();
 	const byRequest = /* @__PURE__ */ new Map();
 	const finished = /* @__PURE__ */ new Map();
-	const held = /* @__PURE__ */ new Map();
 	const waiters = /* @__PURE__ */ new Set();
 	const transcripts = /* @__PURE__ */ new Map();
 	let saved = {
@@ -20372,7 +20370,7 @@ function createExpert(o) {
 		};
 	}
 	const forget = (qid) => {
-		if (finished.has(qid) || held.has(qid)) return;
+		if (finished.has(qid)) return;
 		for (const [request, q] of byRequest) if (q === qid) byRequest.delete(request);
 	};
 	function remember(qid, m) {
@@ -20392,15 +20390,6 @@ function createExpert(o) {
 			...out,
 			id: q.latest
 		}));
-	}
-	function hold(qid, reply) {
-		held.set(qid, reply);
-		if (held.size > MAX_HELD) {
-			const oldest = held.keys().next().value;
-			held.delete(oldest);
-			forget(oldest);
-			log(`dropped the withheld answer to ${oldest}: more than ${MAX_HELD} are held`);
-		}
 	}
 	async function whenReady() {
 		const deadline = now() + file.groundingTimeLimitMinutes * minute;
@@ -20565,16 +20554,10 @@ function createExpert(o) {
 							branch: saved.branch
 						};
 						const matched = await o.scan(answer);
-						if (matched && !q.released) {
-							log(`withheld its answer to ${q.id}: it matches the secret pattern "${matched}"`);
-							hold(q.id, reply);
-							line.outcome = "withheld";
-							deliver(q, {
-								type: "refusal",
-								v: 1,
-								id: "",
-								reason: "withheld"
-							});
+						if (matched) {
+							log(`refused its answer to ${q.id}: it matches the secret pattern "${matched}"`);
+							line.outcome = "secret";
+							deliver(q, forkFailed("its answer looked like it held a secret, so it wasn't sent"));
 						} else {
 							line.outcome = "answered";
 							deliver(q, reply);
@@ -20769,8 +20752,7 @@ function createExpert(o) {
 				text: request.question,
 				latest: request.id,
 				requests: /* @__PURE__ */ new Set([request.id]),
-				send,
-				released: false
+				send
 			};
 			questions.set(qid, q);
 			handle(q).catch((err) => {
@@ -20782,30 +20764,8 @@ function createExpert(o) {
 			});
 		},
 		release(request, send) {
-			if (stopped) return send({
-				...unknown(),
-				id: request
-			});
-			const qid = byRequest.get(request) ?? request;
-			const reply = held.get(qid);
-			if (reply) {
-				held.delete(qid);
-				remember(qid, reply);
-				log(`its answer to ${qid} was released by its owner, so it is sent`);
-				return send(checked({
-					...reply,
-					id: request
-				}));
-			}
-			const running = questions.get(qid);
-			if (running) return void (running.released = true);
-			const sent = finished.get(qid);
-			if (sent?.type === "reply") send(checked({
-				...sent,
-				id: request
-			}));
-			else send({
-				...unavailable("nothing is withheld under this id here; the runner may have restarted since, so ask again"),
+			send({
+				...stopped ? unknown() : unavailable("an expert holds no answers: one that matches the secret scan is refused at once"),
 				id: request
 			});
 		},
@@ -20814,10 +20774,6 @@ function createExpert(o) {
 			if (qid === void 0) return;
 			const running = questions.get(qid);
 			if (running) running.requests.delete(request);
-			else if (held.delete(qid)) {
-				forget(qid);
-				log(`dropped the withheld answer to ${qid}: the office server dropped the question`);
-			}
 		},
 		idle: () => busy === 0 && !groundingRun && questions.size === 0,
 		stop() {

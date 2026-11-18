@@ -20,7 +20,7 @@
 // - The answer's citations are stamped by the runner, not the expert: read in this fork, at its
 //   commit; else the senior's stamp; else the junior's file → commit index; else unknown. A cited
 //   file that isn't in the checkout is dropped. The answer is scanned for secrets before it goes:
-//   a match is withheld until its owner releases it.
+//   a match is refused at once (EXPERT_FORK_FAILED, with the pattern's name in the log), never held.
 // - What a fork that asked its senior or explored learned is appended to the junior's trunk as a
 //   learned note when a file it names was read for it, one at a time, with new forks held back
 //   meanwhile so they start from it. The runner's log names each one's question. Past
@@ -117,8 +117,6 @@ export interface Expert {
 
 // Finished questions remembered, newest last, so one asked again is answered the same.
 const REMEMBER = 200;
-// Withheld answers kept for release; past this the oldest is dropped.
-const MAX_HELD = 50;
 // How long the proof's judge gets.
 const JUDGE_MS = 2 * 60000;
 // The longest CONTEXT.md and CLAUDE.md put into the grounding.
@@ -192,7 +190,6 @@ interface Question {
   requests: Set<string>;
   send: (m: Outgoing) => void;
   /** Released while it was still being answered. */
-  released: boolean;
 }
 
 export function createExpert(o: ExpertOptions): Expert {
@@ -216,7 +213,6 @@ export function createExpert(o: ExpertOptions): Expert {
   const inFlight = new Set<Question>(); // past the caps, not finished
   const byRequest = new Map<string, string>(); // request id → question id
   const finished = new Map<string, Outgoing>(); // question id → what was last sent
-  const held = new Map<string, Outgoing>(); // withheld replies, by question id, oldest first
   const waiters = new Set<() => void>();
   const transcripts = new Map<string, string>(); // trunk → its transcript's path, once found
 
@@ -581,9 +577,9 @@ export function createExpert(o: ExpertOptions): Expert {
     return { ...forkFailed("the expert's reply didn't fit the protocol"), id: m.id };
   }
 
-  // A question's request ids are kept while it is remembered or its answer is withheld.
+  // A question's request ids are kept while it is remembered.
   const forget = (qid: string) => {
-    if (finished.has(qid) || held.has(qid)) return;
+    if (finished.has(qid)) return;
     for (const [request, q] of byRequest) if (q === qid) byRequest.delete(request);
   };
 
@@ -602,16 +598,6 @@ export function createExpert(o: ExpertOptions): Expert {
     if (kept) remember(q.id, out);
     if (!q.requests.size) return log(`question ${q.id} was dropped by the office server, so its answer isn't sent`);
     q.send(checked({ ...out, id: q.latest }));
-  }
-
-  function hold(qid: string, reply: Outgoing) {
-    held.set(qid, reply);
-    if (held.size > MAX_HELD) {
-      const oldest = held.keys().next().value!;
-      held.delete(oldest);
-      forget(oldest);
-      log(`dropped the withheld answer to ${oldest}: more than ${MAX_HELD} are held`);
-    }
   }
 
   // Until there is a junior, bounded by the grounding's time limit. A checkout that couldn't be
@@ -746,11 +732,11 @@ export function createExpert(o: ExpertOptions): Expert {
             const answer = answerText(body, citationBlock(stamped, saved.branch, commit, since));
             const reply: ReplyMessage = { type: "reply", v: PROTOCOL_VERSION, id: "", kind: "answer-expert", answer, commit, branch: saved.branch };
             const matched = await o.scan(answer);
-            if (matched && !q.released) {
-              log(`withheld its answer to ${q.id}: it matches the secret pattern "${matched}"`);
-              hold(q.id, reply);
-              line.outcome = "withheld";
-              deliver(q, { type: "refusal", v: PROTOCOL_VERSION, id: "", reason: "withheld" });
+            if (matched) {
+              // Refused, never held: an expert runs on its own, so no person would release it.
+              log(`refused its answer to ${q.id}: it matches the secret pattern "${matched}"`);
+              line.outcome = "secret";
+              deliver(q, forkFailed("its answer looked like it held a secret, so it wasn't sent"));
             } else {
               line.outcome = "answered";
               deliver(q, reply);
@@ -948,7 +934,7 @@ export function createExpert(o: ExpertOptions): Expert {
         send(checked({ ...sent, id: request.id }));
         return;
       }
-      const q: Question = { id: qid, asker: request.asker, blocking: request.blocking, text: request.question, latest: request.id, requests: new Set([request.id]), send, released: false };
+      const q: Question = { id: qid, asker: request.asker, blocking: request.blocking, text: request.question, latest: request.id, requests: new Set([request.id]), send };
       questions.set(qid, q);
       void handle(q)
         .catch((err: unknown) => {
@@ -962,30 +948,14 @@ export function createExpert(o: ExpertOptions): Expert {
         });
     },
     release(request, send) {
-      if (stopped) return send({ ...unknown(), id: request });
-      const qid = byRequest.get(request) ?? request;
-      const reply = held.get(qid);
-      if (reply) {
-        held.delete(qid);
-        remember(qid, reply);
-        log(`its answer to ${qid} was released by its owner, so it is sent`);
-        return send(checked({ ...reply, id: request }));
-      }
-      const running = questions.get(qid);
-      if (running) return void (running.released = true);
-      const sent = finished.get(qid);
-      if (sent?.type === "reply") send(checked({ ...sent, id: request }));
-      else send({ ...unavailable("nothing is withheld under this id here; the runner may have restarted since, so ask again"), id: request });
+      // Nothing is ever held here: an answer that matches the secret scan is refused at once.
+      send({ ...(stopped ? unknown() : unavailable("an expert holds no answers: one that matches the secret scan is refused at once")), id: request });
     },
     drop(request) {
       const qid = byRequest.get(request);
       if (qid === undefined) return;
       const running = questions.get(qid);
       if (running) running.requests.delete(request);
-      else if (held.delete(qid)) {
-        forget(qid);
-        log(`dropped the withheld answer to ${qid}: the office server dropped the question`);
-      }
     },
     idle: () => busy === 0 && !groundingRun && questions.size === 0,
     stop() {

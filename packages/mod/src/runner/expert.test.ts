@@ -423,14 +423,17 @@ test("a fork that left its checkout changed is refused, and the checkout reset",
   ]);
 });
 
-test("an answer that matches a secret pattern is withheld, and its release sends it", async () => {
+test("an answer that matches a secret pattern is refused at once, logged with the pattern's name, and never held for release", async () => {
   const t = await setUp({ restored: { generations: [gen(1, T1, "junior")] }, rules: [{ kind: "fork", reply: "<answer>The key is SECRET.</answer>" }] });
   t.ask("x-1");
-  expect(await t.reply("expert-x-1-1")).toEqual({ type: "refusal", v: PROTOCOL_VERSION, id: "expert-x-1-1", reason: "withheld" });
-  expect(t.expert.owns("expert-x-1-1")).toBe(true);
+  const refused = await t.reply("expert-x-1-1");
+  expect(refused).toMatchObject({ type: "refusal", reason: "unavailable", detail: "its answer looked like it held a secret, so it wasn't sent", expert: { code: "EXPERT_FORK_FAILED" } });
+  expect(JSON.stringify(refused)).not.toContain("SECRET");
+  expect(t.logs.some((l) => l.includes('refused its answer to x-1: it matches the secret pattern'))).toBe(true);
+  expect(t.health()).toMatch(/outcome=secret/);
   const released: (ReplyMessage | RefusalMessage)[] = [];
   t.expert.release("expert-x-1-1", (m) => void released.push(m));
-  expect(released).toEqual([{ type: "reply", v: PROTOCOL_VERSION, id: "expert-x-1-1", kind: "answer-expert", answer: "The key is SECRET.", commit: C1, branch: "main" }]);
+  expect(released).toEqual([expect.objectContaining({ type: "refusal", reason: "unavailable", id: "expert-x-1-1" })]);
 });
 
 test("one question per questionId: a request sent again is attached to it, the newest gets the reply, and a finished one is answered from memory", async () => {
@@ -525,7 +528,7 @@ test("a question refused while the expert is still grounding isn't remembered: a
   expect(turns(t, "fork").some((l) => l.text?.includes("Question x-1"))).toBe(true);
 }, 30000);
 
-test("caps: open questions and questions a day, per asking session, refused EXPERT_CAP; a withheld answer is still released after 200 more questions", async () => {
+test("caps: open questions and questions a day, per asking session, refused EXPERT_CAP", async () => {
   const t = await setUp({ file: expertFile({ caps: { openPerAsker: 1, perAskerPerDay: 2 } }), restored: { generations: [gen(1, T1, "junior")] }, rules: [{ kind: "fork", text: "(x-1)", reply: "<answer>The key is SECRET.</answer>", delayMs: 800 }, { kind: "fork", reply: ANSWER }] });
   t.ask("x-1");
   await until(() => starts(t, "fork").length === 1);
@@ -534,19 +537,13 @@ test("caps: open questions and questions a day, per asking session, refused EXPE
   // Another asking session's open questions are its own.
   t.ask("x-3", { asker: "s-2" });
   expect(await t.reply("expert-x-3-1")).toMatchObject({ type: "reply" });
-  expect(await t.reply("expert-x-1-1")).toMatchObject({ reason: "withheld" });
+  expect(await t.reply("expert-x-1-1")).toMatchObject({ reason: "unavailable", expert: { code: "EXPERT_FORK_FAILED" } });
   t.ask("x-4");
   expect(await t.reply("expert-x-4-1")).toMatchObject({ type: "reply" });
   t.ask("x-5");
   const day = await t.reply("expert-x-5-1");
   expect(day).toMatchObject({ reason: "unavailable", expert: { code: "EXPERT_CAP", cap: "asker-day", limit: 2, frees: expect.stringMatching(/^\d{4}-\d\d-\d\dT/) } });
   expect(RefusalMessageSchema.safeParse(day).success).toBe(true);
-  for (let i = 6; i <= 206; i++) t.ask(`x-${i}`);
-  await t.reply("expert-x-206-1");
-  expect(t.expert.owns("expert-x-1-1")).toBe(true);
-  const released: (ReplyMessage | RefusalMessage)[] = [];
-  t.expert.release("expert-x-1-1", (m) => void released.push(m));
-  expect(released).toEqual([expect.objectContaining({ type: "reply", id: "expert-x-1-1", answer: "The key is SECRET." })]);
 }, 30000);
 
 test("stop: a question waiting for a fork slot starts no fork", async () => {
