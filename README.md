@@ -276,11 +276,26 @@ Every reply names the expert and the question's id, which the host's health log 
 
 An answer that matches the host's secret check is refused at once with `EXPERT_FORK_FAILED`, and the asker explores instead: an expert runs on its own, so nothing is held for a person to release. The match is logged, so it can be looked into: a `question id=… outcome=secret` line in `~/.claude/isoplan/logs/expert-<name>.log`, and the pattern's name, never the answer, in the runner's log.
 
-### Offers
+### Expert offers
 
 You don't have to write an expert file yourself: the runner offers an expert where a session would have been helped by one. For each session it reports, it counts, per folder of the repo, the Read, Grep and Glob calls of the session and its subagents, what their results took (characters / 4, as tokens), the time from each call to its result, and your corrections while the agent worked there: an interruption, a tool call you turned down, or a message that a quick local model check (Haiku, no tools, none of your hooks) reads as telling the agent it was wrong. A folder passes when its reads and searches took `contextShare` (0.15) of the session's context window or `tokens` (30,000), or took `minutes` (10), or had `corrections` (2); the deepest folder that passes is offered, once per session and folder. Never one you dismissed, and never one an expert on this machine covers by its `areas`; the office checks other machines' experts. The settings are `expertOffers` in `runner.json`, overridden key by key in `~/.claude/isoplan/runner.json`, and include the model that drafts and checks (`draftModel`), how many correction checks may run an hour (`checksPerHour`, 20), how long each may take (`timeoutSeconds`, 60), how long an offer is remembered (`snoozeDays`, 30), and the `promoteAtTokens` an expert made from an offer gets (100,000).
 
 The runner drafts the expert locally, with the same model: a key such as `pairing` (shown as "Pairing Expert"), a subject, and a proof question with its answer, from the folder's files and what the session said there. The draft is checked for secrets before any of it leaves; a match means no offer, and the runner's log says so. The offer goes to each office that takes the repo, and the session's status line links to its review on the floor. Whoever makes it picks one of their own computers; that computer's runner finds its checkout of the repo (as New session does), writes `~/.claude/isoplan/experts/<key>.json`, and reports each step to the floor until the expert is ready, when the session that showed the need gets a note. Which sessions and folders were offered, and the open offers, are kept in `~/.claude/isoplan/runner/offers.json`; a session's open offers are also in `~/.claude/isoplan/offers/<session>.json`, for `/isoplan:expert`.
+
+```json
+"expertOffers": {
+  "contextShare": 0.15, "tokens": 30000, "minutes": 10, "corrections": 2,
+  "officeSessions": 3, "officeDays": 7, "snoozeDays": 30,
+  "draftModel": "haiku", "model": "sonnet",
+  "promoteAtTokens": 100000, "checksPerHour": 20, "timeoutSeconds": 60
+}
+```
+
+The runner doesn't read `officeSessions`, `officeDays` or `model`: the office decides those in its `asks.json` (`offerSessions` sessions within `offerDays` make an office-wide offer, `offerModel` is the model the review proposes), and how long "Not now" lasts (`offerSnoozeDays`).
+
+In Claude Code, while an offer is open, Isoplan's status line carries `A Parser Expert could help · review: <link>` after the office's part, and the transcript gets one line saying what the session spent on the folder, with the same link. The link opens the review on the floor, where you can change the draft, pick which of your own computers runs the expert, and press Make expert; `/isoplan:expert` opens the same review in your browser. The link goes once the offer is made, dismissed or expired. When the expert is ready, the agent is told on its next tool result to ask it (`ask_expert`) before searching that folder again.
+
+What leaves the machine, under ADR 0004's case for an expert offer's draft: the draft (key, subject, folder and proof question with its answer), after the secret check, with the offer's id, session, repo and the numbers that passed their thresholds. The office deletes it once the expert is made, the offer is dismissed, or after 7 days. The folder's files and what the session said there, which the draft is written from, never go to the office.
 
 ## Answering from the floor
 
@@ -302,7 +317,7 @@ An agent often works in more than one repo: editing files with Edit or Write, or
 
 | Path | What |
 |---|---|
-| `packages/mod/commands/` | The plugin's commands: `/isoplan:handover` and `/isoplan:take`, which run `dist/handoff.js`, `/isoplan:connect`, which runs `dist/connect.js`, and `/isoplan:repos`, which runs `dist/repos.js`. |
+| `packages/mod/commands/` | The plugin's commands: `/isoplan:handover` and `/isoplan:take`, which run `dist/handoff.js`, `/isoplan:connect`, which runs `dist/connect.js`, `/isoplan:repos`, which runs `dist/repos.js`, and `/isoplan:expert`, which runs `dist/expert-offer.js`. |
 | `packages/mod/` | The Claude Code plugin. Its bundle in `dist/` is committed, so the plugin runs from a checkout with no install step; rebuild it with every change to `src/`. |
 | `packages/protocol/` | The wire protocol, published to npm as [`@isoplan/protocol`](https://www.npmjs.com/package/@isoplan/protocol). |
 | `.claude-plugin/marketplace.json` | The marketplace listing. |
