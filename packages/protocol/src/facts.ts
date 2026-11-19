@@ -166,6 +166,46 @@ export const FileFactSchema = z.object({
   extra: Extra,
 });
 
+/** The longest folder or glob an area names (protocol 0.15.0). */
+export const MAX_AREA_PATH_LENGTH = 1000;
+
+/**
+ * A folder or a glob in a repo (protocol 0.15.0), relative to the repo's root, with forward slashes:
+ * `.` for the root itself, or named parts (`packages/server`, `docs/adr/*.md`) with no empty, `.` or
+ * `..` part, no `\` and no `:`. An expert's area is written into its file on another machine, so a
+ * path can never point outside the repo.
+ */
+export const AreaPathSchema = z
+  .string()
+  .min(1)
+  .max(MAX_AREA_PATH_LENGTH)
+  .refine((path) => !path.includes("\\"), "forward slashes, never `\\`")
+  .refine((path) => !path.includes(":"), "a path with no `:`, which Windows reads as a drive or a file's stream")
+  .refine((path) => path === "." || !path.split("/").some((part) => part === "" || part === "." || part === ".."), "`.` itself, or a relative path of named parts, with no empty, `.` or `..` part");
+
+const Count = z.number().int().nonnegative();
+
+/**
+ * How much a session's agents worked in one folder of a repo (protocol 0.15.0), so the server can
+ * offer an expert on it (isoplan-app ADR 0013). Counts only: never file contents, search patterns or
+ * results. `folder` is relative to its repo's root (AreaPathSchema). `reads`: files read in it;
+ * `searches`: searches in it (Grep, Glob and the like); `tokens`: what their results took, estimated
+ * as characters / 4; `ms`: the time from those calls to their results; `corrections`: the person's
+ * corrections while the agent worked there (an interrupt, a turned-down tool call, or a message
+ * telling it it was wrong). A subagent's calls count to its session's areas. The counts only grow
+ * while the session lasts, so each one sent replaces the last. One is known by its folder and
+ * project, as a file fact is, and it is sent under the same rules (Elsewhere).
+ */
+export const AreaFactSchema = z.object({
+  folder: AreaPathSchema,
+  reads: Count,
+  searches: Count,
+  tokens: TokenCount,
+  ms: Count,
+  corrections: Count,
+  ...Elsewhere,
+});
+
 export const WaitFactSchema = z.object({
   waiter: z.string().min(1),
   on: z.string().min(1),
@@ -231,6 +271,8 @@ export const FactsSchema = z.object({
   questions: z.array(QuestionFactSchema).optional(),
   /** Absent from a data layer that doesn't report workflows, which is the same as none. */
   workflows: z.array(WorkflowFactSchema).optional(),
+  /** Absent from a data layer that doesn't report areas, which is the same as none. */
+  areas: z.array(AreaFactSchema).optional(),
 });
 
 /** The records that changed, each replacing the one with the same key. */
@@ -243,6 +285,7 @@ export const FactUpsertSchema = z.object({
   reports: z.array(ReportFactSchema).optional(),
   questions: z.array(QuestionFactSchema).optional(),
   workflows: z.array(WorkflowFactSchema).optional(),
+  areas: z.array(AreaFactSchema).optional(),
 });
 
 const FileKey = FileFactSchema.pick({ agent: true, file: true, project: true });
@@ -254,6 +297,7 @@ const FileKey = FileFactSchema.pick({ agent: true, file: true, project: true });
  * the connection. `questionOutcomes`: how each question in `questions` ended, by its id: `answered`,
  * in the terminal or from the floor, or `abandoned`, with no answer (interrupted, or a new prompt
  * came first). Absent, or without a question's id, from a peer that doesn't say (protocol 0.3.5 on).
+ * An area is never removed: it goes with its session.
  */
 export const FactRemoveSchema = z.object({
   agents: z.array(z.string().min(1)).optional(),
@@ -271,6 +315,7 @@ export type Project = z.infer<typeof ProjectSchema>;
 export type SessionFact = z.infer<typeof SessionFactSchema>;
 export type AgentFact = z.infer<typeof AgentFactSchema>;
 export type FileFact = z.infer<typeof FileFactSchema>;
+export type AreaFact = z.infer<typeof AreaFactSchema>;
 export type WaitFact = z.infer<typeof WaitFactSchema>;
 export type ReportFact = z.infer<typeof ReportFactSchema>;
 export type QuestionFact = z.infer<typeof QuestionFactSchema>;

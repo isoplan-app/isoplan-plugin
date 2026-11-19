@@ -6433,6 +6433,34 @@ const FileFactSchema = object({
 	...Elsewhere,
 	extra: Extra
 });
+/**
+* A folder or a glob in a repo (protocol 0.15.0), relative to the repo's root, with forward slashes:
+* `.` for the root itself, or named parts (`packages/server`, `docs/adr/*.md`) with no empty, `.` or
+* `..` part, no `\` and no `:`. An expert's area is written into its file on another machine, so a
+* path can never point outside the repo.
+*/
+const AreaPathSchema = string().min(1).max(1e3).refine((path) => !path.includes("\\"), "forward slashes, never `\\`").refine((path) => !path.includes(":"), "a path with no `:`, which Windows reads as a drive or a file's stream").refine((path) => path === "." || !path.split("/").some((part) => part === "" || part === "." || part === ".."), "`.` itself, or a relative path of named parts, with no empty, `.` or `..` part");
+const Count = number().int().nonnegative();
+/**
+* How much a session's agents worked in one folder of a repo (protocol 0.15.0), so the server can
+* offer an expert on it (isoplan-app ADR 0013). Counts only: never file contents, search patterns or
+* results. `folder` is relative to its repo's root (AreaPathSchema). `reads`: files read in it;
+* `searches`: searches in it (Grep, Glob and the like); `tokens`: what their results took, estimated
+* as characters / 4; `ms`: the time from those calls to their results; `corrections`: the person's
+* corrections while the agent worked there (an interrupt, a turned-down tool call, or a message
+* telling it it was wrong). A subagent's calls count to its session's areas. The counts only grow
+* while the session lasts, so each one sent replaces the last. One is known by its folder and
+* project, as a file fact is, and it is sent under the same rules (Elsewhere).
+*/
+const AreaFactSchema = object({
+	folder: AreaPathSchema,
+	reads: Count,
+	searches: Count,
+	tokens: TokenCount,
+	ms: Count,
+	corrections: Count,
+	...Elsewhere
+});
 const WaitFactSchema = object({
 	waiter: string().min(1),
 	on: string().min(1),
@@ -6494,7 +6522,9 @@ const FactsSchema = object({
 	/** Absent from a data layer that doesn't report questions, which is the same as none. */
 	questions: array(QuestionFactSchema).optional(),
 	/** Absent from a data layer that doesn't report workflows, which is the same as none. */
-	workflows: array(WorkflowFactSchema).optional()
+	workflows: array(WorkflowFactSchema).optional(),
+	/** Absent from a data layer that doesn't report areas, which is the same as none. */
+	areas: array(AreaFactSchema).optional()
 });
 /** The records that changed, each replacing the one with the same key. */
 const FactUpsertSchema = object({
@@ -6505,7 +6535,8 @@ const FactUpsertSchema = object({
 	waits: array(WaitFactSchema).optional(),
 	reports: array(ReportFactSchema).optional(),
 	questions: array(QuestionFactSchema).optional(),
-	workflows: array(WorkflowFactSchema).optional()
+	workflows: array(WorkflowFactSchema).optional(),
+	areas: array(AreaFactSchema).optional()
 });
 const FileKey = FileFactSchema.pick({
 	agent: true,
@@ -6519,6 +6550,7 @@ const FileKey = FileFactSchema.pick({
 * the connection. `questionOutcomes`: how each question in `questions` ended, by its id: `answered`,
 * in the terminal or from the floor, or `abandoned`, with no answer (interrupted, or a new prompt
 * came first). Absent, or without a question's id, from a peer that doesn't say (protocol 0.3.5 on).
+* An area is never removed: it goes with its session.
 */
 const FactRemoveSchema = object({
 	agents: array(string().min(1)).optional(),
@@ -6690,6 +6722,10 @@ const HelloMessageSchema = object({
 * hidden (a start's `hidden`), in a clone Isoplan keeps for itself. The server sends `hidden` only to
 * a runner that says it: a runner from before 0.14.0 drops the field it doesn't know and would start
 * the session in the person's own checkout.
+* `offers` (protocol 0.15.0, isoplan-app#328): this runner offers experts where a session would have
+* been helped by one (see `expert-offer`). It sends `expert-offer`, `expert-offer-ended` and
+* `expert-making`, and takes `offer-dismissals`, `draft-offer`, `make-expert` and
+* `expert-offer-ended`; the server sends none of these to a runner that didn't say it.
 */
 const RunnerHelloMessageSchema = object({
 	type: literal("runner"),
@@ -6703,7 +6739,8 @@ const RunnerHelloMessageSchema = object({
 	claude: ClaudeCliSchema.optional(),
 	starts: array(StartModeSchema).max(4).optional(),
 	experts: literal(true).optional(),
-	hiddenStarts: literal(true).optional()
+	hiddenStarts: literal(true).optional(),
+	offers: literal(true).optional()
 });
 /** All of the session's facts. Sent on connect and on repair. */
 const FullMessageSchema = object({
@@ -6777,14 +6814,17 @@ const ExpertCapSchema = _enum([
 /**
 * One expert a runner hosts, as it lists it to an office server whose list takes its repo. `senior`
 * (protocol 0.14.0): it has a senior generation, which its junior can ask (see `expert-senior`);
-* absent from an older runner. An older server ignores it.
+* absent from an older runner. `areas` (protocol 0.15.0): the folders and globs of its repo it
+* covers, from its file, so the office never offers an expert on a folder one already covers;
+* absent from an older runner, or when its file names none. An older server ignores both.
 */
 const ExpertListingSchema = object({
 	name: ExpertNameSchema,
 	project: ProjectSchema,
 	subject: Subject,
 	state: ExpertStateSchema,
-	senior: boolean().optional()
+	senior: boolean().optional(),
+	areas: array(AreaPathSchema).max(20).optional()
 });
 /** One expert a session may ask: `repo` is its project's short name, `host` the hosting person's name. */
 const ExpertRightSchema = object({
@@ -7035,6 +7075,93 @@ const AskExpertMessageSchema = object({
 	blocking: boolean(),
 	key: string().min(1).max(100)
 });
+/** The most dismissed areas an `offer-dismissals` lists. */
+const MAX_OFFER_DISMISSALS = 1e3;
+/**
+* An offer's id, which the floor's link names (`/?offer=<id>`), so it keeps to letters, digits, `_`
+* and `-`: the runner's own random id for a session's offer, or the `draft-offer`'s `request` for an
+* office-wide one.
+*/
+const OfferId = string().regex(/^[A-Za-z0-9_-]{1,100}$/, "letters, digits, `_` and `-`, at most 100");
+/**
+* The model an expert grounds with, as Claude Code's `--model` takes it (`sonnet`,
+* `claude-opus-5-5`, `claude-sonnet-4-5[1m]`): kept to characters no shell reads, starting with a
+* letter or digit, as it goes into a command on the runner's machine.
+*/
+const Model = string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/[\]-]{0,199}$/, "a model name: letters, digits and . _ : / [ ] -, starting with a letter or digit, at most 200");
+/** The proof question an expert must answer before it answers anyone, and the answer expected. */
+const Proof = object({
+	question: string().trim().min(1).max(MAX_QUESTION_LENGTH),
+	answer: string().trim().min(1).max(MAX_EXPERT_ANSWER_LENGTH)
+});
+/** What an expert covers: folders and globs in its repo (AreaPathSchema). */
+const Area = array(AreaPathSchema).min(1).max(20);
+/**
+* A runner offers an expert (protocol 0.15.0), once per session and folder, for a session in a repo
+* the office takes. `session` is the session that showed the need (for an office-wide one, the
+* latest that searched the area), `project` its repo, and `folder` the folder whose signals passed
+* their threshold, which dismissals name. `scope`: `session`, from that session's own signals, or
+* `office`, in answer to a `draft-offer`, whose `request` is then its `id`. The draft: `key`, the
+* expert's name (shown as `expertDisplayName(key)`), `subject`, `area` and `proof`, as the runner's
+* local model wrote them and the secret check passed them. `why`, the signals that passed: `share`,
+* the share of the session's context spent reading and searching the folder (0 to 1); `tokens`,
+* those tokens; `minutes`, the time spent there; `corrections`, the person's corrections there. `at`:
+* when it was offered. Of its text, only these leave the machine, under ADR 0004's case for an expert
+* offer's draft.
+*/
+const ExpertOfferMessageSchema = object({
+	type: literal("expert-offer"),
+	v: Version,
+	id: OfferId,
+	session: string().min(1),
+	project: ProjectSchema,
+	folder: AreaPathSchema,
+	scope: _enum(["session", "office"]),
+	key: ExpertNameSchema,
+	subject: Subject,
+	area: Area,
+	proof: Proof,
+	why: object({
+		share: number().min(0).max(1),
+		tokens: number().int().nonnegative(),
+		minutes: number().nonnegative(),
+		corrections: number().int().nonnegative()
+	}),
+	at: datetime({ offset: true })
+});
+/**
+* A runner ends its offer `id` itself (protocol 0.15.0): `withdrawn`, it took the offer back before
+* anyone made or dismissed it; `no-draft`, it couldn't draft the office-wide offer the `draft-offer`
+* of that id asked for (the secret check matched, or its model gave no usable draft).
+*/
+const RunnerExpertOfferEndedMessageSchema = object({
+	type: literal("expert-offer-ended"),
+	v: Version,
+	id: OfferId,
+	why: _enum(["withdrawn", "no-draft"])
+});
+/**
+* Where making an expert stands on the runner that took the `make-expert` request `request`, for the
+* offer `offer` (protocol 0.15.0), sent as each state is reached: `cloning`, it prepares the
+* expert's own clone of the repo; `grounding`, the expert reads its area; `proof`, it answers its
+* proof question; `ready`, it answers questions; `failed`, it stopped, with `detail` in the runner's
+* own words (no checkout of the repo on this machine, a key already used here, a failed proof).
+*/
+const ExpertMakingStateSchema = _enum([
+	"cloning",
+	"grounding",
+	"proof",
+	"ready",
+	"failed"
+]);
+const ExpertMakingMessageSchema = object({
+	type: literal("expert-making"),
+	v: Version,
+	request: RequestId,
+	offer: OfferId,
+	state: ExpertMakingStateSchema,
+	detail: Detail.optional()
+});
 const driven = {
 	type: literal("driven"),
 	v: Version
@@ -7265,7 +7392,10 @@ discriminatedUnion("type", [
 	]),
 	ExpertsMessageSchema,
 	AskExpertMessageSchema,
-	ExpertSeniorMessageSchema
+	ExpertSeniorMessageSchema,
+	ExpertOfferMessageSchema,
+	RunnerExpertOfferEndedMessageSchema,
+	ExpertMakingMessageSchema
 ]);
 /** Asks the data layer to send its facts in full. */
 const RepairMessageSchema = object({
@@ -7518,6 +7648,215 @@ const drive = {
 	id: DriveId,
 	by: Account
 };
+/**
+* A person acting on a driven session from the floor (protocol 0.5.0), sent only to a runner that said
+* `drive`, and only to the owner's own runner. `by` is the person acting, whom the runner checks is its
+* own person, and refuses `not-owner` otherwise. The runner answers by `id` (see `driven`). Nothing is
+* queued: the server refuses a request for a runner that isn't linked at once (`offline`, see
+* FloorDriveRefusalReason).
+*/
+const DriveMessageSchema = discriminatedUnion("kind", [
+	object({
+		...drive,
+		kind: literal("start"),
+		room: Room.optional(),
+		folder: Folder.optional(),
+		branch: BranchName.optional(),
+		project: ProjectSchema,
+		roomSessions: array(DrivenSessionId).max(20).optional(),
+		instruction: Instruction.optional(),
+		permissions: DrivePermissionsSchema,
+		mode: _enum([
+			"terminal",
+			"headless",
+			"orca",
+			"desktop",
+			"driven"
+		]).optional(),
+		hidden: boolean().optional()
+	}).superRefine((message, context) => {
+		if (message.hidden && message.mode === "orca") context.addIssue({
+			code: "custom",
+			path: ["hidden"],
+			message: "a hidden start doesn't open in Orca, which would list its folder"
+		});
+		if (message.mode !== void 0 && message.mode !== "driven") {
+			if (message.folder === void 0) context.addIssue({
+				code: "custom",
+				path: ["folder"],
+				message: "a start that opens outside the floor names a folder"
+			});
+			if (message.instruction === void 0) context.addIssue({
+				code: "custom",
+				path: ["instruction"],
+				message: "a start that opens outside the floor names its first instruction"
+			});
+		}
+		if (message.folder === void 0) {
+			if (message.room === void 0) context.addIssue({
+				code: "custom",
+				path: ["room"],
+				message: "a start names a room, or a folder"
+			});
+			if (message.branch !== void 0) context.addIssue({
+				code: "custom",
+				path: ["branch"],
+				message: "a start names a branch only with a folder"
+			});
+			if (message.hidden) context.addIssue({
+				code: "custom",
+				path: ["hidden"],
+				message: "a start is hidden only with a folder"
+			});
+			return;
+		}
+		for (const key of ["room", "roomSessions"]) if (message[key] !== void 0) context.addIssue({
+			code: "custom",
+			path: [key],
+			message: "a start in a folder opens a new room, with nothing from another"
+		});
+	}),
+	object({
+		...drive,
+		kind: literal("instruct"),
+		session: DrivenSessionId,
+		text: Instruction
+	}),
+	object({
+		...drive,
+		kind: literal("stop"),
+		session: DrivenSessionId,
+		remove: literal(true).optional()
+	}),
+	object({
+		...drive,
+		kind: literal("interrupt"),
+		session: DrivenSessionId
+	}),
+	object({
+		...drive,
+		kind: literal("hand-back"),
+		session: DrivenSessionId
+	}),
+	object({
+		...drive,
+		kind: literal("output"),
+		session: DrivenSessionId,
+		turn: DriveId.optional()
+	}),
+	object({
+		...drive,
+		kind: literal("answer"),
+		session: DrivenSessionId,
+		prompt: DriveId,
+		answer: _enum(["allow", "deny"])
+	}),
+	object({
+		...drive,
+		kind: literal("release"),
+		session: DrivenSessionId,
+		withheld: DriveId
+	}),
+	object({
+		...drive,
+		kind: literal("install-claude")
+	}),
+	object({
+		...drive,
+		kind: literal("sign-in-claude")
+	})
+]);
+/**
+* Where people may skip permission prompts in driven sessions (protocol 0.5.0): `bypassAllowed` lists
+* the projects, lower-cased, whose office allows `bypassPermissions`; an admin can turn it off for the
+* whole office. A project id here is as long as it comes, as everywhere in the protocol, so any
+* project the server holds can be listed. Sent to a runner that said `drive` once its hello is let in,
+* before any drive request, and again whenever an admin changes it. The runner sends no `driven`
+* message on a connection before the first one has come on it. Until one arrives on a connection,
+* and in any project it doesn't list, the runner opens no session's process with `bypassPermissions`:
+* not to start, reopen or restore one. What a session already running does when its project leaves
+* the list is the runner's to decide (#42).
+*
+* It is a message of its own, not a field of each start, because the runner enforces it as a standing
+* rule: a change has to reach the runner while its sessions run, and a session the runner restores
+* after its own restart comes with no start. Kept apart from a start's `permissions`, which is the
+* person's own choice, a mistake in the server's start path alone can't skip prompts in a project
+* whose office hasn't allowed it. It is by project because one server can host several offices, and a
+* runner's link serves all of them.
+*/
+const DrivePolicyMessageSchema = object({
+	type: literal("drive-policy"),
+	v: Version,
+	bypassAllowed: array(string().min(1)).max(1e3)
+});
+/**
+* Make the expert an offer drafted (protocol 0.15.0), as the person who confirmed it (`by`) set it on
+* the floor, sent to the runner of the computer they chose, one of their own, which checks `by` is its
+* own person. The runner finds its checkout of `project`, writes the expert file `key` with `subject`,
+* `model`, `area` and `proof`, and answers with `expert-making` under `request`. Nothing is queued:
+* the server refuses at once when that runner isn't linked.
+*/
+const MakeExpertMessageSchema = object({
+	type: literal("make-expert"),
+	v: Version,
+	request: RequestId,
+	offer: OfferId,
+	key: ExpertNameSchema,
+	subject: Subject,
+	model: Model,
+	project: ProjectSchema,
+	area: Area,
+	proof: Proof,
+	by: Account
+});
+/**
+* Draft an office-wide offer on `folder` of `project` (protocol 0.15.0), which several sessions
+* searched within the period: sent to the runner of the latest of them. `sessions`: those on this
+* runner's machine, newest first, whose work in the folder the draft is made from; the first is the
+* offer's `session`. The runner answers with `expert-offer`, scope `office`, whose `id` is `request`,
+* or with `expert-offer-ended` `no-draft`.
+*/
+const DraftOfferMessageSchema = object({
+	type: literal("draft-offer"),
+	v: Version,
+	request: OfferId,
+	project: ProjectSchema,
+	folder: AreaPathSchema,
+	sessions: array(string().min(1)).min(1).max(20)
+});
+/**
+* One area this runner's person dismissed: a folder of a project, by its id, lower-cased. "Not now"
+* lasts `until` a time, after which the same area may be offered again; "Don't offer this again"
+* lasts `forever`. Exactly one of the two.
+*/
+const OfferDismissalSchema = object({
+	project: string().min(1),
+	folder: AreaPathSchema,
+	until: datetime({ offset: true }).optional(),
+	forever: literal(true).optional()
+}).superRefine((dismissal, context) => {
+	if (dismissal.until === void 0 === (dismissal.forever === void 0)) context.addIssue({
+		code: "custom",
+		path: ["until"],
+		message: "a dismissal lasts until a time, or forever: one of the two"
+	});
+});
+/**
+* The areas this runner's person dismissed (protocol 0.15.0), the whole list each time: sent to a
+* runner that said `offers` once its hello is let in, even an empty one, and whenever the list
+* changes. The runner makes no offer on an area it lists, and sends none of its offer messages on a
+* connection before the connection's first one (see `expert-offer`).
+*/
+const OfferDismissalsMessageSchema = object({
+	type: literal("offer-dismissals"),
+	v: Version,
+	dismissals: array(OfferDismissalSchema).max(MAX_OFFER_DISMISSALS)
+});
+const offerEnded = {
+	type: literal("expert-offer-ended"),
+	v: Version,
+	id: OfferId
+};
 discriminatedUnion("type", [
 	RepairMessageSchema,
 	WelcomeMessageSchema,
@@ -7531,124 +7870,21 @@ discriminatedUnion("type", [
 	DropMessageSchema,
 	AskedMessageSchema,
 	AskRightsMessageSchema,
-	discriminatedUnion("kind", [
-		object({
-			...drive,
-			kind: literal("start"),
-			room: Room.optional(),
-			folder: Folder.optional(),
-			branch: BranchName.optional(),
-			project: ProjectSchema,
-			roomSessions: array(DrivenSessionId).max(20).optional(),
-			instruction: Instruction.optional(),
-			permissions: DrivePermissionsSchema,
-			mode: _enum([
-				"terminal",
-				"headless",
-				"orca",
-				"desktop",
-				"driven"
-			]).optional(),
-			hidden: boolean().optional()
-		}).superRefine((message, context) => {
-			if (message.hidden && message.mode === "orca") context.addIssue({
-				code: "custom",
-				path: ["hidden"],
-				message: "a hidden start doesn't open in Orca, which would list its folder"
-			});
-			if (message.mode !== void 0 && message.mode !== "driven") {
-				if (message.folder === void 0) context.addIssue({
-					code: "custom",
-					path: ["folder"],
-					message: "a start that opens outside the floor names a folder"
-				});
-				if (message.instruction === void 0) context.addIssue({
-					code: "custom",
-					path: ["instruction"],
-					message: "a start that opens outside the floor names its first instruction"
-				});
-			}
-			if (message.folder === void 0) {
-				if (message.room === void 0) context.addIssue({
-					code: "custom",
-					path: ["room"],
-					message: "a start names a room, or a folder"
-				});
-				if (message.branch !== void 0) context.addIssue({
-					code: "custom",
-					path: ["branch"],
-					message: "a start names a branch only with a folder"
-				});
-				if (message.hidden) context.addIssue({
-					code: "custom",
-					path: ["hidden"],
-					message: "a start is hidden only with a folder"
-				});
-				return;
-			}
-			for (const key of ["room", "roomSessions"]) if (message[key] !== void 0) context.addIssue({
-				code: "custom",
-				path: [key],
-				message: "a start in a folder opens a new room, with nothing from another"
-			});
-		}),
-		object({
-			...drive,
-			kind: literal("instruct"),
-			session: DrivenSessionId,
-			text: Instruction
-		}),
-		object({
-			...drive,
-			kind: literal("stop"),
-			session: DrivenSessionId,
-			remove: literal(true).optional()
-		}),
-		object({
-			...drive,
-			kind: literal("interrupt"),
-			session: DrivenSessionId
-		}),
-		object({
-			...drive,
-			kind: literal("hand-back"),
-			session: DrivenSessionId
-		}),
-		object({
-			...drive,
-			kind: literal("output"),
-			session: DrivenSessionId,
-			turn: DriveId.optional()
-		}),
-		object({
-			...drive,
-			kind: literal("answer"),
-			session: DrivenSessionId,
-			prompt: DriveId,
-			answer: _enum(["allow", "deny"])
-		}),
-		object({
-			...drive,
-			kind: literal("release"),
-			session: DrivenSessionId,
-			withheld: DriveId
-		}),
-		object({
-			...drive,
-			kind: literal("install-claude")
-		}),
-		object({
-			...drive,
-			kind: literal("sign-in-claude")
-		})
-	]),
-	object({
-		type: literal("drive-policy"),
-		v: Version,
-		bypassAllowed: array(string().min(1)).max(1e3)
-	}),
+	DriveMessageSchema,
+	DrivePolicyMessageSchema,
 	ExpertRightsMessageSchema,
-	HostingMessageSchema
+	HostingMessageSchema,
+	MakeExpertMessageSchema,
+	DraftOfferMessageSchema,
+	OfferDismissalsMessageSchema,
+	discriminatedUnion("why", [object({
+		...offerEnded,
+		why: literal("made"),
+		key: ExpertNameSchema
+	}), object({
+		...offerEnded,
+		why: _enum(["dismissed", "expired"])
+	})])
 ]);
 //#endregion
 //#region ../protocol/dist/project-id.js
