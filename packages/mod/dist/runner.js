@@ -8,6 +8,23 @@ import http from "node:http";
 import fs$1, { realpath, statSync } from "node:fs";
 import { promisify } from "node:util";
 import net from "node:net";
+//#region ../protocol/dist/area-covers.js
+/**
+* Whether an expert's `areas` (AreaPathSchema: folders and globs) cover `folder`, relative to the
+* same repo's root: one area's part before its first wildcard part (one with any of `* ? [ ] { }`)
+* is the folder or a folder it is in. `.`, or an area that starts with a wildcard, covers every
+* folder. Letter case is ignored, as Windows and macOS ignore it.
+*/
+function areaCovers(areas, folder) {
+	const target = folder.toLowerCase();
+	return areas.some((area) => {
+		const parts = area.toLowerCase().split("/");
+		const wild = parts.findIndex((part) => /[*?[\]{}]/.test(part));
+		const base = (wild < 0 ? parts : parts.slice(0, wild)).join("/") || ".";
+		return base === "." || target === base || target.startsWith(base + "/");
+	});
+}
+//#endregion
 //#region ../../node_modules/.pnpm/zod@4.6.7/node_modules/zod/v4/core/util.js
 function getEnumValues(entries) {
 	const numericValues = Object.values(entries).filter((v) => typeof v === "number");
@@ -11277,7 +11294,7 @@ function foldLine(st, line, home, isDir) {
 						...launch,
 						at
 					});
-					areaResult(st.area, c, at, ev.toolDenialKind === void 0 && !refused(c, st.area.names));
+					areaResult(st.area, c, at, ev.toolDenialKind === void 0 && !refused(c, st.area.names), ev.toolUseResult);
 				}
 			}
 			if (down) {
@@ -11536,7 +11553,9 @@ function areaCall(a, c, cwd, at) {
 	if (typeof c.id === "string") {
 		a.calls.set(c.id, {
 			key,
-			at
+			at,
+			cwd,
+			search: kind === "search"
 		});
 		capped(a.calls, MAX_AREA_CALLS);
 	}
@@ -11545,12 +11564,47 @@ function resultText$1(content) {
 	if (typeof content === "string") return content;
 	return Array.isArray(content) ? content.map((b) => b && b.type === "text" && typeof b.text === "string" ? b.text : "").join("") : "";
 }
-function areaResult(a, c, at, ran) {
+function resultFiles(used) {
+	if (!used || typeof used !== "object") return [];
+	const r = used;
+	if (Array.isArray(r.filenames) && r.filenames.length) return r.filenames.filter((f) => typeof f === "string" && f !== "");
+	if (typeof r.content !== "string") return [];
+	return r.content.split(/\r?\n/).flatMap((l) => /^(.+?):\d+(?::|$)/.exec(l)?.[1] ?? []);
+}
+function holding(files, cwd) {
+	const dirs = files.map((f) => isAbsolute(f) ? dirname(f) : cwd ? dirname(join(cwd, f)) : null);
+	if (!dirs.length || dirs.includes(null)) return null;
+	let common = dirs[0];
+	for (const d of dirs) while (pathKey(common) !== pathKey(d) && relativeTo(common, d) === null) {
+		const up = dirname(common);
+		if (up === common) return null;
+		common = up;
+	}
+	return common;
+}
+function areaResult(a, c, at, ran, used) {
 	const call = a.calls.get(c.tool_use_id);
 	if (!call) return;
 	a.calls.delete(c.tool_use_id);
-	const t = a.tallies.get(call.key);
+	let t = a.tallies.get(call.key);
 	if (!t || !ran) return;
+	const within = call.search ? holding(resultFiles(used), call.cwd) : null;
+	if (within && relativeTo(t.path, within)) {
+		const key = `${call.key}\n${pathKey(within)}`;
+		const own = a.tallies.get(key) ?? {
+			path: t.path,
+			within,
+			reads: 0,
+			searches: 0,
+			chars: 0,
+			ms: 0
+		};
+		a.tallies.set(key, own);
+		t.searches--;
+		if (!t.reads && !t.searches && !t.chars && !t.ms) a.tallies.delete(call.key);
+		own.searches++;
+		t = own;
+	}
 	t.chars += resultText$1(c.content).length;
 	if (at > call.at) t.ms += at - call.at;
 }
@@ -11636,8 +11690,9 @@ async function areasOf(sources, place, corrected) {
 		});
 		return f;
 	};
-	for (const { area } of sources) for (const [key, t] of area.tallies) {
-		const g = await where(key, t.path);
+	for (const { area } of sources) for (const t of area.tallies.values()) {
+		let g = await where(pathKey(t.path), t.path);
+		if (g && !g.folders.length && t.within) g = await where(pathKey(t.within), t.within);
 		for (const folder of g?.folders ?? []) {
 			const f = factOf(g, folder);
 			f.reads += t.reads;
@@ -11680,7 +11735,7 @@ async function areasOf(sources, place, corrected) {
 			let inside = false;
 			for (const [key, path] of turn.dirs) {
 				const g = await where(key, path);
-				if (g && g.group === (project ?? "") && g.folders.includes(folder)) inside = true;
+				if (g && g.group.toLowerCase() === (project ?? "").toLowerCase() && g.folders.includes(folder)) inside = true;
 			}
 			if (inside) out.push([turn.prompt && `Asked: ${turn.prompt}`, turn.reply && `Answered: ${turn.reply}`].filter(Boolean).join("\n"));
 		}
@@ -15917,20 +15972,28 @@ function createIsoplanClones({ git, claudeDir, clonesFolder = "", clonesFolders 
 		timeoutMs: await timeoutMs()
 	});
 	const why = (r) => `${r.timedOut ? "git took too long" : "git failed"}: ${r.stderr.trim()}`;
-	async function ready(checkout, project) {
-		const remote = await run(checkout, [
-			"remote",
-			"get-url",
-			"origin"
-		]);
-		if (remote.code === 2) return { problem: NO_REMOTE };
-		if (remote.code !== 0) {
-			log(`couldn't read the origin of ${checkout} for Isoplan's own clone of ${project} (${why(remote)})`);
-			return { problem: NOT_MADE };
+	async function ready(from, project) {
+		const checkout = typeof from === "string" ? from : null;
+		let url;
+		if (checkout === null) url = from.url;
+		else {
+			const remote = await run(checkout, [
+				"remote",
+				"get-url",
+				"origin"
+			]);
+			if (remote.code === 2) return { problem: NO_REMOTE };
+			if (remote.code !== 0) {
+				log(`couldn't read the origin of ${checkout} for Isoplan's own clone of ${project} (${why(remote)})`);
+				return {
+					problem: NOT_MADE,
+					reason: why(remote)
+				};
+			}
+			url = remote.stdout.trim();
 		}
-		const url = remote.stdout.trim();
 		if (!cloneFrom(url)) {
-			log(`didn't clone ${project} for a hidden start: ${checkout}'s origin, ${url}, isn't an https, ssh or host:path remote`);
+			log(`didn't clone ${project} for Isoplan's own clone: ${checkout ? `${checkout}'s origin, ` : ""}${url}, isn't an https, ssh or host:path remote`);
 			return { problem: NOT_ON_WIRE };
 		}
 		const earlier = [path.join(clonesDir(claudeDir), earlierCloneName(project)), ...[
@@ -15947,12 +16010,17 @@ function createIsoplanClones({ git, claudeDir, clonesFolder = "", clonesFolders 
 				log(`${clone} is there already and isn't a clone of its own, so it was left as it is and the hidden start of ${project} was refused; remove it and Isoplan clones it again`);
 				return { problem: NOT_MADE };
 			}
-			const set = await run(clone, [
+			const set = checkout ? await run(clone, [
 				"remote",
 				"set-url",
 				"origin",
 				url
-			]);
+			]) : {
+				code: 0,
+				stdout: "",
+				stderr: "",
+				timedOut: false
+			};
 			if (set.code === 0) await keepLongPaths((args) => run(clone, args), platform, (why) => log(`couldn't turn on long paths in Isoplan's own clone ${clone} (${why})`));
 			const fetched = set.code === 0 ? await run(clone, [
 				"fetch",
@@ -15961,7 +16029,10 @@ function createIsoplanClones({ git, claudeDir, clonesFolder = "", clonesFolders 
 			]) : set;
 			if (fetched.code !== 0) {
 				log(`couldn't fetch origin in Isoplan's own clone ${clone} (${why(fetched)})`);
-				return { problem: NOT_FETCHED };
+				return {
+					problem: NOT_FETCHED,
+					reason: why(fetched)
+				};
 			}
 			return clone;
 		}
@@ -15980,7 +16051,7 @@ function createIsoplanClones({ git, claudeDir, clonesFolder = "", clonesFolders 
 			maxRetries: 5,
 			retryDelay: 200
 		});
-		const made = await cloneBorrowing((borrow) => run(root, [
+		const cloneWith = (borrow) => run(root, [
 			...long.git,
 			"clone",
 			"-q",
@@ -15989,26 +16060,33 @@ function createIsoplanClones({ git, claudeDir, clonesFolder = "", clonesFolders 
 			"--",
 			url,
 			staging
-		]), await borrowFrom(run, checkout), clean);
+		]);
+		const made = checkout ? await cloneBorrowing(cloneWith, await borrowFrom(run, checkout), clean) : await cloneWith([]);
 		if (made.code !== 0) {
-			log(`couldn't clone ${project} into ${staging} for a hidden start (${why(made)})`);
+			log(`couldn't clone ${project} into ${staging} for Isoplan's own clone (${why(made)})`);
 			await fs.rm(staging, {
 				recursive: true,
 				force: true,
 				maxRetries: 5,
 				retryDelay: 200
 			}).catch(() => {});
-			return { problem: NOT_MADE };
+			return {
+				problem: NOT_MADE,
+				reason: why(made)
+			};
 		}
 		await renamed(staging, clone);
 		log(`made Isoplan's own clone of ${project} in ${clone}`);
 		return clone;
 	}
-	return (checkout, project) => {
+	return (from, project) => {
 		const key = cloneName(project);
-		const next = (busy.get(key) ?? Promise.resolve()).then(() => ready(checkout, project)).catch((err) => {
+		const next = (busy.get(key) ?? Promise.resolve()).then(() => ready(from, project)).catch((err) => {
 			log(`Isoplan's own clone of ${project} failed: ${err?.stack ?? String(err)}`);
-			return { problem: NOT_MADE };
+			return {
+				problem: NOT_MADE,
+				reason: err?.message ?? String(err)
+			};
 		});
 		busy.set(key, next);
 		next.then(() => busy.get(key) === next && busy.delete(key));
@@ -16227,7 +16305,7 @@ function draftFrom(text) {
 		}
 	};
 }
-/** The check's input: the agent's reply, then the person's message. */
+/** The check's input: the agent's reply, then the person's message. It goes only to the person's own Claude account, never to the office. */
 const correctionInput = (text, reply) => `The agent's reply:\n${reply ?? "(none)"}\n\nThe person's next message:\n${text}`;
 /** The draft's input. */
 function draftInput(d) {
@@ -16623,15 +16701,8 @@ const within$1 = (folder, other) => other === "." || folder === other || folder.
 const near = (a, b) => within$1(a, b) || within$1(b, a);
 /** Whether the person dismissed `folder` of `project` (a lower-cased id), or a folder it is inside, as of `now`. */
 const dismissed = (list, project, folder, now) => list.some((d) => d.project.toLowerCase() === project && within$1(folder, d.folder) && (d.forever === true || Date.parse(d.until ?? "") > now));
-/** Whether an expert's areas cover `folder`: one whose part before its first wildcard is the folder or above it. */
-function covers(areas, folder) {
-	return areas.some((a) => {
-		const parts = a.split("/");
-		const wild = parts.findIndex((p) => /[*?[\]{}]/.test(p));
-		const prefix = (wild < 0 ? parts : parts.slice(0, wild)).join("/") || ".";
-		return within$1(folder, prefix);
-	});
-}
+/** The address Isoplan's own clone of a project is made from where this computer has no checkout: https, from its id; null for a repo with no remote. */
+const cloneUrl = (project) => project.startsWith("local:") ? null : `https://${project}.git`;
 /** The files under `folder` of `checkout`, relative to it, by name, at most `max`; dot entries and node_modules left out. */
 async function folderFiles(checkout, folder, max = 200) {
 	const out = [];
@@ -16700,14 +16771,15 @@ function createOffers(o) {
 		version: FILE_VERSION,
 		offered: [],
 		offers: [],
-		makings: []
+		makings: [],
+		held: []
 	};
 	let started = false;
 	let closed = false;
 	const latest = /* @__PURE__ */ new Map();
 	const busy = /* @__PURE__ */ new Set();
 	const draftingOffers = /* @__PURE__ */ new Set();
-	let held = [];
+	const cleared = /* @__PURE__ */ new Set();
 	const keeping = /* @__PURE__ */ new Map();
 	const makings = /* @__PURE__ */ new Map();
 	const verdicts = /* @__PURE__ */ new Map();
@@ -16825,7 +16897,7 @@ function createOffers(o) {
 	const expertProjects = /* @__PURE__ */ new Map();
 	async function coveredHere(project, folder) {
 		for (const e of o.experts()) {
-			if (!e.areas?.length || !covers(e.areas, folder)) continue;
+			if (!e.areas?.length || !areaCovers(e.areas, folder)) continue;
 			let hit = expertProjects.get(e.repo);
 			if (!hit || now() - hit.at > PROJECT_MS) expertProjects.set(e.repo, hit = {
 				at: now(),
@@ -16836,7 +16908,7 @@ function createOffers(o) {
 		return false;
 	}
 	const offeredNear = (session, project, folder) => saved.offered.some((x) => x.session === session && x.project === project && near(folder, x.folder));
-	const heldNear = (session, project, folder, at) => (held = held.filter((x) => x.until > at)).some((x) => x.session === session && x.project === project && near(folder, x.folder));
+	const heldNear = (session, project, folder, at) => (saved.held = saved.held.filter((x) => x.until > at)).some((x) => x.session === session && x.project === project && near(folder, x.folder));
 	const names = (s) => new Set([s.project, ...s.areas.map((a) => a.project ?? s.project)].map((p) => p.id.toLowerCase()));
 	const mayTell = (session, project) => [...latest.get(session)?.values() ?? []].filter((p) => names(p).has(project)).map((p) => p.server);
 	function forget(t, at) {
@@ -16964,12 +17036,16 @@ function createOffers(o) {
 			why
 		}, t);
 		if (closed) return;
-		if (!message) return void held.push({
-			session: s.session,
-			project: id,
-			folder: area.folder,
-			until: now() + RETRY_MS
-		});
+		if (!message) {
+			saved.held.push({
+				session: s.session,
+				project: id,
+				folder: area.folder,
+				until: now() + RETRY_MS
+			});
+			save();
+			return;
+		}
 		saved.offered.push({
 			session: s.session,
 			project: id,
@@ -17049,7 +17125,7 @@ function createOffers(o) {
 			};
 			withdraw(r);
 			tellReady(r);
-		}
+		} else if (m.why === "dismissed") withdraw(r);
 		save();
 		writeSessionFile(r.bare);
 	}
@@ -17077,7 +17153,12 @@ function createOffers(o) {
 			state: m.state,
 			...m.detail && { detail: m.detail }
 		})) m.sent = text;
-		if (m.sent === text && done(m)) makings.delete(m.request);
+		if (m.sent !== text || !done(m)) return;
+		makings.delete(m.request);
+		if (saved.makings.some((k) => k.request === m.request)) {
+			saved.makings = saved.makings.filter((k) => k.request !== m.request);
+			save();
+		}
 	}
 	function setMaking(m, state, detail) {
 		const changed = m.state !== state || m.detail !== detail;
@@ -17087,12 +17168,34 @@ function createOffers(o) {
 			say(`expert ${m.key}, made from offer ${m.offer}: ${state}${detail ? `: ${detail}` : ""}`);
 			if (m.timer) clearTimeout(m.timer);
 			m.timer = null;
-			if (saved.makings.some((k) => k.request === m.request)) {
-				saved.makings = saved.makings.filter((k) => k.request !== m.request);
+			const kept = saved.makings.find((k) => k.request === m.request);
+			if (kept) {
+				Object.assign(kept, {
+					state,
+					...detail && { detail }
+				});
 				save();
 			}
+			if (state === "failed" && m.wrote) clear(m.key);
 		}
 		sendMaking(m);
+	}
+	async function clear(key) {
+		cleared.add(key);
+		try {
+			await fs.rm(expertFile(key), { force: true });
+			say(`removed the expert file of ${key}, whose making failed, so this computer stops hosting it`);
+		} catch (err) {
+			say(`couldn't remove the expert file ${expertFile(key)}, whose making failed: ${err.message}`);
+		}
+	}
+	async function stopped(key) {
+		for (let waited = 0; o.experts().some((e) => e.name === key); waited += pollMs) {
+			if (closed || waited >= 6e4) return false;
+			await new Promise((r) => setTimeout(r, pollMs));
+		}
+		cleared.delete(key);
+		return true;
 	}
 	async function follow(m) {
 		m.timer = null;
@@ -17139,14 +17242,24 @@ function createOffers(o) {
 			since: now(),
 			state: "cloning",
 			sent: null,
+			wrote: false,
 			timer: null
 		};
 		makings.set(m.request, making);
 		const fail = (detail) => setMaking(making, "failed", detail);
 		if (m.by.id !== o.account.id) return fail("this computer's runner is someone else's, so it makes experts only for them");
+		if (cleared.has(m.key) && !await stopped(m.key)) return fail(`the expert named ${m.key}, whose making failed, is still stopping on this computer; try again in a minute`);
 		if (o.experts().some((e) => e.name === m.key) || await fs.stat(expertFile(m.key)).then(() => true, () => false)) return fail(`an expert named ${m.key} is already on this computer`);
-		const checkout = await o.checkout(index, m.project).catch(() => null);
-		if (!checkout) return fail(`this computer has no checkout of ${m.project.name}`);
+		let checkout = await o.checkout(index, m.project).catch(() => null);
+		if (!checkout) {
+			const url = cloneUrl(m.project.id);
+			if (!url) return fail(`this computer has no checkout of ${m.project.name}, and its repo has no remote to clone it from`);
+			sendMaking(making);
+			const clone = await o.clone(url, m.project.id);
+			if (closed) return;
+			if (typeof clone !== "string") return fail(`this computer has no checkout of ${m.project.name}, and Isoplan's own copy of it couldn't be made: ${clone.reason ?? clone.problem}`);
+			checkout = clone;
+		}
 		const t = await settings();
 		const body = {
 			version: 1,
@@ -17167,6 +17280,7 @@ function createOffers(o) {
 			say(`couldn't write the expert file ${expertFile(m.key)}: ${err.message}`);
 			return fail("its expert file couldn't be written on that computer");
 		}
+		making.wrote = true;
 		say(`wrote the expert file for ${m.key}, made from offer ${m.offer} by ${m.by.name || m.by.id}, for ${checkout}`);
 		saved.makings.push({
 			request: m.request,
@@ -17211,15 +17325,28 @@ function createOffers(o) {
 	const orLog = (what) => (err) => say(`couldn't ${what}: ${err.message}`);
 	return {
 		async start() {
-			try {
-				const value = JSON.parse(await fs.readFile(file, "utf8"));
+			const text = await fs.readFile(file, "utf8").catch((err) => {
+				if (err.code !== "ENOENT") say(`EXPERT OFFERS: couldn't read ${file} (${err.message}), so what was offered before isn't known and may be offered again`);
+				return null;
+			});
+			if (text !== null) {
+				let value = null;
+				try {
+					value = JSON.parse(text);
+				} catch {}
 				if (value?.version === FILE_VERSION && Array.isArray(value.offered) && Array.isArray(value.offers)) saved = {
 					...value,
-					makings: Array.isArray(value.makings) ? value.makings : []
+					makings: Array.isArray(value.makings) ? value.makings : [],
+					held: Array.isArray(value.held) ? value.held : []
 				};
-			} catch {}
+				else {
+					const aside = `${file}.unreadable-${now()}`;
+					const moved = await fs.rename(file, aside).then(() => `moved to ${aside}`, (err) => `left where it is (${err.message})`);
+					say(`EXPERT OFFERS: ${file} isn't offers.json as this runner writes it, so it was ${moved}, and expert offers start again from nothing: folders offered before may be offered again`);
+				}
+			}
 			for (const r of saved.offers) for (const [server, state] of Object.entries(r.offices)) if (state === "sent") r.offices[server] = "pending";
-			forget(await settings(), now());
+			await settings().then((t) => forget(t, now()), (err) => say(`couldn't read runner.json's expertOffers as the expert offers started (${err.message}); it is read again on the next session's pass`));
 			started = true;
 			saved.makings = saved.makings.filter((k) => indexOf(k.server) >= 0);
 			for (const k of saved.makings) {
@@ -17231,12 +17358,15 @@ function createOffers(o) {
 					offer: k.offer,
 					key: k.key,
 					since: k.since,
-					state: "cloning",
+					state: k.state ?? "cloning",
+					...k.detail && { detail: k.detail },
 					sent: null,
+					wrote: true,
 					timer: null
 				};
 				makings.set(m.request, m);
-				follow(m).catch((err) => say(`couldn't follow expert ${m.key}: ${err.message}`));
+				if (k.state === "failed" && !saved.makings.some((x) => x.key === k.key && !x.state)) clear(k.key);
+				if (!k.state) follow(m).catch((err) => say(`couldn't follow expert ${m.key}: ${err.message}`));
 			}
 		},
 		seen(s) {
@@ -17263,14 +17393,13 @@ function createOffers(o) {
 		corrected(key, text, reply) {
 			const verdict = verdicts.get(key);
 			if (verdict !== void 0) return verdict;
-			if (!closed && !waiting.some((w) => w.key === key) && waiting.length < MAX_CHECKS_WAITING) {
-				waiting.push({
-					key,
-					text,
-					reply
-				});
-				check().catch(orLog("check whether a message corrected the agent"));
-			}
+			if (closed) return null;
+			if (!waiting.some((w) => w.key === key) && waiting.length < MAX_CHECKS_WAITING) waiting.push({
+				key,
+				text,
+				reply
+			});
+			if (waiting.length) check().catch(orLog("check whether a message corrected the agent"));
 			return null;
 		},
 		take(index, message) {
@@ -24031,6 +24160,14 @@ async function worker() {
 		server: office.server,
 		checkMs: first.approvedRefreshMinutes * 6e4
 	}));
+	const isoplanClone = createIsoplanClones({
+		git,
+		claudeDir,
+		clonesFolder: clones.folder,
+		clonesFolders: clones.folders,
+		timeoutMs: gitMs,
+		log
+	});
 	const drive = createDriver({
 		claudeDir,
 		account,
@@ -24043,14 +24180,7 @@ async function worker() {
 		namer,
 		removed: (session) => reporting.end(session.slice(session.indexOf(":") + 1), REMOVED, true),
 		projectOf: async (folder) => (await homeIo.projectOf(await homeIo.resolve(folder), folder)).id,
-		isoplanClone: createIsoplanClones({
-			git,
-			claudeDir,
-			clonesFolder: clones.folder,
-			clonesFolders: clones.folders,
-			timeoutMs: gitMs,
-			log
-		}),
+		isoplanClone,
 		elsewhere: (start, bin) => startWhere(start, bin, {
 			run: git,
 			claudeDir,
@@ -24115,6 +24245,7 @@ async function worker() {
 		experts: () => hosted.hosted(),
 		projectOf: async (folder) => (await homeIo.projectOf(await homeIo.resolve(folder), folder)).id.toLowerCase(),
 		checkout: async (index, project) => (await repoLists[index](false)).find((r) => r.project === project.id.toLowerCase())?.folders[0] ?? null,
+		clone: (url, project) => isoplanClone({ url }, project),
 		hooked: (bare) => pipe?.hooked(bare) ?? null,
 		log
 	});
