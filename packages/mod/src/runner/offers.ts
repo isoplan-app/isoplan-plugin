@@ -15,9 +15,11 @@
 //   never one an expert on this computer covers, by its file's
 //   areas (the protocol's areaCovers, the rule the office uses too). The office checks other
 //   computers' experts itself. A folder whose draft couldn't be made, and the folders inside and
-//   above it, wait RETRY_MS for that session before one is tried again, a restart included. Which
-//   sessions and folders were offered, the folders waiting, the offers and the experts being made
-//   are kept in <claude dir>/isoplan/runner/offers.json, the first two for `rememberDays`. One that
+//   above it, wait RETRY_MS for that session before one is tried again, a restart included; so does
+//   the folder of an offer every office it went to refused, from the last refusal. Which sessions
+//   and folders were offered, the folders waiting, the offers, the experts being made and made, and
+//   the correction check's verdicts are kept in <claude dir>/isoplan/runner/offers.json, the first
+//   two, and makings once they ended, for `rememberDays`. One that
 //   can't be read as this runner writes it is logged and moved aside (offers.json.unreadable-<ms>),
 //   and offering starts again from nothing. While runner.json can't be read, each pass logs it and
 //   the next tries again.
@@ -46,7 +48,10 @@
 //   folder already. `refused` ends it in that office alone; `dismissed`, a person's dismissal on
 //   the floor, and `made` withdraw it from the others too. So an offer counts as open in an office only once `keptMs` has
 //   passed since it went there with no end; one sent on a connection that closed first goes again
-//   on the next, which the office takes as the same offer.
+//   on the next, which the office takes as the same offer. An end can be lost with the connection
+//   it came on, so each offer open in an office goes again on each new connection there, once its
+//   offer-dismissals came: the office takes it as the same offer while it is open there, answers
+//   with its end once it ended, and `refused` when it has no record of it from this runner.
 // - While an offer is open, the session that showed the need is told through its hooks module, if
 //   it is on this computer (lines.ts ExpertOfferLine), and again each time a hooks module connects
 //   for it; and when the offer ends, refused included. Made or dismissed in one office, it is withdrawn from the
@@ -69,17 +74,23 @@
 //   again on the next, and fails it only past MAKING_LIMIT_MS. A making that fails after
 //   writing the file removes it, so the watcher stops that expert and its listing drops it; a
 //   make-expert of the same key after it starts fresh, once that expert has stopped (CLEARED_MS at
-//   most). A making stays in offers.json from its make-expert until its last state went on a live
-//   connection, whether or not it wrote its file: a runner started again sends a last state that
-//   hadn't gone, fails one that stopped before writing its file, and goes on following the makings
-//   it had under way, on their requests; a make-expert for the same offer and key as one under way, as the
-//   office sends once that runner is back, takes it over.
-// - Whether the person's message corrected the agent (`corrected`) is a `claude -p` call's word too
-//   (prompts/correction.md, `draftModel`), on the person's own Claude account, never the office's:
-//   one call at a time and at most `checksPerHour`, and only for a session whose latest pass went
-//   to an office whose connection has had its offer-dismissals, so none runs where no offer could
-//   follow (an office from before offers sends none). Until it comes the message counts nothing,
-//   and each later pass asks again, so a check that couldn't run is tried again.
+//   most). A making stays in offers.json from its make-expert, whether or not it wrote its file, and
+//   for `rememberDays` once it is ready or failed: its last state can be lost with the connection it
+//   went on, so it goes again on each new connection to its office. A runner started again fails a
+//   making that stopped before writing its file, and goes on following the makings it had under way,
+//   on their requests; a make-expert for the same offer and key as one under way, as the office
+//   sends once that runner is back, takes it over, and one for a making that is ready answers ready
+//   again.
+// - The correction check runs only when runner.json's `expertOffers.correctionCheck` turns it on
+//   (off by default, since each check spends the person's own tokens). Off, no message is checked,
+//   and a correction is only an interruption or a tool call turned down. On, whether the person's
+//   message corrected the agent (`corrected`) is a `claude -p` call's word too (prompts/correction.md,
+//   `draftModel`), on the person's own Claude account, never the office's: one call at a time and at
+//   most `checksPerHour`, and only for a session whose latest pass went to an office whose
+//   connection has had its offer-dismissals, so none runs where no offer could follow (an office
+//   from before offers sends none). Until it comes the message counts nothing, and each later pass
+//   asks again, so a check that couldn't run is tried again. Its word is kept in offers.json (at
+//   most MAX_VERDICTS), so a runner started again never checks a message twice.
 
 import { randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
@@ -119,6 +130,8 @@ export interface ExpertOfferSettings extends OfferModelSettings {
   rememberDays: number;
   /** The expert file's promoteAtTokens for an expert made from an offer. */
   promoteAtTokens: number;
+  /** Whether the correction check runs: off, a correction is only an interruption or a turned-down tool call. */
+  correctionCheck: boolean;
   /** The most correction checks an hour. */
   checksPerHour: number;
 }
@@ -322,17 +335,21 @@ interface OfferRecord {
   /** The expert made from it, in which office, and whether the session has been told. */
   made?: { key: string; server: string };
   told?: boolean;
+  /** When the last office it went to refused it: from RETRY_MS after, its folder may be offered to its session again. */
+  refusedAt?: number;
 }
 
 interface Saved {
   version: number;
-  /** Each session's folders offered, and when. */
-  offered: { session: string; project: string; folder: string; at: number }[];
+  /** Each session's folders offered, when, and as which offer. */
+  offered: { session: string; project: string; folder: string; at: number; offer?: string }[];
   offers: OfferRecord[];
-  /** The experts being made here, by the office the request came from, until their last state, ready or failed, went to it. */
+  /** The experts being made here, by the office the request came from, and for `rememberDays` once made or failed, with their last state, which goes again on each new connection. */
   makings: { request: string; offer: string; key: string; since: number; server: string; state?: "ready" | "failed"; detail?: string; wrote?: boolean }[];
   /** Folders whose draft couldn't be made, by session, until they may be tried again. */
   held: { session: string; project: string; folder: string; until: number }[];
+  /** The correction check's verdicts, by message, oldest first: a runner started again never checks a message twice. */
+  verdicts?: [string, boolean][];
 }
 
 /** An expert being made here. */
@@ -346,7 +363,7 @@ interface Making {
   detail?: string;
   /** The state last sent on the office's connection. */
   sent: string | null;
-  /** Whether this making wrote its expert file, which goes again if it fails. */
+  /** Whether this making wrote its expert file and it is still there: it goes if the making fails. */
   wrote: boolean;
   /** While its make-expert, or a look at its state, runs. */
   working: boolean;
@@ -362,7 +379,8 @@ export function createOffers(o: OffersOptions): Offers {
   const file = path.join(o.isoplanDir, "runner", "offers.json");
   const sessionFile = (bare: string) => path.join(o.isoplanDir, "offers", `${bare}.json`);
   const expertFile = (key: string) => path.join(o.isoplanDir, "experts", `${key}.json`);
-  const offices = o.offices.map(() => ({ ready: false, dismissals: [] as OfferDismissal[], queue: [] as RunnerOfferMessage[] }));
+  // `fresh`: its connection is new, so the offers open there go again once it is ready.
+  const offices = o.offices.map(() => ({ ready: false, fresh: true, dismissals: [] as OfferDismissal[], queue: [] as RunnerOfferMessage[] }));
   let saved: Saved = { version: FILE_VERSION, offered: [], offers: [], makings: [], held: [] };
   let started = false;
   let closed = false;
@@ -381,13 +399,15 @@ export function createOffers(o: OffersOptions): Offers {
   const waiting: { bare: string; key: string; text: string; reply: string | null }[] = [];
   const checked: number[] = [];
   let checking = false;
+  // runner.json's correctionCheck, as last read.
+  let checkOn = false;
   let checkTimer: ReturnType<typeof setTimeout> | null = null;
   let saving: Promise<void> = Promise.resolve();
 
   // Read again at most every SETTINGS_MS: every session's pass looks at them.
   let read: { at: number; settings: Promise<ExpertOfferSettings> } | null = null;
   const settings = () => {
-    if (!read || now() - read.at > SETTINGS_MS) read = { at: now(), settings: o.settings().then((s) => s.expertOffers) };
+    if (!read || now() - read.at > SETTINGS_MS) read = { at: now(), settings: o.settings().then((s) => ((checkOn = s.expertOffers.correctionCheck === true), s.expertOffers)) };
     const mine = read;
     return mine.settings.catch((err: unknown) => (read === mine && (read = null), Promise.reject(err)));
   };
@@ -432,6 +452,12 @@ export function createOffers(o: OffersOptions): Offers {
     const st = offices[index]!;
     if (!st.ready || closed) return;
     while (st.queue.length && office.send(st.queue[0]!)) st.queue.shift();
+    // An end the office sent on an earlier connection may never have come: each offer open there
+    // goes again, the same offer to the office, which answers with its end if it has one.
+    if (st.fresh) {
+      st.fresh = false;
+      for (const r of saved.offers) if (r.offices[office.server] === "open") office.send(r.message);
+    }
     let changed = false;
     for (const r of saved.offers) {
       if (r.offices[office.server] !== "pending") continue;
@@ -501,7 +527,10 @@ export function createOffers(o: OffersOptions): Offers {
     return false;
   }
 
-  const offeredNear = (session: string, project: string, folder: string) => saved.offered.some((x) => x.session === session && x.project === project && near(folder, x.folder));
+  // An offer every office it went to refused, RETRY_MS ago or more: its folder may be offered to its session again.
+  const retryable = (r: OfferRecord | undefined, at: number) => !!r?.refusedAt && at - r.refusedAt >= RETRY_MS && Object.values(r.offices).every((s) => s === "refused");
+  const offeredNear = (session: string, project: string, folder: string, at: number) =>
+    saved.offered.some((x) => x.session === session && x.project === project && near(folder, x.folder) && !(x.offer && retryable(saved.offers.find((r) => r.id === x.offer), at)));
   const heldNear = (session: string, project: string, folder: string, at: number) =>
     (saved.held = saved.held.filter((x) => x.until > at)).some((x) => x.session === session && x.project === project && near(folder, x.folder));
 
@@ -514,11 +543,16 @@ export function createOffers(o: OffersOptions): Offers {
   // offer-dismissals: only then may an offer follow, and so a correction check run.
   const offerable = (bare: string) => [...latest.values()].some((byOffice) => [...byOffice.values()].some((p) => p.bare === bare && !!offices[indexOf(p.server)]?.ready));
 
-  // What is older than rememberDays goes: offered folders and offers, ended or not.
+  // What is older than rememberDays goes: offered folders and offers, ended or not, and makings made or failed.
   function forget(t: ExpertOfferSettings, at: number) {
     const keep = t.rememberDays * DAY_MS;
     saved.offered = saved.offered.filter((x) => at - x.at < keep);
     saved.offers = saved.offers.filter((r) => at - r.at < keep);
+    const old = saved.makings.filter((k) => k.state && at - k.since >= keep);
+    if (!old.length) return;
+    for (const k of old) makings.delete(k.request);
+    saved.makings = saved.makings.filter((k) => !old.includes(k));
+    void save();
   }
 
   const windowOf = (s: SessionAreas) => {
@@ -593,7 +627,7 @@ export function createOffers(o: OffersOptions): Offers {
       const project = area.project ?? s.project;
       const id = project.id.toLowerCase();
       const why = signalsOf(area, window);
-      if (!passes(why, t) || offeredNear(s.session, id, area.folder) || heldNear(s.session, id, area.folder, at)) continue;
+      if (!passes(why, t) || offeredNear(s.session, id, area.folder, at) || heldNear(s.session, id, area.folder, at)) continue;
       if (offices.some((f) => isDismissed(f.dismissals, id, area.folder, at))) continue;
       if (await coveredHere(id, area.folder)) continue;
       candidates.push({ area, project, why });
@@ -611,7 +645,7 @@ export function createOffers(o: OffersOptions): Offers {
       saved.held.push({ session: s.session, project: id, folder: area.folder, until: now() + RETRY_MS });
       return void save();
     }
-    saved.offered.push({ session: s.session, project: id, folder: area.folder, at });
+    saved.offered.push({ session: s.session, project: id, folder: area.folder, at, offer: message.id });
     saved.offers.push(record(message, s.bare, new Set([s.server, ...mayTell(s.session, id)])));
     await save();
     o.offices.forEach((_, i) => flush(i));
@@ -642,7 +676,7 @@ export function createOffers(o: OffersOptions): Offers {
       if (!message) return sendOrQueue(index, { type: "expert-offer-ended", v: PROTOCOL_VERSION, id: m.request, why: "no-draft" });
       const first = m.sessions[0]!;
       // Its session isn't offered the same folder again on its own.
-      saved.offered.push({ session: first, project, folder: m.folder, at: now() });
+      saved.offered.push({ session: first, project, folder: m.folder, at: now(), offer: m.request });
       saved.offers.push(record(message, first.startsWith("claude-code:") ? first.slice("claude-code:".length) : null, [server]));
       await save();
       flush(index);
@@ -660,6 +694,7 @@ export function createOffers(o: OffersOptions): Offers {
     if (!r || r.offices[server] === undefined) return say(`${server} says the expert offer ${m.id} ended, but this runner didn't offer it there`);
     const was = r.offices[server];
     r.offices[server] = m.why === "refused" ? "refused" : "ended";
+    if (Object.values(r.offices).every((s) => s === "refused")) r.refusedAt = now();
     if (was === "open") tell(r, { type: "expert-offer-ended", server, id: r.id, why: m.why });
     say(`the expert offer ${r.id} on ${r.folder} of ${r.project.name} ended in ${server}: ${m.why}`);
     if (m.why === "made") {
@@ -679,17 +714,12 @@ export function createOffers(o: OffersOptions): Offers {
     void save();
   }
 
-  // Sends the making's state on its office's connection once it is ready, unless it went already. Its
-  // last one sent on a live connection, it is done, and only then does offers.json let it go.
+  // Sends the making's state on its office's connection once it is ready, unless it went already on
+  // that connection. A last state can be lost with the connection it went on, so it goes again on
+  // each new one, for as long as offers.json keeps the making (rememberDays).
   function sendMaking(m: Making) {
     const text = `${m.state}\n${m.detail ?? ""}`;
     if (m.sent !== text && offices[m.index]!.ready && o.offices[m.index]!.send({ type: "expert-making", v: PROTOCOL_VERSION, request: m.request, offer: m.offer, state: m.state, ...(m.detail && { detail: m.detail }) })) m.sent = text;
-    if (m.sent !== text || !done(m)) return;
-    makings.delete(m.request);
-    if (saved.makings.some((k) => k.request === m.request)) {
-      saved.makings = saved.makings.filter((k) => k.request !== m.request);
-      void save();
-    }
   }
 
   function setMaking(m: Making, state: ExpertMakingState, detail?: string) {
@@ -700,24 +730,30 @@ export function createOffers(o: OffersOptions): Offers {
       say(`expert ${m.key}, made from offer ${m.offer}: ${state}${detail ? `: ${detail}` : ""}`);
       if (m.timer) clearTimeout(m.timer);
       m.timer = null;
-      // Kept with its last state until that went, so a runner started again sends it as it was.
+      // Kept with its last state, so a runner started again sends it as it was.
       const kept = saved.makings.find((k) => k.request === m.request);
       if (kept) {
         Object.assign(kept, { state, ...(detail && { detail }) });
         void save();
       }
-      if (state === "failed" && m.wrote) void clear(m.key);
+      if (state === "failed" && m.wrote) void clear(m);
     }
     sendMaking(m);
   }
 
   // A failed making's expert file goes, so the experts' watcher stops that expert and its listing
   // drops it; a make of the same key may then start fresh.
-  async function clear(key: string) {
+  async function clear(m: Making) {
+    const key = m.key;
     cleared.add(key);
     try {
       await fs.rm(expertFile(key), { force: true });
       say(`removed the expert file of ${key}, whose making failed, so this computer stops hosting it`);
+      // Gone, so a runner started again never removes a later expert's file of that key.
+      m.wrote = false;
+      const kept = saved.makings.find((k) => k.request === m.request);
+      if (kept) kept.wrote = false;
+      void save();
     } catch (err) {
       say(`couldn't remove the expert file ${expertFile(key)}, whose making failed: ${(err as Error).message}`);
     }
@@ -768,7 +804,7 @@ export function createOffers(o: OffersOptions): Offers {
     if (makings.has(m.request)) return;
     const server = o.offices[index]!.server;
     // The same offer and key asked again, as the office asks once a runner that went mid-making is
-    // back: the making under way answers it, from where it is.
+    // back, or a maker whose ready was lost asks: the making under way, or made, answers it, from where it is.
     const same = m.by.id === o.account.id ? [...makings.values()].find((x) => x.offer === m.offer && x.key === m.key && x.state !== "failed") : undefined;
     if (same) {
       makings.delete(same.request);
@@ -846,6 +882,8 @@ export function createOffers(o: OffersOptions): Offers {
     let again = false;
     try {
       const t = await settings();
+      // Off, nothing is checked, and the messages waiting count nothing.
+      if (!t.correctionCheck) return void (waiting.length = 0);
       const at = now();
       while (checked.length && at - checked[0]! >= HOUR_MS) checked.shift();
       if (checked.length >= t.checksPerHour) {
@@ -862,6 +900,8 @@ export function createOffers(o: OffersOptions): Offers {
       if (verdict !== null) {
         verdicts.set(next.key, verdict);
         if (verdicts.size > MAX_VERDICTS) verdicts.delete(verdicts.keys().next().value!);
+        saved.verdicts = [...verdicts];
+        void save();
       }
     } catch (err) {
       say(`couldn't check whether a message corrected the agent: ${(err as Error).message}`);
@@ -888,6 +928,7 @@ export function createOffers(o: OffersOptions): Offers {
         }
         if (value?.version === FILE_VERSION && Array.isArray(value.offered) && Array.isArray(value.offers)) {
           saved = { ...value, makings: Array.isArray(value.makings) ? value.makings : [], held: Array.isArray(value.held) ? value.held : [] };
+          if (Array.isArray(value.verdicts)) for (const [key, verdict] of value.verdicts) verdicts.set(key, verdict);
         } else {
           // Never overwritten in silence: it is kept beside, for whoever looks into why.
           const aside = `${file}.unreadable-${now()}`;
@@ -915,8 +956,8 @@ export function createOffers(o: OffersOptions): Offers {
         // One kept before makings said whether they wrote their file was kept only once it had.
         const m: Making = { index, request: k.request, offer: k.offer, key: k.key, since: k.since, state: k.state ?? "cloning", ...(k.detail && { detail: k.detail }), sent: null, wrote: k.wrote !== false, working: false, timer: null };
         makings.set(m.request, m);
-        // A failed one's expert file goes, if it wrote it and it was still there, unless a later making of its key wrote it.
-        if (k.state === "failed" && m.wrote && !saved.makings.some((x) => x.key === k.key && !x.state)) void clear(k.key);
+        // A failed one's expert file goes, if it wrote it and it was still there, unless a later making of its key came since.
+        if (k.state === "failed" && m.wrote && !saved.makings.some((x) => x.key === k.key && x.since > k.since)) void clear(m);
         if (k.state) continue;
         if (m.wrote) void follow(m).catch(orLog(`follow expert ${m.key}`));
         // Its make-expert was cut short before the file was written, and nothing here can go on with it.
@@ -936,7 +977,7 @@ export function createOffers(o: OffersOptions): Offers {
       const may = names(s);
       let added = false;
       for (const r of saved.offers) {
-        if (r.session !== s.session || r.scope !== "session" || r.offices[s.server] !== undefined || !may.has(r.project.id.toLowerCase()) || Object.values(r.offices).includes("ended")) continue;
+        if (r.session !== s.session || r.scope !== "session" || r.offices[s.server] !== undefined || !may.has(r.project.id.toLowerCase()) || Object.values(r.offices).includes("ended") || retryable(r, now())) continue;
         r.offices[s.server] = "pending";
         added = true;
       }
@@ -952,7 +993,8 @@ export function createOffers(o: OffersOptions): Offers {
     },
 
     corrected(bare, key, text, reply) {
-      const verdict = verdicts.get(key);
+      // Off, a message never counts (check() drops what waits), whatever an earlier check said.
+      const verdict = checkOn ? verdicts.get(key) : undefined;
       if (verdict !== undefined) return verdict;
       if (closed || !offerable(bare)) return null;
       if (!waiting.some((w) => w.key === key) && waiting.length < MAX_CHECKS_WAITING) waiting.push({ bare, key, text, reply });
@@ -975,6 +1017,7 @@ export function createOffers(o: OffersOptions): Offers {
 
     linked(index) {
       offices[index]!.ready = false;
+      offices[index]!.fresh = true;
       for (const m of makings.values()) if (m.index === index) m.sent = null;
       // An offer sent on the connection that ended, and not yet kept, may not have reached the
       // office: it goes again on the next, which the office takes as the same offer.

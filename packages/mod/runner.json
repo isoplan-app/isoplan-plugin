@@ -49,6 +49,7 @@
     "rememberDays": 30,
     "draftModel": "haiku",
     "promoteAtTokens": 100000,
+    "correctionCheck": false,
     "checksPerHour": 20,
     "timeoutSeconds": 60
   }

@@ -20,7 +20,7 @@
 // the time from the call to its result; a call whose result says it never ran (turned down,
 // interrupted) counts as neither. A turn's corrections count once in each folder it worked in
 // (those calls, and edits): the person interrupting it ("[Request interrupted by user"), turning a
-// tool call down, or a message after it that a local model judges as telling the agent it was wrong
+// tool call down, or, only while the runner's correction check is on, a message after it that a local model judges as telling the agent it was wrong
 // (ReadInput.corrected; the lead's prompts alone, since a subagent's come from its parent). Claude
 // Code 2.1.328 marks a turned-down call on its tool_result line, `toolDenialKind: "user-rejected"`
 // (found in its own code, 19 Nov 2026, beside the other kinds: permission-rule, automode-*,

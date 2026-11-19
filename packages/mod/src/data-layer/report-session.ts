@@ -36,7 +36,8 @@
 // Each pass's areas (protocol 0.15.0), the folders its agents read and searched, go to the runner as
 // each office that takes the repo may be told of them (`areas`), with what the session said in each,
 // which stays on the machine: the runner offers an expert from them (src/runner/offers.ts). Whether
-// a person's message corrected the agent is the runner's local model's word (`corrected`).
+// a person's message corrected the agent is the runner's local model's word (`corrected`), only while runner.json
+// turns its correction check on (`expertOffers.correctionCheck`, off by default).
 //
 // Its log lines go to <claude dir>/isoplan/logs/<session>.log (the runner's sessionLog), and without
 // a hooks module the other lines are dropped. Without one it reports only while the session is at work, and the

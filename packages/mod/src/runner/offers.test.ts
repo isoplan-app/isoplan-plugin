@@ -12,6 +12,8 @@ import type { Draft, DraftInput } from "./offer-model.js";
 import { cloneUrls, createOffers, EXCERPT_CHARS, MAKING_LIMIT_MS, folderExcerpts, folderFiles, passed, passes, RETRY_MS, reviewUrl, signalsOf, type ExpertOfferSettings, type OffersOptions } from "./offers.js";
 
 const SETTINGS: ExpertOfferSettings = JSON.parse(fs.readFileSync(path.join(modDir, "runner.json"), "utf8")).expertOffers;
+// The correction check turned on, as runner.json doesn't by default.
+const CHECKING: ExpertOfferSettings = { ...SETTINGS, correctionCheck: true };
 const A = "ws://127.0.0.1:4747/data-layer";
 const B = "wss://office.team.com/data-layer";
 const PROJECT = { id: "github.com/team/app", name: "app" };
@@ -284,7 +286,7 @@ test("an offers.json that can't be read is said, and moved aside rather than ove
   const asked: string[] = [];
   const h = await harness(
     {
-      settings: async () => (broken ? Promise.reject(new Error("runner.json: bad")) : { expertOffers: SETTINGS }),
+      settings: async () => (broken ? Promise.reject(new Error("runner.json: bad")) : { expertOffers: CHECKING }),
       corrects: async (text) => (asked.push(text), true),
     },
     root,
@@ -328,6 +330,56 @@ test("an offer the office ends at once is never shown in the session: dismissed 
   h.offers.take(0, dismissals());
   await until(() => h.offered().length === 4);
   expect(idOf(h.offered()[3]!)).toBe(idOf(h.offered()[2]!));
+});
+
+test("each offer open in an office goes again on each new connection there, once its dismissals came, so an end that was lost comes again; it stays open meanwhile", async () => {
+  const h = await harness();
+  h.offers.take(0, dismissals());
+  h.offers.seen(h.seen([area("src/parser", 35000)]));
+  await until(() => h.lines.length === 1);
+  const id = idOf(h.offered()[0]!);
+  h.offers.linked(0);
+  await sleep(30);
+  expect(h.offered()).toHaveLength(1);
+  h.offers.take(0, dismissals());
+  expect(h.offered().map(idOf)).toEqual([id, id]);
+  // Once a connection, however often its dismissals come.
+  h.offers.take(0, dismissals());
+  expect(h.offered()).toHaveLength(2);
+  await sleep(50);
+  expect(h.lines).toHaveLength(1);
+  expect(JSON.parse(fs.readFileSync(path.join(h.isoplanDir, "offers", "s1.json"), "utf8")).offers.map((x: { id: string }) => x.id)).toEqual([id]);
+  // An office with no record of it from this runner refuses it, and the session hears it ended.
+  h.offers.take(0, { type: "expert-offer-ended", v: PROTOCOL_VERSION, id, why: "refused" });
+  expect(h.lines.at(-1)!.line).toEqual({ type: "expert-offer-ended", server: A, id, why: "refused" });
+});
+
+test("the folder of an offer every office it went to refused may be offered to its session again RETRY_MS after the last refusal, a restart included", async () => {
+  let clock = Date.now();
+  const h = await harness({ now: () => clock });
+  for (const index of [0, 1]) h.offers.take(index, dismissals());
+  h.offers.seen(h.seen([area("src/parser", 35000)]));
+  h.offers.seen(h.seen([area("src/parser", 35000)], { server: B }));
+  await until(() => h.offered().length === 2);
+  const id = idOf(h.offered()[0]!);
+  h.offers.take(0, { type: "expert-offer-ended", v: PROTOCOL_VERSION, id, why: "refused" });
+  clock += RETRY_MS;
+  // Still open in B, so not offered again.
+  h.offers.seen(h.seen([area("src/parser", 35000)]));
+  await sleep(30);
+  expect(h.drafts).toHaveLength(1);
+  h.offers.take(1, { type: "expert-offer-ended", v: PROTOCOL_VERSION, id, why: "refused" });
+  await sleep(20);
+  h.offers.close();
+  const again = await harness({ now: () => clock }, h.root);
+  again.offers.take(0, dismissals());
+  again.offers.seen(again.seen([area("src/parser", 35000)]));
+  await sleep(30);
+  expect(again.drafts).toHaveLength(0);
+  clock += RETRY_MS;
+  again.offers.seen(again.seen([area("src/parser", 35000)]));
+  await until(() => again.offered().length === 1);
+  expect(idOf(again.offered()[0]!)).not.toBe(id);
 });
 
 const draftOffer = (request: string, folder: string, sessions: string[]): DraftOfferMessage => ({ type: "draft-offer", v: PROTOCOL_VERSION, request, project: PROJECT, folder, sessions });
@@ -467,8 +519,9 @@ test("make-expert: a making that fails removes the expert file it wrote, so this
   expect(making(h, "m2")).toEqual(["cloning"]);
 });
 
-test("make-expert: a making's last state stays in offers.json until it went on a live connection, and a runner started again sends it", async () => {
-  const h = await harness();
+test("make-expert: a making's last state stays in offers.json for rememberDays, going again from a runner started again and on each new connection; the same offer and key asked again once it is ready answers ready", async () => {
+  let clock = Date.now();
+  const h = await harness({ now: () => clock });
   h.offers.take(0, dismissals());
   h.offers.take(0, make("m1"));
   await until(() => making(h, "m1").length === 1 && savedFile(h.isoplanDir)?.makings.length === 1);
@@ -478,14 +531,25 @@ test("make-expert: a making's last state stays in offers.json until it went on a
   fs.writeFileSync(stateFile, JSON.stringify({ version: 1, fingerprint: "f", repo: h.checkout, branch: "main", generations: [{ n: 1, trunk: "t1", model: "m", commit: "a".repeat(40), groundedAt: Date.now(), meter: 0, notes: 0, state: "junior" }] }));
   await until(() => (savedFile(h.isoplanDir)?.makings[0] as { state?: string } | undefined)?.state === "ready");
   h.offers.close();
-  const again = await harness({}, h.root);
+  const again = await harness({ now: () => clock }, h.root);
   again.offers.take(0, dismissals());
   await until(() => making(again, "m1").length === 1);
   expect(making(again, "m1")).toEqual(["ready"]);
+  // That ready may be lost with its connection too: it goes again on the next.
+  again.offers.linked(0);
+  again.offers.take(0, dismissals());
+  await until(() => making(again, "m1").length === 2);
+  // The maker asks again: ready, not a key already used here.
+  again.offers.take(0, make("m2"));
+  await until(() => making(again, "m2").length === 1);
+  expect(making(again, "m2")).toEqual(["ready"]);
+  expect(savedFile(again.isoplanDir)?.makings).toHaveLength(1);
+  clock += SETTINGS.rememberDays * 86400000;
+  again.offers.seen(again.seen([area("docs", 10)]));
   await until(() => savedFile(again.isoplanDir)?.makings.length === 0);
 });
 
-test("make-expert: a making that fails before writing its file, a throw included, fails with the reason and stays in offers.json until that went; a runner started again sends it and leaves alone the file of the expert it found", async () => {
+test("make-expert: a making that fails before writing its file, a throw included, fails with the reason and stays in offers.json; a runner started again sends it and leaves alone the file of the expert it found", async () => {
   const h = await harness({ clone: async () => Promise.reject(new Error("spawn git ENOENT")) });
   h.offers.take(0, dismissals());
   h.up[0] = false;
@@ -503,7 +567,8 @@ test("make-expert: a making that fails before writing its file, a throw included
   again.offers.take(0, dismissals());
   await until(() => making(again, "m1").length === 1 && making(again, "m2").length === 1);
   expect([making(again, "m1"), making(again, "m2")]).toEqual([["making it stopped on that computer: spawn git ENOENT"], ["an expert named parser is already on this computer"]]);
-  await until(() => savedFile(again.isoplanDir)?.makings.length === 0);
+  await sleep(30);
+  expect(states(again.isoplanDir)).toEqual(["failed", "failed"]);
   expect(fs.readFileSync(file, "utf8")).toBe("{}");
 });
 
@@ -555,14 +620,14 @@ test("make-expert: a runner started again goes on following the making it had un
   generation({ commit: "a".repeat(40), state: "junior", proof: { passed: true, at: 2 } });
   await until(() => making(again, "m2").length === 2);
   expect([making(again, "m1"), making(again, "m2")]).toEqual([["cloning", "grounding"], ["grounding", "ready"]]);
-  await until(() => savedFile(again.isoplanDir)?.makings.length === 0);
+  await until(() => JSON.stringify(savedFile(again.isoplanDir)?.makings.map((k) => [(k as { request: string }).request, (k as { state?: string }).state])) === JSON.stringify([["m2", "ready"]]));
 });
 
 test("corrected: unknown until the local model has said, one check at a time and at most checksPerHour; its word is kept", async () => {
   const asked: string[] = [];
   let answer: (v: boolean) => void = () => {};
   const h = await harness({
-    settings: async () => ({ expertOffers: { ...SETTINGS, checksPerHour: 2 } }),
+    settings: async () => ({ expertOffers: { ...CHECKING, checksPerHour: 2 } }),
     corrects: (text) => (asked.push(text), new Promise((r) => (answer = r))),
   });
   h.offers.take(0, dismissals());
@@ -582,7 +647,7 @@ test("corrected: unknown until the local model has said, one check at a time and
 
 test("corrected: no check runs for a session whose latest pass went to no office that has said its dismissals on its connection now, as one from before offers never does", async () => {
   const asked: string[] = [];
-  const h = await harness({ corrects: async (text) => (asked.push(text), true) });
+  const h = await harness({ settings: async () => ({ expertOffers: CHECKING }), corrects: async (text) => (asked.push(text), true) });
   h.offers.seen(h.seen([area("src", 10)]));
   expect(h.offers.corrected("s1", "k1", "no, the other file", null)).toBe(null);
   h.offers.take(0, dismissals());
@@ -597,4 +662,34 @@ test("corrected: no check runs for a session whose latest pass went to no office
   expect(h.offers.corrected("s1", "k3", "and again", null)).toBe(null);
   await sleep(30);
   expect(asked).toEqual(["no, the other file"]);
+});
+
+test("corrected: the correction check is off unless runner.json turns it on: no message is checked, and none counts", async () => {
+  const asked: string[] = [];
+  expect(SETTINGS.correctionCheck).toBe(false);
+  const h = await harness({ corrects: async (text) => (asked.push(text), true) });
+  h.offers.take(0, dismissals());
+  h.offers.seen(h.seen([area("src", 10)]));
+  expect(h.offers.corrected("s1", "k1", "no, the other file", null)).toBe(null);
+  await sleep(30);
+  expect(h.offers.corrected("s1", "k1", "no, the other file", null)).toBe(null);
+  await sleep(30);
+  expect(asked).toEqual([]);
+});
+
+test("corrected: with the check on, its word is kept in offers.json, so a runner started again never checks that message again", async () => {
+  const asked: string[] = [];
+  const opts: Partial<OffersOptions> = { settings: async () => ({ expertOffers: CHECKING }), corrects: async (text) => (asked.push(text), true) };
+  const h = await harness(opts);
+  h.offers.take(0, dismissals());
+  h.offers.seen(h.seen([area("src", 10)]));
+  expect(h.offers.corrected("s1", "k1", "no, the other file", null)).toBe(null);
+  await until(() => asked.length === 1 && JSON.stringify((savedFile(h.isoplanDir) as { verdicts?: unknown } | null)?.verdicts) === JSON.stringify([["k1", true]]));
+  h.offers.close();
+  const again = await harness(opts, h.root);
+  again.offers.take(0, dismissals());
+  again.offers.seen(again.seen([area("src", 10)]));
+  expect(again.offers.corrected("s1", "k1", "no, the other file", null)).toBe(true);
+  await sleep(30);
+  expect(asked).toHaveLength(1);
 });
