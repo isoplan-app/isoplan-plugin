@@ -7271,7 +7271,11 @@ discriminatedUnion("type", [
 		key: ExpertNameSchema
 	}), object({
 		...offerEnded,
-		why: _enum(["dismissed", "expired"])
+		why: _enum([
+			"dismissed",
+			"refused",
+			"expired"
+		])
 	})])
 ]);
 //#endregion

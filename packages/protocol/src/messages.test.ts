@@ -297,6 +297,7 @@ const valid = {
   "offer-dismissals": { type: "offer-dismissals", v, dismissals: [{ project: isoplan.id, folder: "packages/server/src/pairing", until: "2026-12-19T09:00:00.000Z" }, { project: isoplan.id, folder: "docs", forever: true }] },
   "expert-offer-ended made": { type: "expert-offer-ended", v, id: "o-4f9c2a", why: "made", key: "pairing-tokens" },
   "expert-offer-ended expired": { type: "expert-offer-ended", v, id: "o-4f9c2a", why: "expired" },
+  "expert-offer-ended refused": { type: "expert-offer-ended", v, id: "o-4f9c2a", why: "refused" },
   "experts with areas": { type: "experts", v, experts: [{ ...expertListing, areas: ["docs/adr", "CONTEXT.md"] }] },
 };
 
@@ -417,6 +418,7 @@ const parsers = {
   "offer-dismissals": parseOfficeServerMessage,
   "expert-offer-ended made": parseOfficeServerMessage,
   "expert-offer-ended expired": parseOfficeServerMessage,
+  "expert-offer-ended refused": parseOfficeServerMessage,
   "experts with areas": parseDataLayerMessage,
 } satisfies Record<keyof typeof valid, (value: unknown) => ParseResult<unknown>>;
 
@@ -538,6 +540,7 @@ const broken: Record<keyof typeof valid, [unknown, string]> = {
   "offer-dismissals": [{ ...valid["offer-dismissals"], dismissals: [{ ...valid["offer-dismissals"].dismissals[0], forever: true }] }, "dismissals[0].until"],
   "expert-offer-ended made": [{ ...valid["expert-offer-ended made"], key: undefined }, "key"],
   "expert-offer-ended expired": [{ ...valid["expert-offer-ended expired"], why: "withdrawn" }, "why"],
+  "expert-offer-ended refused": [{ ...valid["expert-offer-ended refused"], why: "no-draft" }, "why"],
   "experts with areas": [{ ...valid["experts with areas"], experts: [{ ...expertListing, areas: ["../x"] }] }, "experts[0].areas[0]"],
 };
 

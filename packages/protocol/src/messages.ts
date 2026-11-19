@@ -1279,12 +1279,14 @@ const offerEnded = { type: z.literal("expert-offer-ended"), v: Version, id: Offe
 /**
  * How the offer `id` ended (protocol 0.15.0), sent to the runner that made it: `made`, once the
  * expert `key` is made and ready (with the key the person set, which may differ from the draft's), so
- * the runner can tell the session that showed the need; `dismissed`, by a person on the floor;
- * `expired`, unopened or unmade for the period the server keeps offers.
+ * the runner can tell the session that showed the need; `dismissed`, by a person on the floor, and
+ * only that; `refused`, the office won't keep it (its repo isn't taken there, the session is someone
+ * else's, it names an id the office didn't ask for, and the like); `expired`, unopened or unmade for
+ * the period the server keeps offers.
  */
 export const ServerExpertOfferEndedMessageSchema = z.discriminatedUnion("why", [
   z.object({ ...offerEnded, why: z.literal("made"), key: ExpertNameSchema }),
-  z.object({ ...offerEnded, why: z.enum(["dismissed", "expired"]) }),
+  z.object({ ...offerEnded, why: z.enum(["dismissed", "refused", "expired"]) }),
 ]);
 
 export const OfficeServerMessageSchema = z.discriminatedUnion("type", [

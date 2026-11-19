@@ -7293,7 +7293,11 @@ const OfficeServerMessageSchema = discriminatedUnion("type", [
 		key: ExpertNameSchema
 	}), object({
 		...offerEnded,
-		why: _enum(["dismissed", "expired"])
+		why: _enum([
+			"dismissed",
+			"refused",
+			"expired"
+		])
 	})])
 ]);
 /** Validates a message a data layer received from an office server. */
