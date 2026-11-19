@@ -22,7 +22,7 @@ test("the transcript line says what the session spent on the folder, and how oft
   expect(reason(line({ corrections: 3 }))).toBe("Isoplan: you corrected this session 3 times while it worked in src/parser");
   // An office-wide offer whose session this runner has no signals for.
   expect(reason(line({}, { folder: "." }))).toBe("Isoplan: this session has searched the repo's top folder");
-  expect(offerTranscriptText(line({ minutes: 12 }))).toBe("Isoplan: this session has spent about 12 minutes on src/parser. A Parser Expert would answer the next question in seconds. Review it: http://127.0.0.1:4747/?offer=o1 (or type /isoplan:expert)");
+  expect(offerTranscriptText(line({ minutes: 12 }))).toBe("Isoplan: this session has spent about 12 minutes on src/parser. A Parser Expert could answer questions about src/parser without searching it again. Review it: http://127.0.0.1:4747/?offer=o1 (or type /isoplan:expert)");
 });
 
 test("a name that starts with a vowel takes an", () => {

@@ -306,7 +306,7 @@ async function worker(): Promise<number> {
       const shares = (office: Office) => shared.get(office.server) ?? null;
       const titled = (title: string) => void titles.set(sessionId, title);
       // Each pass's areas, and the local model's word on which messages corrected the agent (offers.ts).
-      const offering = { areas: (s: Parameters<Offers["seen"]>[0]) => offers?.seen(s), corrected: (key: string, text: string, reply: string | null) => offers?.corrected(key, text, reply) ?? null };
+      const offering = { areas: (s: Parameters<Offers["seen"]>[0]) => offers?.seen(s), corrected: (key: string, text: string, reply: string | null) => offers?.corrected(sessionId, key, text, reply) ?? null };
       try {
         if (hooks)
           return await reportSession({

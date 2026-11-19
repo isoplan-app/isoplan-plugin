@@ -383,7 +383,7 @@ test("hooks: an open expert offer is in the status line after its office's part,
   await vi.waitFor(() => expect(h.status).toHaveLength(4));
   // Before its office's status, an offer shows nothing.
   expect(h.status).toEqual([undefined, "Isoplan: dev ✓ · A Parser Expert could help · review: http://127.0.0.1:4747/?offer=o1", "Isoplan: dev ✓ · A Parser Expert could help · review: http://127.0.0.1:4747/?offer=o1", "Isoplan: dev ✓"]);
-  expect(h.logged).toEqual(["Isoplan: this session has spent about 12 minutes and 18% of its context on src/parser. A Parser Expert would answer the next question in seconds. Review it: http://127.0.0.1:4747/?offer=o1 (or type /isoplan:expert)"]);
+  expect(h.logged).toEqual(["Isoplan: this session has spent about 12 minutes and 18% of its context on src/parser. A Parser Expert could answer questions about src/parser without searching it again. Review it: http://127.0.0.1:4747/?offer=o1 (or type /isoplan:expert)"]);
 });
 
 test("hooks: an offer open in two offices shows once, after the first; each office shows its newest; a runner that comes back clears them until they come again", async () => {

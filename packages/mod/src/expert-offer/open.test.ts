@@ -48,8 +48,16 @@ test("/isoplan:expert opens the session's newest open offer, at the first office
 test("/isoplan:expert says plainly when the session has no open offer, or isn't a Claude Code session's", async () => {
   const open = async () => expect.unreachable();
   expect(await expertOffer({ claudeDir: claudeDir(null), session: "s1", open })).toBe("This session has no open expert offer.");
-  expect(await expertOffer({ claudeDir: claudeDir("not offers"), session: "s1", open })).toBe("This session has no open expert offer.");
   expect(await expertOffer({ claudeDir: claudeDir(null), session: undefined, open })).toMatch(/^This runs inside a Claude Code session, which sets CLAUDE_CODE_SESSION_ID; it isn't set here/);
+});
+
+test("/isoplan:expert says the session's offers couldn't be read when their file isn't as the runner writes it, rather than that there are none", async () => {
+  const open = async () => expect.unreachable();
+  const dir = claudeDir("not offers");
+  const file = path.join(dir, "isoplan", "offers", "s1.json");
+  expect(await expertOffer({ claudeDir: dir, session: "s1", open })).toBe(`This session's open expert offers couldn't be read from ${file} (it has no list of offers). Use the review link in Isoplan's status line.`);
+  writeFileSync(file, "{ not json");
+  expect(await expertOffer({ claudeDir: dir, session: "s1", open })).toMatch(/\(it isn't JSON\)/);
 });
 
 test("/isoplan:expert gives the link to click when the browser couldn't be opened", async () => {

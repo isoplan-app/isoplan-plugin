@@ -26,16 +26,23 @@ import { folderWords } from "./text.js";
 /** The file of a session's open offers. */
 export const offersPath = (claudeDir: string, session: string) => path.join(claudeDir, "isoplan", "offers", `${session}.json`);
 
-/** The open offers in the file, in its order; none when it isn't there or doesn't parse. */
-export async function readOffers(file: string): Promise<ExpertOfferLine[]> {
+/** The open offers in the file, in its order; none when it isn't there; why not when it couldn't be read as the runner writes it. */
+export async function readOffers(file: string): Promise<ExpertOfferLine[] | { problem: string }> {
+  let text: string;
+  try {
+    text = await fs.readFile(file, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+    return { problem: (err as Error).message };
+  }
   let value: unknown;
   try {
-    value = JSON.parse(await fs.readFile(file, "utf8"));
+    value = JSON.parse(text);
   } catch {
-    return [];
+    return { problem: "it isn't JSON" };
   }
   const offers = (value as { offers?: unknown })?.offers;
-  if (!Array.isArray(offers)) return [];
+  if (!Array.isArray(offers)) return { problem: "it has no list of offers" };
   return offers.filter((o): o is ExpertOfferLine => !!o && typeof o === "object" && ["id", "name", "folder", "url"].every((k) => typeof (o as Record<string, unknown>)[k] === "string"));
 }
 
@@ -68,7 +75,9 @@ const what = (o: ExpertOfferLine) => `the ${o.name}, offered for ${folderWords(o
 /** What /isoplan:expert prints: the newest open offer opened, or why not, and the other offers' links. */
 export async function expertOffer(o: { claudeDir: string; session: string | undefined; open: (url: string) => Promise<void> }): Promise<string> {
   if (!o.session || !/^[\w-]{1,200}$/.test(o.session)) return "This runs inside a Claude Code session, which sets CLAUDE_CODE_SESSION_ID; it isn't set here, so this session's expert offer can't be found. Use the review link in Isoplan's status line.";
-  const all = await readOffers(offersPath(o.claudeDir, o.session));
+  const file = offersPath(o.claudeDir, o.session);
+  const all = await readOffers(file);
+  if (!Array.isArray(all)) return `This session's open expert offers couldn't be read from ${file} (${all.problem}). Use the review link in Isoplan's status line.`;
   // One per offer, at the first office it is open in, newest first.
   const offers = all.filter((x, i) => all.findIndex((y) => y.id === x.id) === i).reverse();
   const [newest, ...others] = offers;

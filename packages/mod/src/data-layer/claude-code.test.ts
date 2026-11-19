@@ -1084,14 +1084,14 @@ test("areas: an interruption, a turned-down call and a message the local model c
     { ...line.user(main, "thanks, carry on", 80), uuid: "u2" },
   ]);
   const facts = (await factsOf(home, "s", { corrected })).areas;
-  expect(facts).toEqual([area("a", { reads: 2, corrections: 3 }), area("a/b", { reads: 2, corrections: 3 }), area("c", { corrections: 2 })]);
+  expect(facts).toEqual([area("a", { reads: 1, corrections: 3 }), area("a/b", { reads: 1, corrections: 3 }), area("c", { corrections: 2 })]);
   expect(asked).toEqual([
     ["u1", "No, the other parser", "The parser is in p.ts."],
     ["u2", "thanks, carry on", "The parser is in p.ts."],
   ]);
 });
 
-test("areas: with no kind on the line, an error result saying the person turned the call down is one, unless an MCP tool wrote it", async () => {
+test("areas: with no kind on the line, an error result saying the person turned the call down is one, unless an MCP tool wrote it; the call it turned down counts as no read", async () => {
   const { home, main } = office();
   fs.mkdirSync(path.join(main, "a"), { recursive: true });
   const file = path.join(main, "a", "p.ts");
@@ -1104,10 +1104,10 @@ test("areas: with no kind on the line, an error result saying the person turned 
     call(main, "e1", "Edit", { file_path: file }, 93),
     result(main, "e1", "a permission rule refused it", 93, { isError: true, denial: "permission-rule" }),
   ]);
-  expect((await factsOf(home, "s")).areas).toEqual([area("a", { reads: 1, corrections: 1 })]);
+  expect((await factsOf(home, "s")).areas).toEqual([area("a", { corrections: 1 })]);
 });
 
-test("areas: with no kind on the line, a turned-down result among others in it leaves the others' size and time counted", async () => {
+test("areas: with no kind on the line, a turned-down result among others in it leaves the others' reads, size and time counted, and only theirs", async () => {
   const { home, main } = office();
   fs.mkdirSync(path.join(main, "a"), { recursive: true });
   const refusal = result(main, "r1", REFUSAL, 90, { isError: true });
@@ -1117,7 +1117,7 @@ test("areas: with no kind on the line, a turned-down result among others in it l
     { type: "assistant", cwd: main, timestamp: at(95), message: { role: "assistant", content: [{ type: "tool_use", id: "r1", name: "Read", input: { file_path: path.join(main, "a", "p.ts") } }, { type: "tool_use", id: "r2", name: "Read", input: { file_path: path.join(main, "a", "q.ts") } }] } },
     { ...ok, message: { role: "user", content: [...refusal.message.content, ...ok.message.content] } },
   ]);
-  expect((await factsOf(home, "s")).areas).toEqual([area("a", { reads: 2, tokens: 100, ms: 5000, corrections: 1 })]);
+  expect((await factsOf(home, "s")).areas).toEqual([area("a", { reads: 1, tokens: 100, ms: 5000, corrections: 1 })]);
 });
 
 test("areas: a message counts once the local model has said it corrects, and is asked again until then; one after a turn in no folder isn't asked", async () => {

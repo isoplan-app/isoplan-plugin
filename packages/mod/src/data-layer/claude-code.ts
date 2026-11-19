@@ -17,7 +17,8 @@
 // a threshold can be picked. A Grep or Glob at the root (most name no path) counts instead in the
 // deepest folder that holds all its results' files (its toolUseResult's `filenames`, or the file
 // each line of a content or count search starts with), when that isn't the root, else nowhere: a read or a search, its result's size as characters / 4 for tokens, and
-// the time from the call to its result. A turn's corrections count once in each folder it worked in
+// the time from the call to its result; a call whose result says it never ran (turned down,
+// interrupted) counts as neither. A turn's corrections count once in each folder it worked in
 // (those calls, and edits): the person interrupting it ("[Request interrupted by user"), turning a
 // tool call down, or a message after it that a local model judges as telling the agent it was wrong
 // (ReadInput.corrected; the lead's prompts alone, since a subagent's come from its parent). Claude
@@ -1306,14 +1307,21 @@ function holding(files: string[], cwd: string | null): string | null {
 }
 
 // A Read, Grep or Glob's result: its size and the time since its call go to the call's folder, when
-// it ran. A search whose results' files are all in a folder below the one it named moves to a tally
-// of its own, `within` that folder.
+// it ran; one that didn't (turned down, interrupted) takes back the read or search its call counted.
+// A search whose results' files are all in a folder below the one it named moves to a tally of its
+// own, `within` that folder.
 function areaResult(a: AreaState, c: Line, at: number, ran: boolean, used: unknown): void {
   const call = a.calls.get(c.tool_use_id);
   if (!call) return;
   a.calls.delete(c.tool_use_id);
   let t = a.tallies.get(call.key);
-  if (!t || !ran) return;
+  if (!t) return;
+  if (!ran) {
+    if (call.search) t.searches--;
+    else t.reads--;
+    if (!t.reads && !t.searches && !t.chars && !t.ms) a.tallies.delete(call.key);
+    return;
+  }
   const within = call.search ? holding(resultFiles(used), call.cwd) : null;
   if (within && relativeTo(t.path, within)) {
     const key = `${call.key}\n${pathKey(within)}`;

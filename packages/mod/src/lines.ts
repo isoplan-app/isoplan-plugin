@@ -200,14 +200,15 @@ export interface ExpertOfferLine {
 
 /**
  * The offer `id` is no longer open in the office `server`: an expert was `made` from it, someone
- * `dismissed` it, it `expired`, or the runner `withdrawn` it (it was made in another office). The
- * hooks module takes its link away.
+ * `dismissed` it, it `expired`, that office `refused` to keep it (no dismissal: it may stay open in
+ * others), or the runner `withdrawn` it (it was made or dismissed in another office). The hooks
+ * module takes its link away.
  */
 export interface ExpertOfferEndedLine {
   type: "expert-offer-ended";
   server: string;
   id: string;
-  why: "made" | "dismissed" | "expired" | "withdrawn";
+  why: "made" | "dismissed" | "refused" | "expired" | "withdrawn";
 }
 
 /**

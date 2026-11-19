@@ -35,7 +35,7 @@ export function offerTranscriptText(line: ExpertOfferLine): string {
     : corrections > 0
       ? `you corrected this session ${times(corrections)} while it worked in ${where}`
       : `this session has searched ${where}`;
-  return `Isoplan: ${why}. ${article(line.name)} ${line.name} would answer the next question in seconds. Review it: ${line.url} (or type /isoplan:expert)`;
+  return `Isoplan: ${why}. ${article(line.name)} ${line.name} could answer questions about ${where} without searching it again. Review it: ${line.url} (or type /isoplan:expert)`;
 }
 
 /** The note on a later tool result once the expert made from the session's offer is ready. */

@@ -9,7 +9,7 @@ import type { DataLayerLine } from "../lines.js";
 import { parseExpertFile } from "./expert-file.js";
 import type { HostedExpert } from "./expert.js";
 import type { Draft, DraftInput } from "./offer-model.js";
-import { cloneUrl, createOffers, dismissed, EXCERPT_CHARS, folderExcerpts, folderFiles, passed, passes, RETRY_MS, reviewUrl, signalsOf, type ExpertOfferSettings, type OffersOptions } from "./offers.js";
+import { cloneUrls, createOffers, EXCERPT_CHARS, MAKING_LIMIT_MS, folderExcerpts, folderFiles, passed, passes, RETRY_MS, reviewUrl, signalsOf, type ExpertOfferSettings, type OffersOptions } from "./offers.js";
 
 const SETTINGS: ExpertOfferSettings = JSON.parse(fs.readFileSync(path.join(modDir, "runner.json"), "utf8")).expertOffers;
 const A = "ws://127.0.0.1:4747/data-layer";
@@ -41,6 +41,8 @@ async function until(check: () => boolean, ms = 5000) {
 
 const FILES = { "src/parser/parse.ts": "export function parse(text: string) {}\n", "src/parser/lex.ts": "export function lex(text: string) {}\n", "src/parser/.cache": "x", "src/main.ts": "import { parse } from './parser/parse.js';\n" };
 
+type Clone = string | { problem: string; reason?: string };
+
 /** Offers for offices A and B with stand-ins for everything they reach; session s1's hooks module connected. */
 async function harness(o: Partial<OffersOptions> = {}, root = tempRoot()) {
   const isoplanDir = path.join(root, "isoplan");
@@ -54,7 +56,7 @@ async function harness(o: Partial<OffersOptions> = {}, root = tempRoot()) {
   const drafts: DraftInput[] = [];
   const logs: string[] = [];
   const clones: { url: string; project: string }[] = [];
-  const state = { draft: DRAFT as Draft | null, experts: [] as HostedExpert[], checkout: checkout as string | null, clone: path.join(root, "clones", "app") as string | { problem: string; reason?: string } };
+  const state = { draft: DRAFT as Draft | null, experts: [] as HostedExpert[], checkout: checkout as string | null, clone: path.join(root, "clones", "app") as Clone | ((url: string) => Clone) };
   const opts: OffersOptions = {
     isoplanDir,
     settings: async () => ({ expertOffers: SETTINGS }),
@@ -66,7 +68,7 @@ async function harness(o: Partial<OffersOptions> = {}, root = tempRoot()) {
     experts: () => state.experts,
     projectOf: async () => PROJECT.id,
     checkout: async () => state.checkout,
-    clone: async (url, project) => (clones.push({ url, project }), state.clone),
+    clone: async (url, project) => (clones.push({ url, project }), typeof state.clone === "function" ? state.clone(url) : state.clone),
     hooked: (bare) => (hooked.has(bare) ? { send: (line) => void lines.push({ bare, line }) } : null),
     log: (text) => void logs.push(text),
     pollMs: 10,
@@ -99,14 +101,7 @@ test("signals: a folder passes on its share of the context window, its tokens, i
   expect(passed(signalsOf(area("src", 10, { ms: 600000, corrections: 2 }), 1000000), t)).toEqual({ share: 0, tokens: 0, minutes: 10, corrections: 2 });
 });
 
-test("dismissed, folderFiles and folderExcerpts: a dismissal holds until its time, or for good; a draft sees a folder's files, and the start of the first that read as text", async () => {
-  const now = Date.parse("2026-11-19T12:00:00Z");
-  const list = [
-    { project: PROJECT.id, folder: "src", until: "2026-11-20T00:00:00Z" },
-    { project: PROJECT.id, folder: "docs", until: "2026-11-01T00:00:00Z" },
-    { project: PROJECT.id, folder: "lib", forever: true as const },
-  ];
-  expect(["src/parser", "docs", "lib", "tools"].map((f) => dismissed(list, PROJECT.id, f, now))).toEqual([true, false, true, false]);
+test("folderFiles and folderExcerpts: a draft sees a folder's files, and the start of the first that read as text", async () => {
   const h = await harness();
   expect(await folderFiles(h.checkout, "src")).toEqual(["src/main.ts", "src/parser/lex.ts", "src/parser/parse.ts"]);
   expect(await folderFiles(h.checkout, "src", 2)).toEqual(["src/main.ts", "src/parser/lex.ts"]);
@@ -171,12 +166,12 @@ test("an offer goes only to the offices that may be told of its repo: one on ano
   expect(h.offered().map((s) => s.server)).toEqual([A]);
 });
 
-test("no expert is offered on a folder the person dismissed, even after a restart, one an expert here covers, or one whose path or draft matches a secret pattern, each said why where there is one", async () => {
+test("no expert is offered on a folder the person dismissed, whatever the letter case, even after a restart, one an expert here covers, or one whose path or draft matches a secret pattern, each said why where there is one", async () => {
   const h = await harness();
   // Before the office has said the dismissals, a pass isn't looked at: a dismissal for good holds.
   h.offers.seen(h.seen([area("src/parser", 35000)]));
   await sleep(30);
-  h.offers.take(0, dismissals([{ project: PROJECT.id, folder: "src/parser", forever: true }]));
+  h.offers.take(0, dismissals([{ project: PROJECT.id.toUpperCase(), folder: "SRC/Parser", forever: true }]));
   h.offers.seen(h.seen([area("src/parser", 35000)]));
   h.state.experts = [{ name: "docs", repo: "/work/app", subject: "The docs.", state: "ready", senior: false, areas: ["Docs/**"] }];
   h.offers.seen(h.seen([area("docs/adr", 35000)], { session: "claude-code:s2", bare: "s2" }));
@@ -265,6 +260,21 @@ test("an offer dismissed in one office is withdrawn from the others", async () =
   expect(h.lines.at(-1)!.line).toEqual({ type: "expert-offer-ended", server: B, id, why: "withdrawn" });
 });
 
+test("an offer an office refused ends there alone: the session hears it ended there, not that it was dismissed, and it stays open in the others", async () => {
+  const h = await harness();
+  for (const index of [0, 1]) h.offers.take(index, dismissals());
+  h.offers.seen(h.seen([area("src/parser", 35000)]));
+  h.offers.seen(h.seen([area("src/parser", 35000)], { server: B }));
+  await until(() => h.lines.length === 2);
+  const id = idOf(h.offered()[0]!);
+  const sent = h.sent.length;
+  h.offers.take(0, { type: "expert-offer-ended", v: PROTOCOL_VERSION, id, why: "refused" });
+  expect(h.lines.at(-1)!.line).toEqual({ type: "expert-offer-ended", server: A, id, why: "refused" });
+  expect(h.sent.slice(sent)).toEqual([]);
+  const file = path.join(h.isoplanDir, "offers", "s1.json");
+  await until(() => JSON.stringify(JSON.parse(fs.readFileSync(file, "utf8")).offers.map((x: { server: string }) => x.server)) === JSON.stringify([B]));
+});
+
 test("an offers.json that can't be read is said, and moved aside rather than overwritten; runner.json that can't be read as the offers start, or for a correction check, is said and tried again on the next pass", async () => {
   const root = tempRoot();
   const file = path.join(root, "isoplan", "runner", "offers.json");
@@ -285,15 +295,16 @@ test("an offers.json that can't be read is said, and moved aside rather than ove
   expect(h.logs.some((l) => l.startsWith("EXPERT OFFERS:") && l.includes("moved to"))).toBe(true);
   expect(h.logs.some((l) => l.includes("couldn't read runner.json's expertOffers"))).toBe(true);
 
-  expect(h.offers.corrected("k1", "no, the other file", null)).toBe(null);
+  h.offers.take(0, dismissals());
+  h.offers.seen(h.seen([area("src", 10)]));
+  expect(h.offers.corrected("s1", "k1", "no, the other file", null)).toBe(null);
   await until(() => h.logs.some((l) => l.includes("couldn't check whether a message corrected the agent")));
   broken = false;
-  h.offers.take(0, dismissals());
   h.offers.seen(h.seen([area("src/parser", 35000)]));
   await until(() => h.offered().length === 1);
-  expect(h.offers.corrected("k1", "no, the other file", null)).toBe(null);
+  expect(h.offers.corrected("s1", "k1", "no, the other file", null)).toBe(null);
   await until(() => asked.length === 1);
-  expect(h.offers.corrected("k1", "", null)).toBe(true);
+  expect(h.offers.corrected("s1", "k1", "", null)).toBe(true);
 });
 
 test("an offer the office ends at once is never shown in the session: dismissed there, or made where another computer's expert covers its folder, which the session hears of as ready; one sent on a connection that closed first goes again on the next", async () => {
@@ -342,6 +353,15 @@ test("draft-offer: an office-wide offer is drafted from the newest of its sessio
   expect(h.sent.at(-1)).toEqual({ server: B, message: { type: "expert-offer-ended", v: PROTOCOL_VERSION, id: "office-2", why: "no-draft" } });
 });
 
+test("draft-offer: a draft that throws is answered no-draft at once, saying why", async () => {
+  const h = await harness({ draft: async () => Promise.reject(new Error("claude -p exited with code 1")) });
+  h.offers.take(0, dismissals());
+  h.offers.take(0, draftOffer("office-3", "src/parser", ["claude-code:s1"]));
+  await until(() => h.sent.some((s) => s.message.type === "expert-offer-ended"));
+  expect(h.sent.at(-1)).toEqual({ server: A, message: { type: "expert-offer-ended", v: PROTOCOL_VERSION, id: "office-3", why: "no-draft" } });
+  expect(h.logs.some((l) => l.includes("drafting it failed: claude -p exited with code 1"))).toBe(true);
+});
+
 const make = (request: string, more: Partial<MakeExpertMessage> = {}): MakeExpertMessage => ({ type: "make-expert", v: PROTOCOL_VERSION, request, offer: "o1", key: "parser", subject: DRAFT.subject, model: "sonnet", project: PROJECT, area: ["src/parser"], proof: DRAFT.proof, by: { id: "claude:ada", name: "Ada" }, ...more });
 const making = (h: Awaited<ReturnType<typeof harness>>, request: string) => h.sent.filter((s) => s.message.type === "expert-making" && s.message.request === request).map((s) => (s.message as { state: string; detail?: string }).detail ?? (s.message as { state: string }).state);
 
@@ -356,7 +376,7 @@ test("make-expert: only for this runner's person and a key not used here; each f
   expect(fs.existsSync(path.join(h.isoplanDir, "experts", "parser.json"))).toBe(false);
 });
 
-test("make-expert: with no checkout here, the repo is cloned for the expert alone into Isoplan's own hidden folder, saying cloning, and the expert file names that clone; no remote, or a clone git refuses, fails making with git's reason", async () => {
+test("make-expert: with no checkout here, the repo is cloned for the expert alone into Isoplan's own hidden folder, saying cloning, and the expert file names that clone; over ssh when https fails; no remote, or a clone git refuses both ways, fails making with git's reasons", async () => {
   const h = await harness();
   h.offers.take(0, dismissals());
   h.state.checkout = null;
@@ -371,10 +391,18 @@ test("make-expert: with no checkout here, the repo is cloned for the expert alon
   h.offers.take(0, make("m3", { offer: "o3", key: "local", project: { id: "local:box/c:/work/app", name: "app" } }));
   await until(() => making(h, "m2").length === 2 && making(h, "m3").length === 1);
   expect([making(h, "m2"), making(h, "m3")]).toEqual([
-    ["cloning", "this computer has no checkout of app, and Isoplan's own copy of it couldn't be made: git failed: fatal: repository not found"],
+    ["cloning", "this computer has no checkout of app, and Isoplan's own copy of it couldn't be made: from https://github.com/team/app.git, git failed: fatal: repository not found; from git@github.com:team/app.git, git failed: fatal: repository not found"],
     ["this computer has no checkout of app, and its repo has no remote to clone it from"],
   ]);
-  expect(cloneUrl("local:box/c:/work/app")).toBe(null);
+  expect(cloneUrls("local:box/c:/work/app")).toEqual([]);
+
+  const ssh = path.join(h.root, "clones", "app-ssh");
+  h.state.clone = (url) => (url.startsWith("git@") ? ssh : { problem: "no", reason: "git failed: could not read Username" });
+  h.clones.length = 0;
+  h.offers.take(0, make("m4", { offer: "o4", key: "tokens" }));
+  await until(() => fs.existsSync(path.join(h.isoplanDir, "experts", "tokens.json")));
+  expect(h.clones.map((c) => c.url)).toEqual(["https://github.com/team/app.git", "git@github.com:team/app.git"]);
+  expect(JSON.parse(fs.readFileSync(path.join(h.isoplanDir, "experts", "tokens.json"), "utf8")).repo).toBe(ssh);
 });
 
 test("make-expert: the expert file is written whole, and making is followed from its state: cloning, grounding, proof, ready; a reconnect holds the next state until the new connection's dismissals", async () => {
@@ -457,6 +485,56 @@ test("make-expert: a making's last state stays in offers.json until it went on a
   await until(() => savedFile(again.isoplanDir)?.makings.length === 0);
 });
 
+test("make-expert: a making that fails before writing its file, a throw included, fails with the reason and stays in offers.json until that went; a runner started again sends it and leaves alone the file of the expert it found", async () => {
+  const h = await harness({ clone: async () => Promise.reject(new Error("spawn git ENOENT")) });
+  h.offers.take(0, dismissals());
+  h.up[0] = false;
+  h.state.checkout = null;
+  h.offers.take(0, make("m1", { offer: "o1", key: "lexer" }));
+  const file = path.join(h.isoplanDir, "experts", "parser.json");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, "{}");
+  h.offers.take(0, make("m2", { offer: "o2" }));
+  const states = (dir: string) => (savedFile(dir)?.makings as { state?: string }[] | undefined)?.map((k) => k.state);
+  await until(() => JSON.stringify(states(h.isoplanDir)) === JSON.stringify(["failed", "failed"]));
+  expect(h.offers.idle()).toBe(true);
+  h.offers.close();
+  const again = await harness({}, h.root);
+  again.offers.take(0, dismissals());
+  await until(() => making(again, "m1").length === 1 && making(again, "m2").length === 1);
+  expect([making(again, "m1"), making(again, "m2")]).toEqual([["making it stopped on that computer: spawn git ENOENT"], ["an expert named parser is already on this computer"]]);
+  await until(() => savedFile(again.isoplanDir)?.makings.length === 0);
+  expect(fs.readFileSync(file, "utf8")).toBe("{}");
+});
+
+test("make-expert: a look at how making goes that fails is said once and tried again on the next, and fails making only past its limit, saying why", async () => {
+  let clock = Date.now();
+  let broken = false;
+  const h = await harness({ now: () => clock, experts: () => (broken ? (() => { throw new Error("the hosted list broke"); })() : []) });
+  h.offers.take(0, dismissals());
+  h.offers.take(0, make("m1"));
+  await until(() => making(h, "m1").length === 1);
+  broken = true;
+  await until(() => h.logs.some((l) => l.includes("the hosted list broke")));
+  await sleep(50);
+  expect(h.logs.filter((l) => l.includes("the hosted list broke"))).toHaveLength(1);
+  expect(h.offers.idle()).toBe(false);
+  broken = false;
+  const stateFile = path.join(h.isoplanDir, "experts", "parser", "state.json");
+  fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+  fs.writeFileSync(stateFile, JSON.stringify({ version: 1, fingerprint: "f", repo: h.checkout, branch: "main", generations: [{ n: 1, trunk: "t1", model: "m", commit: "a".repeat(40), groundedAt: clock, meter: 0, notes: 0, state: "junior" }] }));
+  await until(() => making(h, "m1").length === 2);
+  expect(making(h, "m1")).toEqual(["cloning", "ready"]);
+
+  h.offers.take(0, make("m2", { offer: "o2", key: "lexer" }));
+  await until(() => making(h, "m2").length === 1);
+  broken = true;
+  await until(() => h.logs.some((l) => l.includes("expert lexer") && l.includes("the hosted list broke")));
+  clock += MAKING_LIMIT_MS + 1;
+  await until(() => making(h, "m2").length === 2);
+  expect(making(h, "m2")[1]).toBe("it wasn't ready within 60 minutes; the last look at it failed: the hosted list broke");
+});
+
 test("make-expert: a runner started again goes on following the making it had under way, on its request; the same offer and key asked again takes that making over", async () => {
   const h = await harness();
   h.offers.take(0, dismissals());
@@ -487,9 +565,11 @@ test("corrected: unknown until the local model has said, one check at a time and
     settings: async () => ({ expertOffers: { ...SETTINGS, checksPerHour: 2 } }),
     corrects: (text) => (asked.push(text), new Promise((r) => (answer = r))),
   });
-  expect(h.offers.corrected("k1", "no, the other file", "Here it is.")).toBe(null);
-  expect(h.offers.corrected("k2", "wrong again", null)).toBe(null);
-  expect(h.offers.corrected("k3", "and again", null)).toBe(null);
+  h.offers.take(0, dismissals());
+  h.offers.seen(h.seen([area("src", 10)]));
+  expect(h.offers.corrected("s1", "k1", "no, the other file", "Here it is.")).toBe(null);
+  expect(h.offers.corrected("s1", "k2", "wrong again", null)).toBe(null);
+  expect(h.offers.corrected("s1", "k3", "and again", null)).toBe(null);
   await until(() => asked.length === 1);
   expect(h.offers.idle()).toBe(false);
   answer(true);
@@ -497,5 +577,24 @@ test("corrected: unknown until the local model has said, one check at a time and
   answer(false);
   await new Promise((r) => setTimeout(r, 30));
   expect(asked).toEqual(["no, the other file", "wrong again"]);
-  expect([h.offers.corrected("k1", "", null), h.offers.corrected("k2", "", null), h.offers.corrected("k3", "", null)]).toEqual([true, false, null]);
+  expect([h.offers.corrected("s1", "k1", "", null), h.offers.corrected("s1", "k2", "", null), h.offers.corrected("s1", "k3", "", null)]).toEqual([true, false, null]);
+});
+
+test("corrected: no check runs for a session whose latest pass went to no office that has said its dismissals on its connection now, as one from before offers never does", async () => {
+  const asked: string[] = [];
+  const h = await harness({ corrects: async (text) => (asked.push(text), true) });
+  h.offers.seen(h.seen([area("src", 10)]));
+  expect(h.offers.corrected("s1", "k1", "no, the other file", null)).toBe(null);
+  h.offers.take(0, dismissals());
+  // Never reported to an office here.
+  expect(h.offers.corrected("s9", "k2", "wrong again", null)).toBe(null);
+  await sleep(30);
+  expect(asked).toEqual([]);
+  expect(h.offers.corrected("s1", "k1", "no, the other file", null)).toBe(null);
+  await until(() => asked.length === 1);
+  // A new connection, its dismissals still to come.
+  h.offers.linked(0);
+  expect(h.offers.corrected("s1", "k3", "and again", null)).toBe(null);
+  await sleep(30);
+  expect(asked).toEqual(["no, the other file"]);
 });
