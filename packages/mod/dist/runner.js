@@ -16791,6 +16791,7 @@ function createOffers(o) {
 	const expertFile = (key) => path.join(o.isoplanDir, "experts", `${key}.json`);
 	const offices = o.offices.map(() => ({
 		ready: false,
+		fresh: true,
 		dismissals: [],
 		queue: []
 	}));
@@ -16813,13 +16814,14 @@ function createOffers(o) {
 	const waiting = [];
 	const checked = [];
 	let checking = false;
+	let checkOn = false;
 	let checkTimer = null;
 	let saving = Promise.resolve();
 	let read = null;
 	const settings = () => {
 		if (!read || now() - read.at > SETTINGS_MS) read = {
 			at: now(),
-			settings: o.settings().then((s) => s.expertOffers)
+			settings: o.settings().then((s) => (checkOn = s.expertOffers.correctionCheck === true, s.expertOffers))
 		};
 		const mine = read;
 		return mine.settings.catch((err) => (read === mine && (read = null), Promise.reject(err)));
@@ -16863,6 +16865,10 @@ function createOffers(o) {
 		const st = offices[index];
 		if (!st.ready || closed) return;
 		while (st.queue.length && office.send(st.queue[0])) st.queue.shift();
+		if (st.fresh) {
+			st.fresh = false;
+			for (const r of saved.offers) if (r.offices[office.server] === "open") office.send(r.message);
+		}
 		let changed = false;
 		for (const r of saved.offers) {
 			if (r.offices[office.server] !== "pending") continue;
@@ -16934,7 +16940,8 @@ function createOffers(o) {
 		}
 		return false;
 	}
-	const offeredNear = (session, project, folder) => saved.offered.some((x) => x.session === session && x.project === project && near(folder, x.folder));
+	const retryable = (r, at) => !!r?.refusedAt && at - r.refusedAt >= 36e5 && Object.values(r.offices).every((s) => s === "refused");
+	const offeredNear = (session, project, folder, at) => saved.offered.some((x) => x.session === session && x.project === project && near(folder, x.folder) && !(x.offer && retryable(saved.offers.find((r) => r.id === x.offer), at)));
 	const heldNear = (session, project, folder, at) => (saved.held = saved.held.filter((x) => x.until > at)).some((x) => x.session === session && x.project === project && near(folder, x.folder));
 	const names = (s) => new Set([s.project, ...s.areas.map((a) => a.project ?? s.project)].map((p) => p.id.toLowerCase()));
 	const mayTell = (session, project) => [...latest.get(session)?.values() ?? []].filter((p) => names(p).has(project)).map((p) => p.server);
@@ -16943,6 +16950,11 @@ function createOffers(o) {
 		const keep = t.rememberDays * DAY_MS$1;
 		saved.offered = saved.offered.filter((x) => at - x.at < keep);
 		saved.offers = saved.offers.filter((r) => at - r.at < keep);
+		const old = saved.makings.filter((k) => k.state && at - k.since >= keep);
+		if (!old.length) return;
+		for (const k of old) makings.delete(k.request);
+		saved.makings = saved.makings.filter((k) => !old.includes(k));
+		save();
 	}
 	const windowOf = (s) => {
 		if (s.window) return s.window;
@@ -17037,7 +17049,7 @@ function createOffers(o) {
 			const project = area.project ?? s.project;
 			const id = project.id.toLowerCase();
 			const why = signalsOf(area, window);
-			if (!passes(why, t) || offeredNear(s.session, id, area.folder) || heldNear(s.session, id, area.folder, at)) continue;
+			if (!passes(why, t) || offeredNear(s.session, id, area.folder, at) || heldNear(s.session, id, area.folder, at)) continue;
 			if (offices.some((f) => isDismissed(f.dismissals, id, area.folder, at))) continue;
 			if (await coveredHere(id, area.folder)) continue;
 			candidates.push({
@@ -17078,7 +17090,8 @@ function createOffers(o) {
 			session: s.session,
 			project: id,
 			folder: area.folder,
-			at
+			at,
+			offer: message.id
 		});
 		saved.offers.push(record(message, s.bare, /* @__PURE__ */ new Set([s.server, ...mayTell(s.session, id)])));
 		await save();
@@ -17129,7 +17142,8 @@ function createOffers(o) {
 				session: first,
 				project,
 				folder: m.folder,
-				at: now()
+				at: now(),
+				offer: m.request
 			});
 			saved.offers.push(record(message, first.startsWith("claude-code:") ? first.slice(12) : null, [server]));
 			await save();
@@ -17144,6 +17158,7 @@ function createOffers(o) {
 		if (!r || r.offices[server] === void 0) return say(`${server} says the expert offer ${m.id} ended, but this runner didn't offer it there`);
 		const was = r.offices[server];
 		r.offices[server] = m.why === "refused" ? "refused" : "ended";
+		if (Object.values(r.offices).every((s) => s === "refused")) r.refusedAt = now();
 		if (was === "open") tell(r, {
 			type: "expert-offer-ended",
 			server,
@@ -17186,12 +17201,6 @@ function createOffers(o) {
 			state: m.state,
 			...m.detail && { detail: m.detail }
 		})) m.sent = text;
-		if (m.sent !== text || !done(m)) return;
-		makings.delete(m.request);
-		if (saved.makings.some((k) => k.request === m.request)) {
-			saved.makings = saved.makings.filter((k) => k.request !== m.request);
-			save();
-		}
 	}
 	function setMaking(m, state, detail) {
 		const changed = m.state !== state || m.detail !== detail;
@@ -17209,15 +17218,20 @@ function createOffers(o) {
 				});
 				save();
 			}
-			if (state === "failed" && m.wrote) clear(m.key);
+			if (state === "failed" && m.wrote) clear(m);
 		}
 		sendMaking(m);
 	}
-	async function clear(key) {
+	async function clear(m) {
+		const key = m.key;
 		cleared.add(key);
 		try {
 			await fs.rm(expertFile(key), { force: true });
 			say(`removed the expert file of ${key}, whose making failed, so this computer stops hosting it`);
+			m.wrote = false;
+			const kept = saved.makings.find((k) => k.request === m.request);
+			if (kept) kept.wrote = false;
+			save();
 		} catch (err) {
 			say(`couldn't remove the expert file ${expertFile(key)}, whose making failed: ${err.message}`);
 		}
@@ -17362,6 +17376,7 @@ function createOffers(o) {
 		let again = false;
 		try {
 			const t = await settings();
+			if (!t.correctionCheck) return void (waiting.length = 0);
 			const at = now();
 			while (checked.length && at - checked[0] >= HOUR_MS) checked.shift();
 			if (checked.length >= t.checksPerHour) {
@@ -17378,6 +17393,8 @@ function createOffers(o) {
 			if (verdict !== null) {
 				verdicts.set(next.key, verdict);
 				if (verdicts.size > MAX_VERDICTS) verdicts.delete(verdicts.keys().next().value);
+				saved.verdicts = [...verdicts];
+				save();
 			}
 		} catch (err) {
 			say(`couldn't check whether a message corrected the agent: ${err.message}`);
@@ -17398,12 +17415,14 @@ function createOffers(o) {
 				try {
 					value = JSON.parse(text);
 				} catch {}
-				if (value?.version === FILE_VERSION && Array.isArray(value.offered) && Array.isArray(value.offers)) saved = {
-					...value,
-					makings: Array.isArray(value.makings) ? value.makings : [],
-					held: Array.isArray(value.held) ? value.held : []
-				};
-				else {
+				if (value?.version === FILE_VERSION && Array.isArray(value.offered) && Array.isArray(value.offers)) {
+					saved = {
+						...value,
+						makings: Array.isArray(value.makings) ? value.makings : [],
+						held: Array.isArray(value.held) ? value.held : []
+					};
+					if (Array.isArray(value.verdicts)) for (const [key, verdict] of value.verdicts) verdicts.set(key, verdict);
+				} else {
 					const aside = `${file}.unreadable-${now()}`;
 					const moved = await fs.rename(file, aside).then(() => `moved to ${aside}`, (err) => `left where it is (${err.message})`);
 					say(`EXPERT OFFERS: ${file} isn't offers.json as this runner writes it, so it was ${moved}, and expert offers start again from nothing: folders offered before may be offered again`);
@@ -17430,7 +17449,7 @@ function createOffers(o) {
 					timer: null
 				};
 				makings.set(m.request, m);
-				if (k.state === "failed" && m.wrote && !saved.makings.some((x) => x.key === k.key && !x.state)) clear(k.key);
+				if (k.state === "failed" && m.wrote && !saved.makings.some((x) => x.key === k.key && x.since > k.since)) clear(m);
 				if (k.state) continue;
 				if (m.wrote) follow(m).catch(orLog(`follow expert ${m.key}`));
 				else setMaking(m, "failed", "the runner on that computer stopped before its expert file was written; make it again");
@@ -17445,7 +17464,7 @@ function createOffers(o) {
 			const may = names(s);
 			let added = false;
 			for (const r of saved.offers) {
-				if (r.session !== s.session || r.scope !== "session" || r.offices[s.server] !== void 0 || !may.has(r.project.id.toLowerCase()) || Object.values(r.offices).includes("ended")) continue;
+				if (r.session !== s.session || r.scope !== "session" || r.offices[s.server] !== void 0 || !may.has(r.project.id.toLowerCase()) || Object.values(r.offices).includes("ended") || retryable(r, now())) continue;
 				r.offices[s.server] = "pending";
 				added = true;
 			}
@@ -17458,7 +17477,7 @@ function createOffers(o) {
 			consider(s).catch(orLog(`look at session ${s.bare}'s areas for an expert offer`)).finally(() => busy.delete(s.session));
 		},
 		corrected(bare, key, text, reply) {
-			const verdict = verdicts.get(key);
+			const verdict = checkOn ? verdicts.get(key) : void 0;
 			if (verdict !== void 0) return verdict;
 			if (closed || !offerable(bare)) return null;
 			if (!waiting.some((w) => w.key === key) && waiting.length < MAX_CHECKS_WAITING) waiting.push({
@@ -17483,6 +17502,7 @@ function createOffers(o) {
 		},
 		linked(index) {
 			offices[index].ready = false;
+			offices[index].fresh = true;
 			for (const m of makings.values()) if (m.index === index) m.sent = null;
 			const server = o.offices[index].server;
 			for (const r of saved.offers) if (r.offices[server] === "sent") r.offices[server] = "pending";
