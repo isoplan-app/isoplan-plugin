@@ -13,7 +13,7 @@
 //   quote, and cmd.exe can't run a line much over 8,000 characters, so a long task can't go there
 //   either. Such a task is written to task.md in the start's own folder (<claude dir>/isoplan/starts/
 //   <session>/, which holds the launcher too), which is added to the session, and the first message
-//   says to read it.
+//   says to read it. The runner removes a start's own folder once it is 7 days old (tidyStarts).
 // - For the Claude app the task is always in task.md: its hidden first turn runs with no one to
 //   approve what it does, so it only reads the task and says how it will go about it, and the work
 //   itself runs in the app, which asks the person as it goes.
@@ -47,6 +47,22 @@ export function startPlaces(platform: NodeJS.Platform, orca: boolean, desktop: b
 
 /** The start's own folder: its launcher, and its task when that can't go on the command line. */
 export const startDir = (claudeDir: string, session: string) => path.join(claudeDir, "isoplan", "starts", session);
+
+/** How long a start's own folder is kept: its session isn't the runner's to hold, so it can't tell when the session is done with it. */
+const START_KEPT_MS = 7 * 86400000;
+
+/** Removes the starts' own folders last changed more than 7 days before `now`; an error is ignored. */
+export async function tidyStarts(claudeDir: string, now = Date.now()): Promise<void> {
+  const starts = path.join(claudeDir, "isoplan", "starts");
+  const names = await fs.readdir(starts).catch(() => []);
+  await Promise.all(
+    names.map(async (name) => {
+      const dir = path.join(starts, name);
+      const st = await fs.stat(dir).catch(() => null);
+      if (st?.isDirectory() && now - st.mtimeMs > START_KEPT_MS) await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => {});
+    }),
+  );
+}
 
 /** The longest task a Windows launcher's line takes, leaving room in cmd.exe's 8,191 for the rest of it. */
 const LAUNCHER_TASK_MAX = 4000;

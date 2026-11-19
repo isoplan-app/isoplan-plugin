@@ -9,7 +9,12 @@ import { fakeClaude, fakeOrca, git, remoteAndClone, workspace } from "./fixture.
 import { orcaRunner } from "./orca.js";
 import type { PreparedTake } from "../runner/session.js";
 import { remoteNames, remoteNamesPath } from "../data-layer/remote-names.js";
-import { checkoutHere, findClone, findWorkspace, launch, onTheWire, parseSetup, sessionArgv, sessionFolders, takeHandoff, trustFolder, trustKey, type Background, type Launch, type TakeOptions } from "./take.js";
+import { checkoutHere, findClone, findWorkspace, launch, noHooks, onTheWire, parseSetup, removeOldNoHooks, sessionArgv, sessionFolders, takeHandoff, trustFolder, trustKey, type Background, type Launch, type TakeOptions } from "./take.js";
+
+import { clonesFoldersPath } from "../runner/repo-folders.js";
+
+// The empty folder git runs with as its hooks (handoff/take.ts noHooks) is made in the Claude folder: a temp one, never this machine's.
+vi.stubEnv("CLAUDE_CONFIG_DIR", path.join(tempRoot(), "claude"));
 
 // Every test here drives real git, a few dozen spawns each, which is slow on Windows under load.
 vi.setConfig({ testTimeout: 30000 });
@@ -763,3 +768,43 @@ test("the shortcut from inside one of the receiver's repos works from the folder
   expect(refused.failures).toEqual([{ step: "checkout", output: expect.stringContaining("which isn't one of this handoff's repos (api, web)") }]);
   expect(fs.existsSync(path.join(plain.root, "receiver", "api"))).toBe(false);
 }, SLOW);
+
+test("findClone: an expert's read/ or Isoplan's clone in a folder clonesFolder has named, used more recently, is never taken for the person's own clone", async () => {
+  const claudeDir = tempRoot();
+  const { remote, clone } = remoteAndClone(claudeDir, "mine");
+  const elsewhere = path.join(claudeDir, "elsewhere");
+  fs.mkdirSync(path.join(claudeDir, "isoplan"), { recursive: true });
+  fs.writeFileSync(clonesFoldersPath(claudeDir), JSON.stringify([elsewhere]));
+  const read = path.join(elsewhere, "experts", "adr", "read");
+  const own = path.join(elsewhere, "clones", "mine-12345678");
+  for (const dir of [read, own]) {
+    fs.mkdirSync(path.dirname(dir), { recursive: true });
+    git(claudeDir, "clone", "-q", remote, dir);
+  }
+  const projects = path.join(claudeDir, "projects");
+  for (const [name, cwd, age] of [["a", clone, 60], ["b", read, 20], ["c", own, 10]] as const) {
+    fs.mkdirSync(path.join(projects, name), { recursive: true });
+    const file = path.join(projects, name, "s.jsonl");
+    fs.writeFileSync(file, JSON.stringify({ cwd }) + "\n");
+    const at = new Date(Date.now() - age * 1000);
+    fs.utimesSync(file, at, at);
+  }
+  expect(await findClone(nodeIo(), run, projects, remote, Date.now() - 86400000, 30000)).toEqual({ dir: path.resolve(clone), remote: "origin" });
+});
+
+test("git runs with one empty folder as its hooks, no-hooks in Isoplan's folder in the Claude folder, made once", async () => {
+  const claudeDir = path.join(tempRoot(), "claude");
+  vi.stubEnv("CLAUDE_CONFIG_DIR", claudeDir);
+  const hooks = path.join(claudeDir, "isoplan", "no-hooks");
+  expect(await noHooks()).toEqual(["-c", `core.hooksPath=${hooks}`]);
+  expect(await noHooks()).toEqual(["-c", `core.hooksPath=${hooks}`]);
+  expect(fs.readdirSync(hooks)).toEqual([]);
+});
+
+test("the empty isoplan-no-hooks-* folders earlier versions left in the temp folder are removed; one with anything in it, and any other folder, are kept", async () => {
+  const tmp = tempRoot();
+  for (const name of ["isoplan-no-hooks-a", "isoplan-no-hooks-b", "other"]) fs.mkdirSync(path.join(tmp, name));
+  fs.writeFileSync(path.join(tmp, "isoplan-no-hooks-b", "pre-commit"), "");
+  await removeOldNoHooks(tmp);
+  expect(fs.readdirSync(tmp).sort()).toEqual(["isoplan-no-hooks-b", "other"]);
+});

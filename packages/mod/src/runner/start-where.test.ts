@@ -1,13 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { tempRoot } from "../data-layer/fixture.js";
 import { fakeClaude } from "../handoff/fixture.js";
 import { createRunGit } from "../handoff/git.js";
 import type { RunOrca } from "../handoff/orca.js";
 import { trustKey, type Background, type Launch, type TakeSettings } from "../handoff/take.js";
 import type { StartElsewhere } from "./session.js";
-import { desktopTaskPrompt, onCommandLine, startDir, startPlaces, startWhere, taskPrompt, type StartWhereOptions } from "./start-where.js";
+import { desktopTaskPrompt, onCommandLine, startDir, startPlaces, startWhere, taskPrompt, tidyStarts, type StartWhereOptions } from "./start-where.js";
+
+// The empty folder git runs with as its hooks (handoff/take.ts noHooks) is made in the Claude folder: a temp one, never this machine's.
+vi.stubEnv("CLAUDE_CONFIG_DIR", path.join(tempRoot(), "claude"));
 
 const SESSION = "0b5c4d3e-0000-4000-8000-000000000085";
 const SETTINGS: TakeSettings = { gitTimeoutSeconds: 30, setupTimeoutMinutes: 1, cloneSearchDays: 30, desktopReadTimeoutMinutes: 1, desktopReadMaxTurns: 2, desktopTakeBudgetMinutes: 2 };
@@ -166,4 +169,19 @@ test("the Claude app: the task goes in task.md, the hidden first turn only reads
   const closed = fakeClaude(app.root, { desktopFails: "The Claude app isn't installed" });
   const r = await startWhere(app.start({ mode: "desktop" }), closed.bin, { ...app.options, arch: "x64", env: { CLAUDE_CONFIG_DIR: app.claudeDir } });
   expect(r).toEqual({ opened: true, problem: expect.stringContaining(`The Claude app didn't open on the session: The Claude app isn't installed. The session is ready: open it from the Claude app's session list, or run \`claude --desktop --resume ${SESSION}\``) });
+});
+
+test("a start's own folder is removed once it was last changed more than 7 days ago; a newer one is kept", async () => {
+  const claudeDir = tempRoot();
+  const old = startDir(claudeDir, "s-old");
+  const recent = startDir(claudeDir, "s-new");
+  for (const dir of [old, recent]) {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "task.md"), "the task\n");
+  }
+  const eightDays = new Date(Date.now() - 8 * 86400000);
+  fs.utimesSync(old, eightDays, eightDays);
+  await tidyStarts(claudeDir);
+  expect(fs.existsSync(old)).toBe(false);
+  expect(fs.readFileSync(path.join(recent, "task.md"), "utf8")).toBe("the task\n");
 });

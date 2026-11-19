@@ -4,9 +4,14 @@
 //   doesn't show under their repo in Orca or `git worktree list`, where a person could come across
 //   a trunk and resume it. Every trunk and fork runs in it, and its folder never moves, since forks
 //   resume a trunk by its folder's path. It is moved to a newer commit only under the checkout lock's
-//   exclusive hold (expert-lock.ts), and reset if a fork ever changed it.
+//   exclusive hold (expert-lock.ts), and reset if a fork ever changed it. It is in the expert's
+//   folder, or in <clonesFolder>/experts/<name>/ when runner.json's `clonesFolder` named a folder
+//   as it was first made (experts.ts readFolder). On Windows git takes long paths in it
+//   (core.longpaths, set as it is cloned, or in one cloned before, as it is next prepared).
 // - The clone borrows the person's repo's objects while it is made (--reference-if-able, then
-//   --dissociate, so it never depends on them after), and holds the default branch alone, no tags.
+//   --dissociate, so it never depends on them after; when that fails, as it does in a folder too deep
+//   for the repack on Windows, it is cloned again borrowing nothing), and holds the default branch
+//   alone, no tags.
 //   An origin that is a local path, a file:// URL or a \\server share is refused, as a handoff's is.
 //
 // The person's repo is only ever read: its origin URL and origin's default branch. Every git call
@@ -39,10 +44,43 @@ export async function renamed(from: string, to: string) {
   }
 }
 
+/**
+ * On Windows, git told to take paths longer than 260 characters for a clone of Isoplan's own: `git`
+ * goes before `clone`, for the clone itself, and `clone` after it, which writes it into the new
+ * repo's config, so every later git in it, the agent's included, has it too. Nothing elsewhere.
+ */
+export const longPaths = (platform: NodeJS.Platform) =>
+  platform === "win32" ? { git: ["-c", "core.longpaths=true"], clone: ["--config", "core.longpaths=true"] } : { git: [], clone: [] };
+
+/**
+ * On Windows, long paths turned on in a clone made before Isoplan set them as it cloned: written
+ * only while git doesn't already have them, so the clone's config is rewritten once rather than on
+ * every use, while the agent's git may be in it; a write that fails is only told, since the clone
+ * works as it did before.
+ */
+export async function keepLongPaths(run: (args: string[]) => Promise<GitResult>, platform: NodeJS.Platform, told: (why: string) => void): Promise<void> {
+  if (platform !== "win32" || (await run(["config", "--get", "core.longpaths"])).stdout.trim() === "true") return;
+  const set = await run(["config", "core.longpaths", "true"]);
+  if (set.code !== 0) told(`${set.timedOut ? "git took too long" : "git failed"}: ${set.stderr.trim()}`);
+}
+
 /** Where a clone of `repo` borrows objects from: its own .git folder, since git won't borrow from a linked worktree (Orca's, say); the repo itself when git can't say. */
 export async function borrowFrom(run: (cwd: string, args: string[]) => Promise<GitResult>, repo: string): Promise<string> {
   const common = await run(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
   return common.code === 0 && common.stdout.trim() ? common.stdout.trim() : repo;
+}
+
+/**
+ * Clones borrowing `reference`'s objects (--reference-if-able, then --dissociate) and, when that
+ * fails other than by taking too long, once more borrowing nothing: on Windows the repack that
+ * --dissociate runs ignores core.longpaths, so in a deep folder only a clone that borrows nothing
+ * can be made. `clean` empties the folder the first one was made in.
+ */
+export async function cloneBorrowing(clone: (borrow: string[]) => Promise<GitResult>, reference: string, clean: () => Promise<unknown>): Promise<GitResult> {
+  const borrowed = await clone(["--reference-if-able", reference, "--dissociate"]);
+  if (borrowed.code === 0 || borrowed.timedOut) return borrowed;
+  await clean();
+  return clone([]);
 }
 
 export interface ExpertCheckoutOptions {
@@ -50,6 +88,8 @@ export interface ExpertCheckoutOptions {
   repo: string;
   /** The expert's folder, ~/.claude/isoplan/experts/<name>. */
   dir: string;
+  /** Its clone, <dir>/read unless it is in runner.json's `clonesFolder` (experts.ts readFolder). */
+  read?: string;
   name: string;
   timeoutMs: number | (() => number | Promise<number>);
   log: (text: string) => void;
@@ -60,6 +100,7 @@ export interface ExpertCheckoutOptions {
   onFetchFailed?: (why: string) => void;
   /** Whether read/ may be cloned from origin's URL: onTheWire, which a test loosens for a local origin. */
   cloneFrom?: (remote: string) => boolean;
+  platform?: NodeJS.Platform;
 }
 
 export interface ExpertCheckout {
@@ -86,9 +127,9 @@ export interface ExpertCheckout {
   has(file: string): Promise<boolean>;
 }
 
-export function createExpertCheckout({ git, repo, dir, name, timeoutMs, log, fetchSeconds = () => 60, now = Date.now, onFetchFailed, cloneFrom = onTheWire }: ExpertCheckoutOptions): ExpertCheckout {
-  const read = path.join(dir, "read");
-  const staging = path.join(dir, "read.new");
+export function createExpertCheckout({ git, repo, dir, read = path.join(dir, "read"), name, timeoutMs, log, fetchSeconds = () => 60, now = Date.now, onFetchFailed, cloneFrom = onTheWire, platform = process.platform }: ExpertCheckoutOptions): ExpertCheckout {
+  const staging = `${read}.new`;
+  const above = path.dirname(read);
   let branch: string | null = null;
   let fetchedAt: number | null = null;
 
@@ -136,10 +177,14 @@ export function createExpertCheckout({ git, repo, dir, name, timeoutMs, log, fet
       if (!st || (st.isDirectory() && (await fs.readdir(read)).length === 0)) {
         // Made in read.new and moved into place once checked out, so a clone cut short (by
         // gitTimeoutSeconds, say) never leaves a read/ that looks like a clone of its own.
-        await fs.mkdir(dir, { recursive: true });
+        await fs.mkdir(above, { recursive: true });
         await fs.rm(staging, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
         const reference = await borrowFrom(run, repo);
-        await must(dir, ["clone", "-q", "--no-checkout", "--reference-if-able", reference, "--dissociate", "--single-branch", "--branch", branch, "--no-tags", "--", url, staging], NO_LFS);
+        const long = longPaths(platform);
+        const on: string = branch;
+        const args = (borrow: string[]) => [...long.git, "clone", "-q", ...long.clone, "--no-checkout", ...borrow, "--single-branch", "--branch", on, "--no-tags", "--", url, staging];
+        const cloned = await cloneBorrowing((borrow) => run(above, args(borrow), NO_LFS), reference, () => fs.rm(staging, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+        if (cloned.code !== 0) throw new Error(`git ${args([]).join(" ")} failed${cloned.timedOut ? " (it took too long)" : ""}: ${cloned.stderr.trim()}`);
         await must(staging, ["checkout", "-q", "--detach", tracking()], NO_LFS);
         if (st) await fs.rmdir(read);
         await renamed(staging, read);
@@ -150,6 +195,7 @@ export function createExpertCheckout({ git, repo, dir, name, timeoutMs, log, fet
         throw new Error(`${read} is there already and isn't a clone of its own (a worktree of ${repo} from an earlier Isoplan, say), so it was left as it is. Remove it (a worktree with \`git worktree remove --force ${read}\` in ${repo}), and the expert clones it again for its next question or at the runner's next start`);
       }
       await must(read, ["remote", "set-url", "origin", url]);
+      await keepLongPaths((args) => run(read, args), platform, (why) => log(`couldn't turn on long paths in expert ${name}'s clone ${read} (${why})`));
       if (!(await fetchOrigin())) await originTip(); // no fetch, but a branch fetched before: carry on
       return { branch, commit: await head() };
     },

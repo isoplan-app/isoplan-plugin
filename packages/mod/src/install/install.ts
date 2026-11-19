@@ -269,11 +269,14 @@ async function finishOptOut({ claudeDir, settings }: Paths): Promise<string[]> {
 // it waits on (waits/), owner answers waiting for their session (answers/), taken and unsent
 // handoffs' briefs and launchers (handoffs/), the hooks module's record of each session's context
 // window (windows/), each office's list of repos and pairing lock (offices/),
-// the one list and lock a version before #105 kept (approved.json, pairing.lock), and the update
-// check's record and lock (src/update). Removed before the hooks.
-const WRITTEN = ["runner", "pipe", "pairing.json", "pairing.lock", "pairing.write.lock", "live", "logs", "titles", "released", "waits", "answers", "handoffs", "windows", "offices", "approved.json", "update.json", "update.lock"];
+// the one list and lock a version before #105 kept (approved.json, pairing.lock), the update
+// check's record and lock (src/update), the launchers and tasks of starts outside the floor
+// (starts/), owner messages waiting for their session (messages/), GitHub repos' current names
+// (remote-names.json), and the empty folder git runs with as its hooks (no-hooks/). Removed before
+// the hooks. clones/, experts/ and the folder runner.json's clonesFolder names are kept.
+const WRITTEN = ["runner", "pipe", "pairing.json", "pairing.lock", "pairing.write.lock", "live", "logs", "titles", "released", "waits", "answers", "handoffs", "windows", "offices", "approved.json", "update.json", "update.lock", "starts", "messages", "remote-names.json", "no-hooks"];
 // What a session's data layer writes as it runs, so may come back during an uninstall.
-const SESSION_TRACES = ["live", "titles", "released", "waits", "answers", "windows", "offices", "approved.json", "update.json", "update.lock"];
+const SESSION_TRACES = ["live", "titles", "released", "waits", "answers", "windows", "offices", "approved.json", "update.json", "update.lock", "messages"];
 
 export interface UninstallOptions {
   /** Leave wake.json as `{ "disabled": true }`, so a plugin still installed doesn't put the hook back. */

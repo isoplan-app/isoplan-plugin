@@ -19,7 +19,9 @@
 // (dist/ask.js, which asks through the runner), with no one typing anything; the script waits only as long as runner.json says,
 // then tells the agent to carry on. The end of a question that comes after that arrives as an
 // `asked` line and is kept until it goes on a tool result of the agent that asked, or of the lead
-// once that agent has stopped; only then is it acked
+// once that agent has stopped. One result carries at most LATE_MAX of them and LATE_CHARS
+// characters, though always one, in the order they came; the rest wait for the next results, and
+// the agent is told how many do. Only one shown is acked
 // (dist/ask.js --ack), so the server sends it again until it has been shown, and one shown already
 // is only acked again. Answers are labelled as another person's session and quoted (ask/text.ts).
 //
@@ -32,8 +34,8 @@
 // it says none can be asked now. A registration that fails is tried again a few times. Each call is
 // checked against the rights as they are now. The question goes through dist/ask-expert.js, which asks through the
 // runner, and its end, when it comes after the call returned, arrives as an `asked` line with
-// `expert` and takes ask_earlier_session's path: kept for the agent that asked, shown on its next
-// tool result, then acked through dist/ask.js.
+// `expert` and takes ask_earlier_session's path: kept for the agent that asked, shown on one of its
+// next tool results, then acked through dist/ask.js.
 //
 // An agent's question to its owner (AskUserQuestion) is in the terminal and on the floor at once,
 // and the first answer wins (#50): the call goes ahead at once, so its dialog shows, while the hook
@@ -91,8 +93,11 @@ const STABLE_MS = 60000;
 // After a session ends, the process may go on under a new id (a /clear, a resume) with no
 // session.start; the id is looked at again this long after.
 const SWITCH_CHECK_MS = 1000;
-// The most of a server's note that reaches the model, and of a late reply from the room.
+// The most of a server's conflict note that reaches the model.
 const NOTE_MAX = 1000;
+// The most late answers one tool result carries, and the most characters of them, though always one.
+const LATE_MAX = 3;
+const LATE_CHARS = 20000;
 // The script's whole wait fits in MAX_WAIT_MS (five minutes) whatever runner.json says, and
 // connecting, a token renewal and the ack take under two minutes more; this, under Claude Code's
 // ten-minute limit, only ends a script that hangs.
@@ -191,14 +196,23 @@ export function register(on: On): void {
       const agent = e.agentId ? "claude-code:" + e.agentId : lead;
       const waiting = notes.get(agent) ?? [];
       notes.delete(agent);
-      const late = await lateFor($, e.agentId ?? null);
+      const ready = await lateFor($, e.agentId ?? null);
+      const late: [string, Reply][] = [];
+      let chars = 0;
+      for (const entry of ready) {
+        chars += entry[1].text.length;
+        if (late.length && (late.length === LATE_MAX || chars > LATE_CHARS)) break;
+        late.push(entry);
+      }
       for (const [question, reply] of late) {
         replies.delete(question);
         shown.add(question);
         ack($, question, reply.server);
       }
       if (!waiting.length && !late.length) return r;
-      return { ...r, context: [...(r.context ?? []), ...waiting, ...late.map(([, reply]) => reply.text)] };
+      const held = ready.length - late.length;
+      const more = held ? [held === 1 ? "Isoplan: 1 more answer to your questions is waiting; it comes with your next tool results." : `Isoplan: ${held} more answers to your questions are waiting; they come with your next tool results.`] : [];
+      return { ...r, context: [...(r.context ?? []), ...waiting, ...late.map(([, reply]) => reply.text), ...more] };
     } catch {
       return r;
     }
@@ -659,8 +673,8 @@ function addNote(line: ConflictMessage): void {
   notes.set(line.agent, waiting);
 }
 
-// The end of a question the agent asked, sent after it carried on: kept for the lead's next tool
-// result, or, already shown, acked again. The server sends only ends down this link.
+// The end of a question the agent asked, sent after it carried on: kept for a later tool result,
+// or, already shown, acked again. The server sends only ends down this link.
 function addReply($: Host, line: FromOffice<AskedMessage>): void {
   const agent = (line.key && askedBy.get(line.key)) ?? null;
   if (line.state !== "answered" && line.state !== "dropped") return;
@@ -668,8 +682,8 @@ function addReply($: Host, line: FromOffice<AskedMessage>): void {
   replies.set(line.question, { agent, text: line.expert ? lateExpertText({ ...line, expert: line.expert }) : endText(line, true), server: line.server });
 }
 
-// The late replies a tool result of `agent` (null for the lead) shows: its own, and for the lead
-// also those of agents that have stopped since they asked.
+// The late replies waiting for a tool result of `agent` (null for the lead), in the order they
+// came: its own, and for the lead also those of agents that have stopped since they asked.
 async function lateFor($: Host, agent: string | null): Promise<[string, Reply][]> {
   const all = [...replies];
   if (agent !== null) return all.filter(([, r]) => r.agent === agent);

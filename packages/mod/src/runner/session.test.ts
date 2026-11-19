@@ -20,6 +20,9 @@ import { loadPatterns, scan } from "./scan.js";
 import type { RepoFolders } from "./repo-folders.js";
 import { createDriver, drivenArgs, menuCloseWaitMs, promptDescription, type DriveOffice, type DriverOptions, type DriveSettings, type StartElsewhere } from "./session.js";
 
+// The empty folder git runs with as its hooks (handoff/take.ts noHooks) is made in the Claude folder: a temp one, never this machine's.
+vi.stubEnv("CLAUDE_CONFIG_DIR", path.join(tempRoot(), "claude"));
+
 // Each test starts real (fake) claude processes, which is slow on Windows under load.
 vi.setConfig({ testTimeout: 30000 });
 

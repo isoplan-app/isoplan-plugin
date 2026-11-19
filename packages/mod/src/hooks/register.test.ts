@@ -470,6 +470,41 @@ test("hooks: a late reply from the room waits for a tool result that ran, labell
   expect(await call(h, {})).toEqual({ result: "ok" });
 });
 
+test("hooks: a tool result carries at most three late answers, in the order they came, and says how many more wait; only those shown are acked", async () => {
+  const answered = (question: string): DataLayerLine => ({ type: "asked", v: PROTOCOL_VERSION, question, text: "Which branch?", state: "answered", answer: `main (${question}).`, owner: "Adam" });
+  const h = await start(["q-1", "q-2", "q-3", "q-4", "q-5"].map(answered), { stays: true });
+  await vi.waitFor(() => expect(h.spawned).toHaveLength(1));
+  await new Promise((r) => setTimeout(r, 10));
+  const acked = () => h.ran.map((r) => r.argv.at(-1));
+  const first = await call(h, {});
+  expect(first.context).toEqual([
+    expect.stringContaining("main (q-1)."),
+    expect.stringContaining("main (q-2)."),
+    expect.stringContaining("main (q-3)."),
+    "Isoplan: 2 more answers to your questions are waiting; they come with your next tool results.",
+  ]);
+  await vi.waitFor(() => expect(acked()).toEqual(["q-1", "q-2", "q-3"]));
+  expect((await call(h, {})).context).toEqual([expect.stringContaining("main (q-4)."), expect.stringContaining("main (q-5).")]);
+  await vi.waitFor(() => expect(acked()).toEqual(["q-1", "q-2", "q-3", "q-4", "q-5"]));
+});
+
+test("hooks: late answers past 20,000 characters wait for the next tool result, though one longer than that still goes on its own", async () => {
+  const long = "line\n".repeat(1500); // quoted, each line grows by "> "
+  const h = await start(
+    [
+      { type: "asked", v: PROTOCOL_VERSION, question: "q-1", text: long, state: "answered", answer: long, owner: "Adam" },
+      { type: "asked", v: PROTOCOL_VERSION, question: "q-2", text: "Which branch?", state: "answered", answer: "main.", owner: "Adam" },
+    ],
+    { stays: true },
+  );
+  await vi.waitFor(() => expect(h.spawned).toHaveLength(1));
+  await new Promise((r) => setTimeout(r, 10));
+  const first = (await call(h, {})).context!;
+  expect(first[0]!.length).toBeGreaterThan(20000);
+  expect(first.slice(1)).toEqual(["Isoplan: 1 more answer to your questions is waiting; it comes with your next tool results."]);
+  expect((await call(h, {})).context).toEqual([expect.stringContaining("> main.")]);
+});
+
 test("hooks: a late reply goes to the subagent that asked while it runs, and to the lead once it has stopped", async () => {
   const late = (question: string, key: string): DataLayerLine => ({ type: "asked", v: PROTOCOL_VERSION, question, text: "Which branch?", state: "answered", answer: `main (${question}).`, owner: "Adam", key });
   let arrive: (lines: DataLayerLine[]) => void = () => {};

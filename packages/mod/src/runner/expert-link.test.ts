@@ -45,16 +45,19 @@ function setUp(o: { repos?: ReadonlySet<string> | null; send?: () => boolean; sc
 const names = (m: ExpertsMessage) => m.experts.map((e) => `${e.name}:${e.state}`);
 const settle = () => new Promise((r) => setTimeout(r, 20));
 
-test("the first hosting on a connection sends the listing, after refreshing the list at once", async () => {
+test("the first hosting on a connection sends the listing, after refreshing the list at once; only a hosting after it is checked for unlisted experts", async () => {
   const t = setUp();
   t.change(); // before any hosting: nothing
   await settle();
   expect(t.sent).toEqual([]);
   t.host.onHosting(hosting());
   await settle();
-  expect(t.listed).toEqual([[]]);
+  expect(t.listed).toEqual([]);
   expect(t.refreshed).toEqual([true]);
   expect(t.sent).toEqual([{ type: "experts", v: PROTOCOL_VERSION, experts: [{ name: "adr", project: { id: "github.com/acme/app", name: "adr" }, subject: "The adr rules.", state: "ready" }] }]);
+  t.host.onHosting(hosting(["adr"]));
+  await settle();
+  expect(t.listed).toEqual([["adr"]]);
   t.host.stop();
 });
 

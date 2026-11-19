@@ -1,13 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
 import { PROTOCOL_VERSION, RefusalMessageSchema, type RefusalMessage, type ReplyMessage } from "@isoplan/protocol";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { modDir, tempRoot } from "../data-layer/fixture.js";
 import type { GitResult, RunGit } from "../handoff/git.js";
 import { parseExpertFile, type ExpertFile } from "./expert-file.js";
 import { createHealthLog } from "./expert-health.js";
 import { fingerprint, type SavedExpert, type SavedGeneration } from "./expert-state.js";
 import { createExpert, NO_SENIOR, type AnswerExpertRequest, type ExpertSettings } from "./expert.js";
+
+// The empty folder git runs with as its hooks (handoff/take.ts noHooks) is made in the Claude folder: a temp one, never this machine's.
+vi.stubEnv("CLAUDE_CONFIG_DIR", path.join(tempRoot(), "claude"));
 
 const C0 = "0".repeat(40);
 const C1 = "1".repeat(40);
@@ -104,7 +107,8 @@ function fakeGit(readDir: string) {
   const repo = { head: C1, origin: C1, changed: [] as string[], dirty: false, offline: false };
   const ok = (stdout = ""): GitResult => ({ code: 0, stdout, stderr: "", timedOut: false });
   const git: RunGit = async (argv, { cwd }) => {
-    const args = argv.slice(2); // after the no-hooks prefix
+    let args = argv;
+    while (args[0] === "-c") args = args.slice(2); // after the no-hooks prefix, and Windows' long paths for a clone
     calls.push({ cwd, args });
     const at = (word: string) => args.includes(word);
     if (args[0] === "remote" && args[1] === "get-url") return ok("https://github.com/acme/app.git\n");

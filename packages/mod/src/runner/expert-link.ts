@@ -7,7 +7,9 @@
 // connection always goes, even an empty one. With no approved list from the server, nothing is
 // sent, so the server keeps what it has; nor while the secret patterns can't be read, which would
 // leave every expert out. Each working-out runs after the one before, so listings
-// go out in order, each built from the experts as they are when it runs.
+// go out in order, each built from the experts as they are when it runs. Which experts the server
+// lists is checked (`listed`) only on a `hosting` after this connection's first listing went: one
+// before it names what the server kept from before, or none on a first link.
 //
 // When a junior first asks its senior for one of this server's requests, the server is told
 // (`expert-senior`, with the request's id alone), live too: only while the link is up and only when
@@ -102,7 +104,7 @@ export function hostExperts(o: HostExpertsOptions): HostExperts {
 
   return {
     onHosting(m) {
-      o.experts.listed(o.server, m.listed);
+      if (last !== null) o.experts.listed(o.server, m.listed);
       hosting = true;
       expertSenior = m.expertSenior === true;
       queue(true);

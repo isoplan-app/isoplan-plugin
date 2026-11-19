@@ -13,12 +13,14 @@
 //   every check, and its repo is offered with no branches.
 // - A branch other than the one the checkout is on opens in a worktree of it: one already on it
 //   anywhere (one whose folder was deleted by hand is pruned first), else a new one beside the
-//   checkout, `<checkout>-branch-<branch>`, characters other than letters, digits, . _ - as -. The
+//   checkout, `<checkout>-branch-<branch>`, characters other than letters, digits, . _ - as -, and
+//   a branch longer than 24 as its first 16 characters and a short hash (asName). The
 //   checkout's own branch is never switched, and none of the repo's hooks runs while the branch is
 //   checked out: they would be whoever pushed it, from that branch.
 // - A start into Orca (#85, start-where.ts) gets a worktree Orca makes in the repo's Orca workspace
 //   where one is needed and Orca can make it (orcaBranchFolder), else branchFolder's.
 
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { dirname, isWindowsPath, normalize, pathKey, type Where } from "../data-layer/git.js";
@@ -145,8 +147,15 @@ export function createRemoteBranches({ run, timeoutMs, refreshMs, log, now = Dat
   };
 }
 
-/** A branch name as a folder's: characters other than letters, digits, . _ - as -, none of . - at its end. */
-const asName = (branch: string) => branch.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/[.-]+$/, "");
+/**
+ * A branch name as a folder's: characters other than letters, digits, . _ - as -, none of . - at its
+ * end; one longer than 24 as its first 16 (none of . - at their end), - and a hash of the branch, so
+ * a folder's path stays short and two long branches never share one.
+ */
+export function asName(branch: string): string {
+  const name = branch.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/[.-]+$/, "");
+  return name.length > 24 ? `${name.slice(0, 16).replace(/[.-]+$/, "")}-${createHash("sha256").update(branch).digest("hex").slice(0, 6)}` : name;
+}
 
 /**
  * The folder a session on `branch` opens in: `checkout` when it is on that branch; else a worktree

@@ -1,10 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { tempRoot } from "../data-layer/fixture.js";
 import { git as gitIn, remoteAndClone } from "../handoff/fixture.js";
 import { createRunGit, type GitResult, type RunGit } from "../handoff/git.js";
-import { createExpertCheckout } from "./expert-checkout.js";
+import { cloneBorrowing, createExpertCheckout, keepLongPaths } from "./expert-checkout.js";
+
+// The empty folder git runs with as its hooks (handoff/take.ts noHooks) is made in the Claude folder: a temp one, never this machine's.
+vi.stubEnv("CLAUDE_CONFIG_DIR", path.join(tempRoot(), "claude"));
 
 const MAIN = "1".repeat(40);
 const MOVED = "2".repeat(40);
@@ -44,7 +47,8 @@ function setUp(answer?: Parameters<typeof fakeGit>[0], o: { fetchSeconds?: numbe
   const staging = path.join(dir, "read.new");
   const g = fakeGit(answer);
   const logged: string[] = [];
-  const checkout = createExpertCheckout({ git: g.git, repo, dir, name: "adr", timeoutMs: 1000, log: (t) => void logged.push(t), fetchSeconds: () => o.fetchSeconds ?? 60, ...(o.now && { now: o.now }) });
+  // Not Windows, where a clone's arguments carry long paths too (tested with real git below).
+  const checkout = createExpertCheckout({ git: g.git, repo, dir, name: "adr", timeoutMs: 1000, log: (t) => void logged.push(t), fetchSeconds: () => o.fetchSeconds ?? 60, ...(o.now && { now: o.now }), platform: "linux" });
   return { ...g, checkout, repo, dir, read, staging, logged };
 }
 
@@ -93,6 +97,32 @@ test("prepare: a clone cut short leaves no read/, and the half-made one is clear
   cut = false;
   expect(await t.checkout.prepare()).toEqual({ branch: "main", commit: MAIN });
   expect(fs.existsSync(path.join(t.read, "left-over"))).toBe(false);
+});
+
+test("keepLongPaths: on Windows long paths are written only while git hasn't them, and a write that fails is only told; elsewhere git isn't asked", async () => {
+  for (const [platform, got, write, calls, told] of [
+    ["win32", ok("true\n"), ok(), 1, 0],
+    ["win32", failed(""), ok(), 2, 0],
+    ["win32", failed(""), failed("could not lock config file"), 2, 1],
+    ["linux", failed(""), ok(), 0, 0],
+  ] as const) {
+    const asked: string[][] = [];
+    const why: string[] = [];
+    await keepLongPaths(async (args) => (asked.push(args), args[1] === "--get" ? got : write), platform, (w) => void why.push(w));
+    expect(asked).toEqual([["config", "--get", "core.longpaths"], ["config", "core.longpaths", "true"]].slice(0, calls));
+    expect(why).toEqual(told ? ["git failed: could not lock config file"] : []);
+  }
+});
+
+test("cloneBorrowing: a clone that fails borrowing is made once more borrowing nothing, after its folder is emptied; one that works or takes too long isn't", async () => {
+  for (const [first, tries] of [[failed("unable to write file"), 2], [ok(), 1], [{ ...failed(), timedOut: true }, 1]] as const) {
+    const borrows: string[][] = [];
+    let cleaned = 0;
+    const r = await cloneBorrowing(async (borrow) => (borrows.push(borrow), borrows.length === 1 ? first : ok()), "C:/repo/.git", async () => cleaned++);
+    expect(borrows).toEqual([["--reference-if-able", "C:/repo/.git", "--dissociate"], ...(tries === 2 ? [[]] : [])]);
+    expect(cleaned).toBe(tries - 1);
+    expect(r.code).toBe(tries === 2 ? 0 : first.code);
+  }
 });
 
 test("prepare: a clone already there gets origin's current URL and a fetch by refspec; with origin unreachable, the default branch from origin/HEAD and the clone kept as it is", async () => {
@@ -207,13 +237,13 @@ test("read: never through a link to a file outside the read checkout", async () 
 
 // Real git from here: a bare repo as origin, and the person's clone of it.
 const MS = 30000;
-function realSetUp() {
+function realSetUp(platform?: NodeJS.Platform) {
   const root = tempRoot();
   const { remote, clone: repo } = remoteAndClone(root, "app");
   const dir = path.join(root, "experts", "adr");
   const logged: string[] = [];
   // A local origin stands in for GitHub here, so the wire check is loosened.
-  const checkout = createExpertCheckout({ git: createRunGit(), repo, dir, name: "adr", timeoutMs: MS, log: (t) => void logged.push(t), fetchSeconds: () => 0, cloneFrom: () => true });
+  const checkout = createExpertCheckout({ git: createRunGit(), repo, dir, name: "adr", timeoutMs: MS, log: (t) => void logged.push(t), fetchSeconds: () => 0, cloneFrom: () => true, ...(platform && { platform }) });
   return { root, remote, repo, dir, read: path.join(dir, "read"), checkout, logged };
 }
 
@@ -259,4 +289,16 @@ test("with real git: a read/ that is a worktree of the person's repo, from an ea
   await t.checkout.remove();
   expect(fs.existsSync(path.join(t.read, "app.js"))).toBe(true);
   expect(t.logged).toEqual([`left ${t.read} as it is: it isn't expert adr's own clone`]);
+}, 60000);
+
+test("with real git on Windows: read/ takes long paths in its own config, and the person's repo's config is left as it was", async () => {
+  const t = realSetUp("win32");
+  const before = fs.readFileSync(path.join(t.repo, ".git", "config"), "utf8");
+  await t.checkout.prepare();
+  expect(gitIn(t.read, "config", "--local", "core.longpaths")).toBe("true");
+  // One cloned before Isoplan set them takes them as it is next prepared.
+  gitIn(t.read, "config", "--unset", "core.longpaths");
+  await t.checkout.prepare();
+  expect(gitIn(t.read, "config", "--get", "core.longpaths")).toBe("true");
+  expect(fs.readFileSync(path.join(t.repo, ".git", "config"), "utf8")).toBe(before);
 }, 60000);

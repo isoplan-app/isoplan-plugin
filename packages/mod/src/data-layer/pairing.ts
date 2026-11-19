@@ -2,8 +2,8 @@
 // the machine reports belongs to the person who approves the pairing; the Claude account it names
 // is only a label. Pairing happens on this machine, in its own browser:
 //
-// 1. A link the server refuses as `not-paired` or `pairing-ended` starts pairing. One process of
-//    this Claude account on this machine does it at a time, holding <claude dir>/isoplan/pairing.lock
+// 1. A link the server refuses as `not-paired` or `pairing-ended` starts pairing. One process of this
+//    machine does it at a time, holding <claude dir>/isoplan/pairing.lock
 //    and keeping it fresh: it listens on a loopback callback, http://127.0.0.1:<port>/<nonce>, and
 //    asks the server (POST <server>/pair) with that callback, the SHA-256 of a PKCE verifier it keeps,
 //    and the machine's own random id (made once, kept in pairing.json), which tells two machines of
@@ -29,8 +29,13 @@
 // config.json says `"allowPlainWs": true`.
 //
 // Everything is kept in <claude dir>/isoplan/pairing.json, readable by its owner only (on Windows
-// it takes the folder's permissions): the machine's id, and one entry per Claude account and office
-// server (#105). The entry of the server config.json's `server` names, which a version before #105
+// it takes the folder's permissions): the machine's id, and its entry for each office server (#105).
+// An entry is kept under the Claude login it was made under, but the pairing is the machine's: a
+// lookup for one login uses that login's entry for the office, else another login's (with several,
+// the one renewed most recently), which is renewed where it is and never copied, moved or deleted,
+// so a version still running under the old login keeps finding it; only with none at all does the
+// machine pair again, under the current login (pairingKey). The entry of the server config.json's
+// `server` names, which a version before #105
 // reports to, is under `accounts`, where that version looks; every other server's is under
 // `offices`, by its address, which is read first. Each server's pairing.lock is its own, in
 // <claude dir>/isoplan/offices/<id>/, so pairing with one office never waits on another; the server
@@ -63,7 +68,7 @@ const WRITE_WAIT_MS = 10 * 1000;
 /** How often the callback tries to write the credential it got before saying it couldn't. */
 const WRITE_TRIES = 4;
 
-/** One Claude account's pairing. */
+/** The machine's pairing with one office, kept under the Claude login it was made under. */
 export interface PairingEntry {
   /** The office server's data-layer address, as in config.json. */
   server: string;
@@ -77,7 +82,7 @@ export interface PairingEntry {
   waiting?: { url: string; expires: number };
 }
 
-/** What pairing.json holds: the machine's own id, and each Claude account's entry, by its id; for a further server, by its address and then the account's id. */
+/** What pairing.json holds: the machine's own id, and its entries, each by the id of the Claude login it was made under; for a further server, by its address and then that id. */
 export interface PairingFile {
   machine?: string;
   accounts: Record<string, PairingEntry>;
@@ -89,21 +94,44 @@ export const pairingPath = (claudeDir: string) => path.join(claudeDir, "isoplan"
 export const pairingLockPath = (claudeDir: string, office: { server: string; legacy?: boolean }) =>
   office.legacy ? path.join(claudeDir, "isoplan", "pairing.lock") : path.join(officeDir(claudeDir, office.server), "pairing.lock");
 
-/** The account's entry for `server`, or undefined: the one under `offices`, else the one under `accounts` when it is that server's. */
-export function pairingEntry(all: PairingFile, server: string, account: string): PairingEntry | undefined {
-  const first = all.accounts[account];
-  return all.offices?.[server]?.[account] ?? (first?.server === server ? first : undefined);
+/** The entry kept under `key` for `server`, or undefined: the one under `offices`, else the one under `accounts` when it is that server's. */
+function entryUnder(all: PairingFile, server: string, key: string): PairingEntry | undefined {
+  const first = all.accounts[key];
+  return all.offices?.[server]?.[key] ?? (first?.server === server ? first : undefined);
 }
 
 /**
- * `all` with the account's entry for `server` set: under `accounts` only for the server a version
- * before #105 reports to (`legacy`, config.json's `server`), and only while `offices` holds none for
- * it, so pairingEntry reads it back; any other server's always under `offices`, so a version before
- * #105, which writes `accounts` for its own server, never wipes it.
+ * The key the machine's pairing with `server` is kept under, looked up for the Claude login
+ * `account`: the login's own while its entry holds a credential, else that of another login's entry
+ * that does (with several, the one renewed most recently), else the login's own, where a new
+ * pairing goes.
+ */
+export function pairingKey(all: PairingFile, server: string, account: string): string {
+  if (entryUnder(all, server, account)?.credential) return account;
+  let best: { key: string; renewed: number } | undefined;
+  for (const key of new Set([...Object.keys(all.offices?.[server] ?? {}), ...Object.keys(all.accounts)])) {
+    const entry = entryUnder(all, server, key);
+    if (entry?.credential && (!best || (entry.tokenExpires ?? 0) > best.renewed)) best = { key, renewed: entry.tokenExpires ?? 0 };
+  }
+  return best?.key ?? account;
+}
+
+/** The machine's entry for `server`, looked up for the Claude login `account` (pairingKey), or undefined. */
+export function pairingEntry(all: PairingFile, server: string, account: string): PairingEntry | undefined {
+  return entryUnder(all, server, pairingKey(all, server, account));
+}
+
+/**
+ * `all` with the machine's entry for `server` set, under the key pairingKey finds for `account`, so
+ * another login's entry is renewed where it is, never copied or moved: under `accounts` only for the
+ * server a version before #105 reports to (`legacy`, config.json's `server`), and only while
+ * `offices` holds none for it, so pairingEntry reads it back; any other server's always under
+ * `offices`, so a version before #105, which writes `accounts` for its own server, never wipes it.
  */
 function withPairingEntry(all: PairingFile, server: string, account: string, entry: PairingEntry, legacy: boolean): PairingFile {
-  if (legacy && !all.offices?.[server]?.[account]) return { ...all, accounts: { ...all.accounts, [account]: entry } };
-  return { ...all, offices: { ...all.offices, [server]: { ...all.offices?.[server], [account]: entry } } };
+  const key = pairingKey(all, server, account);
+  if (legacy && !all.offices?.[server]?.[key]) return { ...all, accounts: { ...all.accounts, [key]: entry } };
+  return { ...all, offices: { ...all.offices, [server]: { ...all.offices?.[server], [key]: entry } } };
 }
 export const pairingWriteLockPath = (claudeDir: string) => path.join(claudeDir, "isoplan", "pairing.write.lock");
 
@@ -118,7 +146,7 @@ export interface PairingOptions {
   writeLock: string;
   /** The data-layer address, ws:// or wss://. */
   server: string;
-  /** The machine's Claude account, the same for every folder: the entry's key, and its label. */
+  /** The machine's Claude account, the same for every folder: its entry is looked up for it (pairingKey), and it is the label a new pairing sends. */
   account: { id: string; name: string };
   machine: string;
   emit: (line: DataLayerLine) => void;
@@ -234,9 +262,10 @@ export function machineIdOf(file: string, writeLock: string, pid = process.pid, 
 }
 
 /**
- * Keeps `credential` as the account's for `server`, got some other way than this file's callback
- * (src/connect): it replaces the entry's credential, and the token and any link waiting go with the
- * old one, since the server ended that pairing when it made this one.
+ * Keeps `credential`, got some other way than this file's callback (src/connect), as the machine's
+ * for `server`, under the key pairingKey finds: it replaces the entry's credential, and the token
+ * and any link waiting go with the old one, since the server ended that pairing when it made this
+ * one.
  */
 export function keepCredential(
   { file, writeLock, server, account, legacy = false, pid = process.pid, isAlive = alive }: Pick<PairingOptions, "file" | "writeLock" | "server" | "legacy" | "pid" | "isAlive"> & { account: string },

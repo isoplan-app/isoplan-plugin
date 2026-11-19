@@ -1,13 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { createGit, pathKey } from "../data-layer/git.js";
 import { nodeIo } from "../data-layer/io.js";
 import { tempRoot } from "../data-layer/fixture.js";
 import { createRunGit } from "../handoff/git.js";
 import { fakeOrca, git, remoteAndClone, setIdentity } from "../handoff/fixture.js";
 import { orcaRunner } from "../handoff/orca.js";
-import { branchFolder, createCheckouts, createRemoteBranches, mainCheckout, orcaBranchFolder, parseHeads } from "./checkouts.js";
+import { asName, branchFolder, createCheckouts, createRemoteBranches, mainCheckout, orcaBranchFolder, parseHeads } from "./checkouts.js";
+
+// The empty folder git runs with as its hooks (handoff/take.ts noHooks) is made in the Claude folder: a temp one, never this machine's.
+vi.stubEnv("CLAUDE_CONFIG_DIR", path.join(tempRoot(), "claude"));
 
 const run = createRunGit();
 const isDir = async (p: string) => fs.existsSync(p) && fs.statSync(p).isDirectory();
@@ -201,3 +204,10 @@ test("in Orca: the checkout when it is on the branch or none is named; else Orca
   // Many git and Orca calls, each a process: slow on a loaded machine.
 }, 30000);
 
+test("a branch's part of a folder's name is the branch, filesystem-safe; one longer than 24 is its first 16 characters and a hash, so two long branches alike at the start get different ones", () => {
+  expect(asName("feat/dark")).toBe("feat-dark");
+  expect(asName("feat/a-twenty-four-chars")).toBe("feat-a-twenty-four-chars");
+  expect(asName("feature/a-much-longer-branch-one")).toMatch(/^feature-a-much-l-[0-9a-f]{6}$/);
+  expect(asName("feature/abcdefg-long-branch-name")).toMatch(/^feature-abcdefg-[0-9a-f]{6}$/);
+  expect(asName("feature/a-much-longer-branch-one")).not.toBe(asName("feature/a-much-longer-branch-two"));
+});

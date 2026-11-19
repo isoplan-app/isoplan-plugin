@@ -2,6 +2,10 @@
 // (expert-files.ts watches the folder), each run by expert.ts in <name>/ beside its file, with its
 // health log at ~/.claude/isoplan/logs/expert-<name>.log.
 //
+// - Its clone, read/, is where it was first made, so its trunks can still be resumed: <name>/read,
+//   or <folder>/experts/<name>/read for a folder runner.json's `clonesFolder` names or named before.
+//   A new one goes in the folder `clonesFolder` names, else in <name>/ (readFolder).
+//
 // - A file that doesn't parse is logged, to runner.log and to that expert's health log, and its
 //   expert doesn't start; one already running keeps running. A field the runner doesn't know is
 //   logged once per load. A change is the expert's to apply; a removed file stops its expert, whose
@@ -17,6 +21,7 @@
 //   project has no remote (its id would name a path on this machine), never a subject that matches
 //   a secret pattern, at most MAX_EXPERTS, the first by name.
 
+import fs from "node:fs";
 import path from "node:path";
 import { ExpertListingSchema, MAX_EXPERTS, PROTOCOL_VERSION, type ExpertListing, type Project, type RefusalMessage, type ReplyMessage } from "@isoplan/protocol";
 import type { Spawn, Track } from "./claude.js";
@@ -35,6 +40,10 @@ type Outgoing = ReplyMessage | RefusalMessage;
 export interface ExpertsOptions {
   /** <claudeDir>/isoplan/experts */
   expertsDir: string;
+  /** runner.json's `clonesFolder`, where a new expert's clone goes; "" for its folder in expertsDir. */
+  clonesFolder?: string;
+  /** Every folder `clonesFolder` has named (repo-folders.ts readClonesFolders), where an expert's clone made earlier may be. */
+  clonesFolders?: readonly string[];
   /** <claudeDir>/isoplan/logs */
   logsDir: string;
   /** <claudeDir>/projects, where trunk transcripts are (resume check) */
@@ -61,7 +70,7 @@ export interface Experts {
   hosted(): HostedExpert[];
   /** `hosted()` changed: an expert added, removed, or its state. Several listeners, one per office. */
   onChange(listener: () => void): void;
-  /** An office server's `hosting`: the experts it doesn't list are logged in their health logs. */
+  /** An office server's `hosting`: the experts it doesn't list are logged in their health logs, and so are those it lists again after. */
   listed(server: string, names: readonly string[]): void;
   owns(request: string): boolean;
   /** `senior` is told the request's id when the expert's junior first asks its senior for it. */
@@ -93,6 +102,11 @@ export function createExperts(o: ExpertsOptions): Experts {
     return h;
   };
   const owner = (request: string) => [...experts.values(), ...stopped].find((e) => e.owns(request));
+  // Where an expert's clone is: where it was made, since its trunks resume only from there; else where a new one goes.
+  const readFolder = (name: string) => {
+    const made = [path.join(o.expertsDir, name, "read"), ...[o.clonesFolder ?? "", ...(o.clonesFolders ?? [])].filter(Boolean).map((f) => path.join(f, "experts", name, "read"))];
+    return made.find((p) => fs.existsSync(p)) ?? (o.clonesFolder ? path.join(o.clonesFolder, "experts", name, "read") : made[0]!);
+  };
 
   function onFile(change: ExpertFileChange) {
     const { name } = change;
@@ -120,6 +134,7 @@ export function createExperts(o: ExpertsOptions): Experts {
       ...o,
       file: parsed.expert,
       dir: path.join(o.expertsDir, name),
+      read: readFolder(name),
       health: health(name),
       onChange: changed,
       onTrunk: (trunk) => trunks.add(trunk),
@@ -140,8 +155,14 @@ export function createExperts(o: ExpertsOptions): Experts {
     listed(server, listed) {
       const missing = [...experts.keys()].filter((n) => !listed.includes(n)).sort();
       const text = missing.join(",");
-      if ((unlisted.get(server) ?? "") === text) return;
+      const before = unlisted.get(server) ?? "";
+      if (before === text) return;
       unlisted.set(server, text);
+      const now = before.split(",").filter((n) => experts.has(n) && listed.includes(n));
+      if (now.length) {
+        o.log(`${server} now lists the experts ${now.join(", ")}`);
+        for (const name of now) health(name).say("listed", { server, unlisted: text });
+      }
       if (!missing.length) return;
       o.log(`${server} doesn't list the experts ${missing.join(", ")}: their repo isn't in an office there, another machine's expert has the name, or the office has more experts than a session may be told of`);
       for (const name of missing) health(name).say("listed", { server, unlisted: text });
@@ -167,11 +188,11 @@ export function createExperts(o: ExpertsOptions): Experts {
   };
 }
 
-/** Whether a session is an expert's, to keep it off the floor: in the experts' folder, or a trunk of one (while `experts` is made). */
+/** Whether a session is an expert's, to keep it off the floor: in the experts' folder or experts/ of a folder `clonesFolder` has named, or a trunk of one (while `experts` is made). */
 export const expertIgnored =
-  (expertsDir: string, experts: () => Pick<Experts, "isExpertSession"> | null) =>
+  (expertsDir: string, experts: () => Pick<Experts, "isExpertSession"> | null, clonesFolders: readonly string[] = []) =>
   (id: string, cwd: string | null): boolean =>
-    (cwd !== null && inside(expertsDir, cwd) !== null) || (experts()?.isExpertSession(id) ?? false);
+    (cwd !== null && [expertsDir, ...clonesFolders.map((f) => path.join(f, "experts"))].some((dir) => inside(dir, cwd) !== null)) || (experts()?.isExpertSession(id) ?? false);
 
 /**
  * The experts as one office's runner asks them: a question for an expert whose repo that office

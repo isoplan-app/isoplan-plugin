@@ -128,7 +128,7 @@ export async function hello(session: string, cwd: string, token: string | undefi
   };
 }
 
-/** This machine's pairing with `server`, under the machine's Claude account. */
+/** This machine's pairing with `server`, found for the machine's Claude account as every lookup finds it (pairingKey): another login's entry does when that account has none. */
 export async function machinePairing(office: Office, allowPlainWs: boolean, claudeDir: string, claudeJson: string, io: ReturnType<typeof nodeIo>) {
   const { server } = office;
   const account = await accountOf({ readText, run: io.run }, claudeJson, os.homedir());
