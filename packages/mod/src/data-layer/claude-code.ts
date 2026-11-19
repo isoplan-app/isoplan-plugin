@@ -27,8 +27,9 @@
 // doesn't want to proceed with this tool use" is one, never an MCP tool's, whose text is its own. A
 // plain turn-down is followed by an interruption line, which isn't counted again. Counts only: no
 // path's contents, pattern or result is kept. A subagent that leaves the view keeps its counts.
-// What the session said in its latest turns in a folder (its prompts and replies) stays on the
-// machine, for the runner's draft of an expert (SourceRead.said).
+// What the session said in its latest turns in a folder (its prompts and replies) is kept for the
+// runner's draft of an expert (SourceRead.said), which goes only to the person's own Claude
+// account, never to the office.
 
 import { AreaPathSchema, type AgentFact, type AreaFact, type Facts, type FileFact, type Project, type QuestionFact, type WorkflowFact } from "@isoplan/protocol";
 import { attributionCache, createAttribution, type Attribution, type Placed } from "./attribution.js";

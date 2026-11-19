@@ -1,4 +1,4 @@
-// The local model calls behind expert offers (offers.ts): whether a person's message corrected the
+// The `claude -p` calls behind expert offers (offers.ts): whether a person's message corrected the
 // agent, and an expert's draft. Each runs as the naming call does (naming.ts):
 //
 //   claude -p --no-session-persistence --tools "" --setting-sources "" NO_HOOKS --strict-mcp-config
@@ -7,8 +7,9 @@
 // with its input on stdin: no tools, no MCP servers, no settings file (so no plugin loads in it), no
 // hook (NO_HOOKS), never saved, hidden, in the OS's temp folder, so no project's CLAUDE.md loads.
 // One that takes longer than runner.json's `expertOffers.timeoutSeconds` is ended with its process
-// tree. Nothing it is given leaves the machine: the caller scans the draft for secrets before
-// anything of it is sent.
+// tree. It runs on the person's own Claude account, so what the draft and the correction check are
+// given goes only to that account, never to the office (ADR 0004 counts that as staying on the
+// machine); the caller scans the draft for secrets before anything of it is sent to the office.
 //
 // - The check is given the agent's reply and the person's next message, and answers YES or NO.
 // - The draft is given the repo's name, the folder, its files' names, the start of a few of them
@@ -30,7 +31,7 @@ export interface Draft {
   proof: { question: string; answer: string };
 }
 
-/** What a draft is made from: none of it leaves the machine. */
+/** What a draft is made from: it goes only to the person's own Claude account, never to the office. */
 export interface DraftInput {
   project: Project;
   /** The folder, relative to the repo's root. */
@@ -96,7 +97,7 @@ export function draftFrom(text: string): Draft | null {
   return { key, subject, proof: { question, answer } };
 }
 
-/** The check's input: the agent's reply, then the person's message. */
+/** The check's input: the agent's reply, then the person's message. It goes only to the person's own Claude account, never to the office. */
 export const correctionInput = (text: string, reply: string | null) => `The agent's reply:\n${reply ?? "(none)"}\n\nThe person's next message:\n${text}`;
 
 /** The draft's input. */

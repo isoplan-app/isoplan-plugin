@@ -12,13 +12,17 @@
 //   folders that pass, the deepest is offered. Never one the session was offered, or one inside or
 //   above it; never one the person dismissed in any office (`offer-dismissals`: until its time, or
 //   for good), nor one inside it; and never one an expert on this computer covers, by its file's
-//   areas: a folder or glob whose part before the first wildcard is the folder or above it. The
-//   office checks other computers' experts itself. A folder whose draft couldn't be made, and the
-//   folders inside and above it, wait RETRY_MS for that session before one is tried again. Which
-//   sessions and folders were offered, the offers and the experts being made are kept in
-//   <claude dir>/isoplan/runner/offers.json, the first two for `rememberDays`.
-// - The draft: a local model call with no tools and no hooks (offer-model.ts, prompts/expert-draft.md,
-//   `draftModel`) writes the expert's key, subject and proof question with its answer, from the
+//   areas (the protocol's areaCovers, the rule the office uses too). The office checks other
+//   computers' experts itself. A folder whose draft couldn't be made, and the folders inside and
+//   above it, wait RETRY_MS for that session before one is tried again, a restart included. Which
+//   sessions and folders were offered, the folders waiting, the offers and the experts being made
+//   are kept in <claude dir>/isoplan/runner/offers.json, the first two for `rememberDays`. One that
+//   can't be read as this runner writes it is logged and moved aside (offers.json.unreadable-<ms>),
+//   and offering starts again from nothing. While runner.json can't be read, each pass logs it and
+//   the next tries again.
+// - The draft: a `claude -p` call with no tools and no hooks (offer-model.ts, prompts/expert-draft.md,
+//   `draftModel`), on the person's own Claude account: what it is given goes only to that account,
+//   never to the office. It writes the expert's key, subject and proof question with its answer, from the
 //   names of the folder's files (in the session's checkout, at most MAX_FILES), the start of the
 //   first few that read as text (EXCERPT_FILES, EXCERPT_CHARS each), which its proof is taken
 //   from, and what the session said there. Its area is the folder alone. The whole draft, its
@@ -42,28 +46,37 @@
 //   on the next, which the office takes as the same offer.
 // - While an offer is open, the session that showed the need is told through its hooks module, if
 //   it is on this computer (lines.ts ExpertOfferLine), and again each time a hooks module connects
-//   for it; and when the offer ends. Made in one office, it is withdrawn from the others, and the
-//   session is told the expert is ready (ExpertReadyLine), once, by the next hooks module to connect
+//   for it; and when the offer ends. Made or dismissed in one office, it is withdrawn from the
+//   others; made, the session is told the expert is ready (ExpertReadyLine), once, by the next hooks module to connect
 //   when none is now. The open offers of each session are also in
 //   <claude dir>/isoplan/offers/<session>.json, `{ "offers": ExpertOfferLine[] }`, for
 //   /isoplan:expert; the file goes when none is open.
 // - Make expert (`make-expert`), only for this runner's own person (`by`): it finds this computer's
-//   checkout of the repo as New session finds folders (repo-folders.ts); with none, or an expert of
-//   that name here already, making fails at once, saying why. Else it writes experts/<key>.json,
-//   whole or not at all, which the experts' watcher picks up (experts.ts), and follows the expert's
-//   state.json (expert-state.ts) every `pollMs`, saying each step (`expert-making`): cloning (its
-//   own clone), grounding, proof, then ready or failed, within MAKING_LIMIT_MS. A runner started
-//   again goes on following the makings it had under way, on their requests; a make-expert for the
-//   same offer and key as one under way, as the office sends once that runner is back, takes it
-//   over.
-// - Whether the person's message corrected the agent (`corrected`) is a local model's word too
-//   (prompts/correction.md, `draftModel`), one call at a time and at most `checksPerHour`; until it
-//   comes the message counts nothing, and it is asked about again on a later pass.
+//   checkout of the repo as New session finds folders (repo-folders.ts). With none, it clones the
+//   repo for the expert alone into Isoplan's own hidden folder (isoplan-clone.ts, as a hidden start
+//   does; never into the person's folders), from https://<project id>.git, saying `cloning` while
+//   it runs; a repo with no remote, or a clone git refuses, fails making with git's reason. An
+//   expert of that name here already fails it at once, saying why. Else it writes
+//   experts/<key>.json, naming the checkout or the clone as its `repo`, whole or not at all, which
+//   the experts' watcher picks up (experts.ts), and follows the expert's state.json
+//   (expert-state.ts) every `pollMs`, saying each step (`expert-making`): cloning (its own clone),
+//   grounding, proof, then ready or failed, within MAKING_LIMIT_MS. A making that fails after
+//   writing the file removes it, so the watcher stops that expert and its listing drops it; a
+//   make-expert of the same key after it starts fresh, once that expert has stopped (CLEARED_MS at
+//   most). A making stays in offers.json until its last state went on a live connection: a runner
+//   started again sends a last state that hadn't gone, and goes on following the makings it had
+//   under way, on their requests; a make-expert for the same offer and key as one under way, as the
+//   office sends once that runner is back, takes it over.
+// - Whether the person's message corrected the agent (`corrected`) is a `claude -p` call's word too
+//   (prompts/correction.md, `draftModel`), on the person's own Claude account, never the office's:
+//   one call at a time and at most `checksPerHour`; until it comes the message counts nothing, and
+//   each later pass asks again, so a check that couldn't run is tried again.
 
 import { randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import {
+  areaCovers,
   expertDisplayName,
   ExpertOfferMessageSchema,
   PROTOCOL_VERSION,
@@ -135,6 +148,8 @@ export interface OffersOptions {
   projectOf: (folder: string) => Promise<string | null>;
   /** This computer's checkout of `project`, as the office at `index` takes it (repo-folders.ts); null when there is none. */
   checkout: (index: number, project: Project) => Promise<string | null>;
+  /** Isoplan's own hidden clone of `project` (an id), made from `url` or fetched (isoplan-clone.ts): its folder, or why there is none, with git's own words when git failed. */
+  clone: (url: string, project: string) => Promise<string | { problem: string; reason?: string }>;
   /** The session's hooks module, while one is connected. */
   hooked: (bare: string) => { send(line: DataLayerLine): void } | null;
   log: (text: string) => void;
@@ -173,6 +188,8 @@ export const MAKING_LIMIT_MS = 60 * 60000;
 export const KEPT_MS = 5000;
 /** How long a folder whose draft couldn't be made waits, for that session, before it is tried again. */
 export const RETRY_MS = 60 * 60000;
+/** How long a make of a key whose making failed here waits for the expert it left to stop: two of the experts' watcher's looks, and more. */
+export const CLEARED_MS = 60000;
 // The most messages waiting for the correction check, and verdicts remembered.
 const MAX_CHECKS_WAITING = 50;
 const MAX_VERDICTS = 1000;
@@ -217,15 +234,8 @@ const near = (a: string, b: string) => within(a, b) || within(b, a);
 export const dismissed = (list: readonly OfferDismissal[], project: string, folder: string, now: number) =>
   list.some((d) => d.project.toLowerCase() === project && within(folder, d.folder) && (d.forever === true || Date.parse(d.until ?? "") > now));
 
-/** Whether an expert's areas cover `folder`: one whose part before its first wildcard is the folder or above it. */
-export function covers(areas: readonly string[], folder: string): boolean {
-  return areas.some((a) => {
-    const parts = a.split("/");
-    const wild = parts.findIndex((p) => /[*?[\]{}]/.test(p));
-    const prefix = (wild < 0 ? parts : parts.slice(0, wild)).join("/") || ".";
-    return within(folder, prefix);
-  });
-}
+/** The address Isoplan's own clone of a project is made from where this computer has no checkout: https, from its id; null for a repo with no remote. */
+export const cloneUrl = (project: string) => (project.startsWith("local:") ? null : `https://${project}.git`);
 
 /** The files under `folder` of `checkout`, relative to it, by name, at most `max`; dot entries and node_modules left out. */
 export async function folderFiles(checkout: string, folder: string, max = MAX_FILES): Promise<string[]> {
@@ -309,8 +319,10 @@ interface Saved {
   /** Each session's folders offered, and when. */
   offered: { session: string; project: string; folder: string; at: number }[];
   offers: OfferRecord[];
-  /** The experts being made here, until each is ready or failed, by the office the request came from. */
-  makings: { request: string; offer: string; key: string; since: number; server: string }[];
+  /** The experts being made here, by the office the request came from, until their last state, ready or failed, went to it. */
+  makings: { request: string; offer: string; key: string; since: number; server: string; state?: "ready" | "failed"; detail?: string }[];
+  /** Folders whose draft couldn't be made, by session, until they may be tried again. */
+  held: { session: string; project: string; folder: string; until: number }[];
 }
 
 /** An expert being made here. */
@@ -324,6 +336,8 @@ interface Making {
   detail?: string;
   /** The state last sent on the office's connection. */
   sent: string | null;
+  /** Whether this making wrote its expert file, which goes again if it fails. */
+  wrote: boolean;
   timer: ReturnType<typeof setTimeout> | null;
 }
 
@@ -335,7 +349,7 @@ export function createOffers(o: OffersOptions): Offers {
   const sessionFile = (bare: string) => path.join(o.isoplanDir, "offers", `${bare}.json`);
   const expertFile = (key: string) => path.join(o.isoplanDir, "experts", `${key}.json`);
   const offices = o.offices.map(() => ({ ready: false, dismissals: [] as OfferDismissal[], queue: [] as RunnerOfferMessage[] }));
-  let saved: Saved = { version: FILE_VERSION, offered: [], offers: [], makings: [] };
+  let saved: Saved = { version: FILE_VERSION, offered: [], offers: [], makings: [], held: [] };
   let started = false;
   let closed = false;
   // The latest pass of each session for each office that took it, by the session's id: which
@@ -343,8 +357,8 @@ export function createOffers(o: OffersOptions): Offers {
   const latest = new Map<string, Map<string, SessionAreas>>();
   const busy = new Set<string>(); // the sessions whose areas are being looked at, or drafted from
   const draftingOffers = new Set<string>(); // the draft-offer requests being drafted
-  // Folders whose draft couldn't be made, by session, until they may be tried again; in memory only.
-  let held: { session: string; project: string; folder: string; until: number }[] = [];
+  // The keys whose expert file a failed making removed, until the experts' watcher has stopped that expert.
+  const cleared = new Set<string>();
   // The offers sent to an office and not yet kept there, by `<id>\n<server>`: each one's wait.
   const keeping = new Map<string, ReturnType<typeof setTimeout>>();
   const makings = new Map<string, Making>();
@@ -465,7 +479,7 @@ export function createOffers(o: OffersOptions): Offers {
   const expertProjects = new Map<string, { at: number; project: Promise<string | null> }>();
   async function coveredHere(project: string, folder: string) {
     for (const e of o.experts()) {
-      if (!e.areas?.length || !covers(e.areas, folder)) continue;
+      if (!e.areas?.length || !areaCovers(e.areas, folder)) continue;
       let hit = expertProjects.get(e.repo);
       if (!hit || now() - hit.at > PROJECT_MS) expertProjects.set(e.repo, (hit = { at: now(), project: o.projectOf(e.repo).catch(() => null) }));
       if ((await hit.project) === project) return true;
@@ -475,7 +489,7 @@ export function createOffers(o: OffersOptions): Offers {
 
   const offeredNear = (session: string, project: string, folder: string) => saved.offered.some((x) => x.session === session && x.project === project && near(folder, x.folder));
   const heldNear = (session: string, project: string, folder: string, at: number) =>
-    (held = held.filter((x) => x.until > at)).some((x) => x.session === session && x.project === project && near(folder, x.folder));
+    (saved.held = saved.held.filter((x) => x.until > at)).some((x) => x.session === session && x.project === project && near(folder, x.folder));
 
   // The repos an office's pass of a session may name, lower-cased: the session's own as it says
   // hello there, and the others its areas were let through for (report-session.ts).
@@ -576,7 +590,10 @@ export function createOffers(o: OffersOptions): Offers {
     const said = await s.said(area.project ? area.project.id : null, area.folder).catch(() => []);
     const message = await drafted({ id: randomBytes(12).toString("base64url"), scope: "session", session: s.session, project, folder: area.folder, checkout, said, why }, t);
     if (closed) return;
-    if (!message) return void held.push({ session: s.session, project: id, folder: area.folder, until: now() + RETRY_MS });
+    if (!message) {
+      saved.held.push({ session: s.session, project: id, folder: area.folder, until: now() + RETRY_MS });
+      return void save();
+    }
     saved.offered.push({ session: s.session, project: id, folder: area.folder, at });
     saved.offers.push(record(message, s.bare, new Set([s.server, ...mayTell(s.session, id)])));
     await save();
@@ -611,7 +628,7 @@ export function createOffers(o: OffersOptions): Offers {
     }
   }
 
-  // How an offer ended in one office; made there, it is withdrawn from the others. One that ended
+  // How an offer ended in one office; made or dismissed there, it is withdrawn from the others. One that ended
   // before it was kept was never shown, so its session isn't told it ended.
   function ended(index: number, m: ServerExpertOfferEndedMessage) {
     const server = o.offices[index]!.server;
@@ -625,7 +642,7 @@ export function createOffers(o: OffersOptions): Offers {
       r.made = { key: m.key, server };
       withdraw(r);
       tellReady(r);
-    }
+    } else if (m.why === "dismissed") withdraw(r);
     void save();
     writeSessionFile(r.bare);
   }
@@ -638,12 +655,17 @@ export function createOffers(o: OffersOptions): Offers {
     void save();
   }
 
-  // Sends the making's state on its office's connection once it is ready, unless it went already; a
-  // last one sent, it is done.
+  // Sends the making's state on its office's connection once it is ready, unless it went already. Its
+  // last one sent on a live connection, it is done, and only then does offers.json let it go.
   function sendMaking(m: Making) {
     const text = `${m.state}\n${m.detail ?? ""}`;
     if (m.sent !== text && offices[m.index]!.ready && o.offices[m.index]!.send({ type: "expert-making", v: PROTOCOL_VERSION, request: m.request, offer: m.offer, state: m.state, ...(m.detail && { detail: m.detail }) })) m.sent = text;
-    if (m.sent === text && done(m)) makings.delete(m.request);
+    if (m.sent !== text || !done(m)) return;
+    makings.delete(m.request);
+    if (saved.makings.some((k) => k.request === m.request)) {
+      saved.makings = saved.makings.filter((k) => k.request !== m.request);
+      void save();
+    }
   }
 
   function setMaking(m: Making, state: ExpertMakingState, detail?: string) {
@@ -654,12 +676,37 @@ export function createOffers(o: OffersOptions): Offers {
       say(`expert ${m.key}, made from offer ${m.offer}: ${state}${detail ? `: ${detail}` : ""}`);
       if (m.timer) clearTimeout(m.timer);
       m.timer = null;
-      if (saved.makings.some((k) => k.request === m.request)) {
-        saved.makings = saved.makings.filter((k) => k.request !== m.request);
+      // Kept with its last state until that went, so a runner started again sends it as it was.
+      const kept = saved.makings.find((k) => k.request === m.request);
+      if (kept) {
+        Object.assign(kept, { state, ...(detail && { detail }) });
         void save();
       }
+      if (state === "failed" && m.wrote) void clear(m.key);
     }
     sendMaking(m);
+  }
+
+  // A failed making's expert file goes, so the experts' watcher stops that expert and its listing
+  // drops it; a make of the same key may then start fresh.
+  async function clear(key: string) {
+    cleared.add(key);
+    try {
+      await fs.rm(expertFile(key), { force: true });
+      say(`removed the expert file of ${key}, whose making failed, so this computer stops hosting it`);
+    } catch (err) {
+      say(`couldn't remove the expert file ${expertFile(key)}, whose making failed: ${(err as Error).message}`);
+    }
+  }
+
+  // Whether the expert a failed making cleared has stopped here, waiting CLEARED_MS at most.
+  async function stopped(key: string) {
+    for (let waited = 0; o.experts().some((e) => e.name === key); waited += pollMs) {
+      if (closed || waited >= CLEARED_MS) return false;
+      await new Promise((r) => setTimeout(r, pollMs));
+    }
+    cleared.delete(key);
+    return true;
   }
 
   // Where the expert being made stands, from its newest generation grounded since making began (a
@@ -697,14 +744,25 @@ export function createOffers(o: OffersOptions): Offers {
       void save();
       return sendMaking(same);
     }
-    const making: Making = { index, request: m.request, offer: m.offer, key: m.key, since: now(), state: "cloning", sent: null, timer: null };
+    const making: Making = { index, request: m.request, offer: m.offer, key: m.key, since: now(), state: "cloning", sent: null, wrote: false, timer: null };
     makings.set(m.request, making);
     const fail = (detail: string) => setMaking(making, "failed", detail);
     if (m.by.id !== o.account.id) return fail("this computer's runner is someone else's, so it makes experts only for them");
+    // A key whose making failed here is free once the expert it left has stopped.
+    if (cleared.has(m.key) && !(await stopped(m.key))) return fail(`the expert named ${m.key}, whose making failed, is still stopping on this computer; try again in a minute`);
     const taken = o.experts().some((e) => e.name === m.key) || (await fs.stat(expertFile(m.key)).then(() => true, () => false));
     if (taken) return fail(`an expert named ${m.key} is already on this computer`);
-    const checkout = await o.checkout(index, m.project).catch(() => null);
-    if (!checkout) return fail(`this computer has no checkout of ${m.project.name}`);
+    let checkout = await o.checkout(index, m.project).catch(() => null);
+    if (!checkout) {
+      // For the expert alone: Isoplan's own hidden clone, never one in the person's folders.
+      const url = cloneUrl(m.project.id);
+      if (!url) return fail(`this computer has no checkout of ${m.project.name}, and its repo has no remote to clone it from`);
+      sendMaking(making);
+      const clone = await o.clone(url, m.project.id);
+      if (closed) return;
+      if (typeof clone !== "string") return fail(`this computer has no checkout of ${m.project.name}, and Isoplan's own copy of it couldn't be made: ${clone.reason ?? clone.problem}`);
+      checkout = clone;
+    }
     const t = await settings();
     const body = { version: 1, name: m.key, repo: checkout, subject: m.subject, model: m.model, promoteAtTokens: t.promoteAtTokens, proof: m.proof, areas: m.area };
     const text = JSON.stringify(body, null, 2) + "\n";
@@ -716,13 +774,15 @@ export function createOffers(o: OffersOptions): Offers {
       say(`couldn't write the expert file ${expertFile(m.key)}: ${(err as Error).message}`);
       return fail("its expert file couldn't be written on that computer");
     }
+    making.wrote = true;
     say(`wrote the expert file for ${m.key}, made from offer ${m.offer} by ${m.by.name || m.by.id}, for ${checkout}`);
     saved.makings.push({ request: m.request, offer: m.offer, key: m.key, since: making.since, server });
     void save();
     await follow(making);
   }
 
-  // The correction check, one at a time, at most checksPerHour: past that, the next waits for the
+  // The correction check, on the person's own Claude account (what it is given goes only there,
+  // never to the office), one at a time, at most checksPerHour: past that, the next waits for the
   // hour's oldest check to be an hour old.
   async function check() {
     if (checking || closed || !waiting.length) return;
@@ -759,25 +819,48 @@ export function createOffers(o: OffersOptions): Offers {
 
   return {
     async start() {
-      try {
-        const value = JSON.parse(await fs.readFile(file, "utf8")) as Saved;
-        if (value?.version === FILE_VERSION && Array.isArray(value.offered) && Array.isArray(value.offers)) saved = { ...value, makings: Array.isArray(value.makings) ? value.makings : [] };
-      } catch {
-        // None yet, or one that doesn't parse: nothing was offered.
+      const text = await fs.readFile(file, "utf8").catch((err: NodeJS.ErrnoException) => {
+        if (err.code !== "ENOENT") say(`EXPERT OFFERS: couldn't read ${file} (${err.message}), so what was offered before isn't known and may be offered again`);
+        return null;
+      });
+      if (text !== null) {
+        let value: Saved | null = null;
+        try {
+          value = JSON.parse(text) as Saved;
+        } catch {
+          // Said below, with the file moved aside.
+        }
+        if (value?.version === FILE_VERSION && Array.isArray(value.offered) && Array.isArray(value.offers)) {
+          saved = { ...value, makings: Array.isArray(value.makings) ? value.makings : [], held: Array.isArray(value.held) ? value.held : [] };
+        } else {
+          // Never overwritten in silence: it is kept beside, for whoever looks into why.
+          const aside = `${file}.unreadable-${now()}`;
+          const moved = await fs.rename(file, aside).then(
+            () => `moved to ${aside}`,
+            (err: Error) => `left where it is (${err.message})`,
+          );
+          say(`EXPERT OFFERS: ${file} isn't offers.json as this runner writes it, so it was ${moved}, and expert offers start again from nothing: folders offered before may be offered again`);
+        }
       }
       // An offer sent before the runner stopped, and not yet kept, may not have reached its office: it goes again.
       for (const r of saved.offers) for (const [server, state] of Object.entries(r.offices)) if (state === "sent") r.offices[server] = "pending";
-      forget(await settings(), now());
+      // runner.json is read again on the next pass, which forgets what is old then.
+      await settings().then(
+        (t) => forget(t, now()),
+        (err: Error) => say(`couldn't read runner.json's expertOffers as the expert offers started (${err.message}); it is read again on the next session's pass`),
+      );
       started = true;
-      // The makings under way when it stopped are followed again, on their requests; one for an
-      // office no longer listed goes.
+      // The makings under way when it stopped are followed again, on their requests, and one whose
+      // last state hadn't gone is sent as it was; one for an office no longer listed goes.
       saved.makings = saved.makings.filter((k) => indexOf(k.server) >= 0);
       for (const k of saved.makings) {
         const index = indexOf(k.server);
         if (makings.has(k.request)) continue;
-        const m: Making = { index, request: k.request, offer: k.offer, key: k.key, since: k.since, state: "cloning", sent: null, timer: null };
+        const m: Making = { index, request: k.request, offer: k.offer, key: k.key, since: k.since, state: k.state ?? "cloning", ...(k.detail && { detail: k.detail }), sent: null, wrote: true, timer: null };
         makings.set(m.request, m);
-        void follow(m).catch((err: Error) => say(`couldn't follow expert ${m.key}: ${err.message}`));
+        // A failed one's expert file goes, if it was still there, unless a later making of its key wrote it.
+        if (k.state === "failed" && !saved.makings.some((x) => x.key === k.key && !x.state)) void clear(k.key);
+        if (!k.state) void follow(m).catch((err: Error) => say(`couldn't follow expert ${m.key}: ${err.message}`));
       }
     },
 
@@ -810,10 +893,10 @@ export function createOffers(o: OffersOptions): Offers {
     corrected(key, text, reply) {
       const verdict = verdicts.get(key);
       if (verdict !== undefined) return verdict;
-      if (!closed && !waiting.some((w) => w.key === key) && waiting.length < MAX_CHECKS_WAITING) {
-        waiting.push({ key, text, reply });
-        void check().catch(orLog("check whether a message corrected the agent"));
-      }
+      if (closed) return null;
+      if (!waiting.some((w) => w.key === key) && waiting.length < MAX_CHECKS_WAITING) waiting.push({ key, text, reply });
+      // Each pass looks again, so a check that couldn't run (runner.json unreadable, say) is tried again.
+      if (waiting.length) void check().catch(orLog("check whether a message corrected the agent"));
       return null;
     },
 

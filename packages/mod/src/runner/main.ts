@@ -600,6 +600,8 @@ async function worker(): Promise<number> {
       checkMs: first.approvedRefreshMinutes * 60000,
     }),
   );
+  // One for hidden starts and experts made from offers alike, so one project is never cloned twice at once.
+  const isoplanClone = createIsoplanClones({ git, claudeDir, clonesFolder: clones.folder, clonesFolders: clones.folders, timeoutMs: gitMs, log });
   const drive: Driver = createDriver({
     claudeDir,
     account,
@@ -614,7 +616,7 @@ async function worker(): Promise<number> {
     // transcript is written again (resumed in a terminal, say), or its hooks module connects.
     removed: (session) => reporting.end(session.slice(session.indexOf(":") + 1), REMOVED, true),
     projectOf: async (folder) => (await homeIo.projectOf(await homeIo.resolve(folder), folder)).id,
-    isoplanClone: createIsoplanClones({ git, claudeDir, clonesFolder: clones.folder, clonesFolders: clones.folders, timeoutMs: gitMs, log }),
+    isoplanClone,
     // A start that opens outside the floor (#85), as a take opens its session.
     elsewhere: (start, bin) =>
       startWhere(start, bin, {
@@ -683,6 +685,8 @@ async function worker(): Promise<number> {
     projectOf: async (folder) => (await homeIo.projectOf(await homeIo.resolve(folder), folder)).id.toLowerCase(),
     // This computer's checkout of the repo, as New session finds one for the office (repo-folders.ts).
     checkout: async (index, project) => (await repoLists[index]!(false)).find((r) => r.project === project.id.toLowerCase())?.folders[0] ?? null,
+    // With none, Isoplan's own hidden clone, as a hidden start makes it.
+    clone: (url, project) => isoplanClone({ url }, project),
     hooked: (bare) => pipe?.hooked(bare) ?? null,
     log,
   });
