@@ -6466,9 +6466,10 @@ const Area = array(AreaPathSchema).min(1).max(20);
 * their threshold, which dismissals name. `scope`: `session`, from that session's own signals, or
 * `office`, in answer to a `draft-offer`, whose `request` is then its `id`. The draft: `key`, the
 * expert's name (shown as `expertDisplayName(key)`), `subject`, `area` and `proof`, as the runner's
-* local model wrote them and the secret check passed them. `why`, the signals that passed: `share`,
-* the share of the session's context spent reading and searching the folder (0 to 1); `tokens`,
-* those tokens; `minutes`, the time spent there; `corrections`, the person's corrections there. `at`:
+* local model wrote them and the secret check passed them. `why`, the signals that passed their
+* thresholds, each other one 0: `share`, the share of the session's context spent reading and
+* searching the folder (0 to 1), and `tokens`, those tokens, which are one signal; `minutes`, the time
+* spent there; `corrections`, the person's corrections there. `at`:
 * when it was offered. Of its text, only these leave the machine, under ADR 0004's case for an expert
 * offer's draft.
 */
@@ -8037,7 +8038,7 @@ const getJson = async (url, headers) => {
 };
 /** While the machine waits to be paired the list is asked for again this soon, and after a failure this soon. */
 const PAIR_POLL_MS = 5e3;
-const RETRY_MS$1 = 3e4;
+const RETRY_MS$2 = 3e4;
 /** A rename the file system refuses for a moment (a scanner holding the file, on Windows) is tried this often. */
 const RENAME_TRIES = 5;
 const isList = (value) => {
@@ -8109,7 +8110,7 @@ function createApproved({ server, file, pairing, refreshMs, maxAgeMs, log, get =
 			tell(`couldn't read which repos the office takes: ${String(err?.message ?? err)}`);
 			problem = "unreachable";
 			failedAt = now();
-			nextAt = failedAt + RETRY_MS$1;
+			nextAt = failedAt + RETRY_MS$2;
 			return "unreachable";
 		}
 		if (token === null) {
@@ -8168,7 +8169,7 @@ function createApproved({ server, file, pairing, refreshMs, maxAgeMs, log, get =
 		}
 		tell(`couldn't read which repos the office takes from ${server}: ${answer.status ? `it answered ${answer.status}` : String(answer.body)}`);
 		problem = "unreachable";
-		nextAt = at + RETRY_MS$1;
+		nextAt = at + RETRY_MS$2;
 		return "unreachable";
 	}
 	function run(force, ask = false) {
@@ -8654,7 +8655,7 @@ async function commandHome(folder, io, list) {
 /** Where the answers are kept. */
 const remoteNamesPath = (claudeDir) => path.join(claudeDir, "isoplan", "remote-names.json");
 const ANSWER_MS$2 = 864e5;
-const RETRY_MS = 3e5;
+const RETRY_MS$1 = 3e5;
 const ASK_TIMEOUT_MS = 1e4;
 /**
 * The repos' current names. With `ask`, for a long-lived process, GitHub is asked as above; without
@@ -8664,7 +8665,7 @@ function remoteNames({ file, ask = null, now = Date.now }) {
 	let entries = null;
 	const asking = /* @__PURE__ */ new Map();
 	const load = () => entries ??= readEntries(file);
-	const stale = (e) => now() - e.at >= (e.failures ? Math.min(ANSWER_MS$2, RETRY_MS * 2 ** (e.failures - 1)) : ANSWER_MS$2);
+	const stale = (e) => now() - e.at >= (e.failures ? Math.min(ANSWER_MS$2, RETRY_MS$1 * 2 ** (e.failures - 1)) : ANSWER_MS$2);
 	const refresh = (id, owner, repo) => {
 		const running = asking.get(id);
 		if (running) return running;
@@ -11262,7 +11263,6 @@ function foldLine(st, line, home, isDir) {
 		if (typeof content === "string") readNotifications(st, content, at);
 		else if (Array.isArray(content)) {
 			const down = turnedDown(ev, content, st.area.names);
-			const ran = !down && ev.toolDenialKind === void 0;
 			for (const c of content) {
 				if (!c || typeof c !== "object") continue;
 				if (c.type === "text" && typeof c.text === "string") readNotifications(st, c.text, at);
@@ -11277,7 +11277,7 @@ function foldLine(st, line, home, isDir) {
 						...launch,
 						at
 					});
-					areaResult(st.area, c, at, ran);
+					areaResult(st.area, c, at, ev.toolDenialKind === void 0 && !refused(c, st.area.names));
 				}
 			}
 			if (down) {
@@ -11554,10 +11554,11 @@ function areaResult(a, c, at, ran) {
 	t.chars += resultText$1(c.content).length;
 	if (at > call.at) t.ms += at - call.at;
 }
+const refused = (c, names) => c.is_error === true && resultText$1(c.content).includes(TURNED_DOWN) && !(names.get(c.tool_use_id) ?? "").startsWith("mcp__");
 function turnedDown(ev, content, names) {
 	if (!content.some((c) => c && c.type === "tool_result")) return false;
 	if (typeof ev.toolDenialKind === "string") return ev.toolDenialKind === "user-rejected";
-	return content.some((c) => c && c.type === "tool_result" && c.is_error === true && resultText$1(c.content).includes(TURNED_DOWN) && !(names.get(c.tool_use_id) ?? "").startsWith("mcp__"));
+	return content.some((c) => c && c.type === "tool_result" && refused(c, names));
 }
 function areaPrompt(st, ev, content, at) {
 	const a = st.area;
@@ -16237,6 +16238,9 @@ function draftInput(d) {
 		`Its files (${d.files.length}):`,
 		...d.files.length ? d.files : ["(none listed)"],
 		"",
+		"The start of some of them:",
+		...d.excerpts.map((e) => `=== ${e.file}\n${e.text}`),
+		"",
 		"What the session said while it worked there, oldest first:",
 		d.said.length ? d.said.join("\n---\n") : "(nothing kept)"
 	].join("\n");
@@ -16572,8 +16576,11 @@ function fingerprint(file) {
 		file.window ?? null
 	])).digest("hex");
 }
+const EXCERPT_CHARS = 3e3;
 /** How long making an expert may take before it is said to have failed. */
 const MAKING_LIMIT_MS = 36e5;
+/** How long a folder whose draft couldn't be made waits, for that session, before it is tried again. */
+const RETRY_MS = 36e5;
 const MAX_CHECKS_WAITING = 50;
 const MAX_VERDICTS = 1e3;
 const MAX_SESSIONS = 200;
@@ -16602,7 +16609,18 @@ function signalsOf(area, window) {
 }
 /** Whether a folder's signals pass any of their thresholds. */
 const passes = (why, t) => why.share >= t.contextShare || why.tokens >= t.tokens || why.minutes >= t.minutes || why.corrections >= t.corrections;
+/** The signals an offer gives (ADR 0004): those that passed their thresholds, each other one 0. Share and tokens are one signal, what reading and searching there took. */
+function passed(why, t) {
+	const spent = why.share >= t.contextShare || why.tokens >= t.tokens;
+	return {
+		share: spent ? why.share : 0,
+		tokens: spent ? why.tokens : 0,
+		minutes: why.minutes >= t.minutes ? why.minutes : 0,
+		corrections: why.corrections >= t.corrections ? why.corrections : 0
+	};
+}
 const within$1 = (folder, other) => other === "." || folder === other || folder.startsWith(other + "/");
+const near = (a, b) => within$1(a, b) || within$1(b, a);
 /** Whether the person dismissed `folder` of `project` (a lower-cased id), or a folder it is inside, as of `now`. */
 const dismissed = (list, project, folder, now) => list.some((d) => d.project.toLowerCase() === project && within$1(folder, d.folder) && (d.forever === true || Date.parse(d.until ?? "") > now));
 /** Whether an expert's areas cover `folder`: one whose part before its first wildcard is the folder or above it. */
@@ -16630,6 +16648,27 @@ async function folderFiles(checkout, folder, max = 200) {
 	}
 	return out;
 }
+/** The start of the first `max` of `files` (relative to `checkout`) that read as text, each at most EXCERPT_CHARS; an empty file, or one with a NUL byte, is left out. */
+async function folderExcerpts(checkout, files, max = 6) {
+	const out = [];
+	for (const file of files) {
+		if (out.length >= max) break;
+		const handle = await fs.open(path.join(checkout, file), "r").catch(() => null);
+		if (!handle) continue;
+		try {
+			const { bytesRead, buffer } = await handle.read(Buffer.alloc(EXCERPT_CHARS * 4), 0, EXCERPT_CHARS * 4, 0);
+			const bytes = buffer.subarray(0, bytesRead);
+			const text = bytes.includes(0) ? "" : bytes.toString("utf8").slice(0, EXCERPT_CHARS).trim();
+			if (text) out.push({
+				file,
+				text
+			});
+		} catch {} finally {
+			await handle.close().catch(() => {});
+		}
+	}
+	return out;
+}
 async function writeWhole$1(file, text) {
 	await fs.mkdir(path.dirname(file), { recursive: true });
 	const temp = `${file}.${process.pid}.tmp`;
@@ -16648,6 +16687,7 @@ async function writeWhole$1(file, text) {
 function createOffers(o) {
 	const now = o.now ?? Date.now;
 	const pollMs = o.pollMs ?? 2e3;
+	const keptMs = o.keptMs ?? 5e3;
 	const file = path.join(o.isoplanDir, "runner", "offers.json");
 	const sessionFile = (bare) => path.join(o.isoplanDir, "offers", `${bare}.json`);
 	const expertFile = (key) => path.join(o.isoplanDir, "experts", `${key}.json`);
@@ -16659,14 +16699,16 @@ function createOffers(o) {
 	let saved = {
 		version: FILE_VERSION,
 		offered: [],
-		offers: []
+		offers: [],
+		makings: []
 	};
 	let started = false;
 	let closed = false;
 	const latest = /* @__PURE__ */ new Map();
-	const takers = /* @__PURE__ */ new Map();
 	const busy = /* @__PURE__ */ new Set();
-	let drafting = 0;
+	const draftingOffers = /* @__PURE__ */ new Set();
+	let held = [];
+	const keeping = /* @__PURE__ */ new Map();
 	const makings = /* @__PURE__ */ new Map();
 	const verdicts = /* @__PURE__ */ new Map();
 	const waiting = [];
@@ -16724,15 +16766,57 @@ function createOffers(o) {
 		while (st.queue.length && office.send(st.queue[0])) st.queue.shift();
 		let changed = false;
 		for (const r of saved.offers) {
-			if (r.offices[office.server] !== "pending" || !office.send(r.message)) continue;
-			r.offices[office.server] = "open";
+			if (r.offices[office.server] !== "pending") continue;
+			if (dismissed(st.dismissals, r.project.id.toLowerCase(), r.folder, now())) {
+				r.offices[office.server] = "ended";
+				changed = true;
+				say(`the expert offer ${r.id} on ${r.folder} of ${r.project.name} isn't sent to ${office.server}, where its person dismissed that folder, and is withdrawn wherever else it went`);
+				withdraw(r);
+				writeSessionFile(r.bare);
+				continue;
+			}
+			if (!office.send(r.message)) continue;
+			r.offices[office.server] = "sent";
 			changed = true;
 			say(`offered an expert on ${r.folder} of ${r.project.name} (${r.key}) to ${office.server}, as ${r.id}`);
-			tell(r, lineOf(r, office.server));
-			writeSessionFile(r.bare);
+			keep(r, office.server);
 		}
 		if (changed) save();
 		for (const m of makings.values()) if (m.index === index) sendMaking(m);
+	}
+	function keep(r, server) {
+		const k = `${r.id}\n${server}`;
+		clearTimeout(keeping.get(k));
+		const timer = setTimeout(() => {
+			keeping.delete(k);
+			if (closed || r.offices[server] !== "sent") return;
+			r.offices[server] = "open";
+			tell(r, lineOf(r, server));
+			writeSessionFile(r.bare);
+			save();
+		}, keptMs);
+		timer.unref?.();
+		keeping.set(k, timer);
+	}
+	function withdraw(r) {
+		for (const [other, state] of Object.entries(r.offices)) {
+			if (state === "ended") continue;
+			r.offices[other] = "ended";
+			const i = indexOf(other);
+			if (state === "pending" || i < 0) continue;
+			sendOrQueue(i, {
+				type: "expert-offer-ended",
+				v: 1,
+				id: r.id,
+				why: "withdrawn"
+			});
+			if (state === "open") tell(r, {
+				type: "expert-offer-ended",
+				server: other,
+				id: r.id,
+				why: "withdrawn"
+			});
+		}
 	}
 	function sendOrQueue(index, message) {
 		const st = offices[index];
@@ -16751,7 +16835,15 @@ function createOffers(o) {
 		}
 		return false;
 	}
-	const offeredNear = (session, project, folder) => saved.offered.some((x) => x.session === session && x.project === project && (within$1(folder, x.folder) || within$1(x.folder, folder)));
+	const offeredNear = (session, project, folder) => saved.offered.some((x) => x.session === session && x.project === project && near(folder, x.folder));
+	const heldNear = (session, project, folder, at) => (held = held.filter((x) => x.until > at)).some((x) => x.session === session && x.project === project && near(folder, x.folder));
+	const names = (s) => new Set([s.project, ...s.areas.map((a) => a.project ?? s.project)].map((p) => p.id.toLowerCase()));
+	const mayTell = (session, project) => [...latest.get(session)?.values() ?? []].filter((p) => names(p).has(project)).map((p) => p.server);
+	function forget(t, at) {
+		const keep = t.rememberDays * DAY_MS$1;
+		saved.offered = saved.offered.filter((x) => at - x.at < keep);
+		saved.offers = saved.offers.filter((r) => at - r.at < keep);
+	}
 	const windowOf = (s) => {
 		if (s.window) return s.window;
 		const w = s.model ? windowFor(s.model) : null;
@@ -16763,56 +16855,63 @@ function createOffers(o) {
 			say(`no expert is offered on ${where}: this computer has no checkout of the repo to draft it from`);
 			return null;
 		}
-		drafting++;
-		try {
-			const files = await folderFiles(a.checkout, a.folder);
-			const draft = await o.draft({
-				project: a.project,
-				folder: a.folder,
-				files,
-				said: a.said
-			}, t);
-			if (!draft) {
-				say(`no expert is offered on ${where}: no usable draft came`);
-				return null;
-			}
-			const matched = await o.scan([
-				draft.key,
-				draft.subject,
-				draft.proof.question,
-				draft.proof.answer
-			].join("\n"));
-			if (matched) {
-				say(`no expert is offered on ${where}: its draft matches the secret pattern "${matched}"`);
-				return null;
-			}
-			const message = {
-				type: "expert-offer",
-				v: 1,
-				id: a.id,
-				session: a.session,
-				project: {
-					id: a.project.id,
-					name: a.project.name
-				},
-				folder: a.folder,
-				scope: a.scope,
-				key: draft.key,
-				subject: draft.subject,
-				area: [a.folder],
-				proof: draft.proof,
-				why: a.why,
-				at: new Date(now()).toISOString()
-			};
-			const parsed = ExpertOfferMessageSchema.safeParse(message);
-			if (!parsed.success) {
-				say(`no expert is offered on ${where}: its offer doesn't fit the protocol: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
-				return null;
-			}
-			return parsed.data;
-		} finally {
-			drafting--;
+		const named = await o.scan(a.folder);
+		if (named) {
+			say(`no expert is offered on a folder of ${a.project.name}: its path matches the secret pattern "${named}"`);
+			return null;
 		}
+		const files = await folderFiles(a.checkout, a.folder);
+		const excerpts = await folderExcerpts(a.checkout, files);
+		if (!excerpts.length) {
+			say(`no expert is offered on ${where}: none of its files could be read to draft it from`);
+			return null;
+		}
+		const draft = await o.draft({
+			project: a.project,
+			folder: a.folder,
+			files,
+			excerpts,
+			said: a.said
+		}, t);
+		if (!draft) {
+			say(`no expert is offered on ${where}: no usable draft came`);
+			return null;
+		}
+		const matched = await o.scan([
+			a.folder,
+			draft.key,
+			draft.subject,
+			draft.proof.question,
+			draft.proof.answer
+		].join("\n"));
+		if (matched) {
+			say(`no expert is offered on ${where}: its draft matches the secret pattern "${matched}"`);
+			return null;
+		}
+		const message = {
+			type: "expert-offer",
+			v: 1,
+			id: a.id,
+			session: a.session,
+			project: {
+				id: a.project.id,
+				name: a.project.name
+			},
+			folder: a.folder,
+			scope: a.scope,
+			key: draft.key,
+			subject: draft.subject,
+			area: [a.folder],
+			proof: draft.proof,
+			why: passed(a.why, t),
+			at: new Date(now()).toISOString()
+		};
+		const parsed = ExpertOfferMessageSchema.safeParse(message);
+		if (!parsed.success) {
+			say(`no expert is offered on ${where}: its offer doesn't fit the protocol: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
+			return null;
+		}
+		return parsed.data;
 	}
 	const record = (message, bare, servers) => ({
 		id: message.id,
@@ -16827,15 +16926,18 @@ function createOffers(o) {
 		offices: Object.fromEntries([...servers].map((s) => [s, "pending"]))
 	});
 	async function consider(s) {
+		const index = indexOf(s.server);
+		if (!offices[index].ready) return;
 		const t = await settings();
 		const window = windowOf(s);
 		const at = now();
+		forget(t, at);
 		const candidates = [];
 		for (const area of s.areas) {
 			const project = area.project ?? s.project;
 			const id = project.id.toLowerCase();
 			const why = signalsOf(area, window);
-			if (!passes(why, t) || offeredNear(s.session, id, area.folder)) continue;
+			if (!passes(why, t) || offeredNear(s.session, id, area.folder) || heldNear(s.session, id, area.folder, at)) continue;
 			if (offices.some((f) => dismissed(f.dismissals, id, area.folder, at))) continue;
 			if (await coveredHere(id, area.folder)) continue;
 			candidates.push({
@@ -16848,14 +16950,7 @@ function createOffers(o) {
 		const best = candidates.sort((a, b) => depth(b.area.folder) - depth(a.area.folder) || b.area.tokens - a.area.tokens)[0];
 		if (!best) return;
 		const { area, project, why } = best;
-		saved.offered.push({
-			session: s.session,
-			project: project.id.toLowerCase(),
-			folder: area.folder,
-			at
-		});
-		save();
-		const index = indexOf(s.server);
+		const id = project.id.toLowerCase();
 		const checkout = area.project ? await o.checkout(index, project).catch(() => null) : s.checkout;
 		const said = await s.said(area.project ? area.project.id : null, area.folder).catch(() => []);
 		const message = await drafted({
@@ -16868,54 +16963,71 @@ function createOffers(o) {
 			said,
 			why
 		}, t);
-		if (!message || closed) return;
-		saved.offers.push(record(message, s.bare, takers.get(s.session) ?? [s.server]));
+		if (closed) return;
+		if (!message) return void held.push({
+			session: s.session,
+			project: id,
+			folder: area.folder,
+			until: now() + RETRY_MS
+		});
+		saved.offered.push({
+			session: s.session,
+			project: id,
+			folder: area.folder,
+			at
+		});
+		saved.offers.push(record(message, s.bare, /* @__PURE__ */ new Set([s.server, ...mayTell(s.session, id)])));
 		await save();
 		o.offices.forEach((_, i) => flush(i));
 	}
 	async function draftOffer(index, m) {
 		const server = o.offices[index].server;
-		if (saved.offers.some((r) => r.id === m.request)) return;
-		const project = m.project.id.toLowerCase();
-		const s = m.sessions.map((id) => latest.get(id)).find((x) => !!x);
-		const area = s?.areas.find((a) => a.folder === m.folder && (a.project ?? s.project).id.toLowerCase() === project);
-		const own = !!s && s.project.id.toLowerCase() === project && !area?.project;
-		const checkout = own ? s.checkout : await o.checkout(index, m.project).catch(() => null);
-		const said = s ? await s.said(own ? null : m.project.id, m.folder).catch(() => []) : [];
-		const why = area && s ? signalsOf(area, windowOf(s)) : {
-			share: 0,
-			tokens: 0,
-			minutes: 0,
-			corrections: 0
-		};
-		const t = await settings();
-		const message = await drafted({
-			id: m.request,
-			scope: "office",
-			session: m.sessions[0],
-			project: m.project,
-			folder: m.folder,
-			checkout,
-			said,
-			why
-		}, t);
-		if (closed) return;
-		if (!message) return sendOrQueue(index, {
-			type: "expert-offer-ended",
-			v: 1,
-			id: m.request,
-			why: "no-draft"
-		});
-		const first = m.sessions[0];
-		saved.offered.push({
-			session: first,
-			project,
-			folder: m.folder,
-			at: now()
-		});
-		saved.offers.push(record(message, first.startsWith("claude-code:") ? first.slice(12) : null, [server]));
-		await save();
-		flush(index);
+		if (draftingOffers.has(m.request) || saved.offers.some((r) => r.id === m.request)) return;
+		draftingOffers.add(m.request);
+		try {
+			const project = m.project.id.toLowerCase();
+			const s = m.sessions.map((id) => latest.get(id)?.get(server)).find((x) => !!x);
+			const area = s?.areas.find((a) => a.folder === m.folder && (a.project ?? s.project).id.toLowerCase() === project);
+			const own = !!s && s.project.id.toLowerCase() === project && !area?.project;
+			const checkout = own ? s.checkout : await o.checkout(index, m.project).catch(() => null);
+			const said = s ? await s.said(own ? null : m.project.id, m.folder).catch(() => []) : [];
+			const why = area && s ? signalsOf(area, windowOf(s)) : {
+				share: 0,
+				tokens: 0,
+				minutes: 0,
+				corrections: 0
+			};
+			const t = await settings();
+			const message = await drafted({
+				id: m.request,
+				scope: "office",
+				session: m.sessions[0],
+				project: m.project,
+				folder: m.folder,
+				checkout,
+				said,
+				why
+			}, t);
+			if (closed) return;
+			if (!message) return sendOrQueue(index, {
+				type: "expert-offer-ended",
+				v: 1,
+				id: m.request,
+				why: "no-draft"
+			});
+			const first = m.sessions[0];
+			saved.offered.push({
+				session: first,
+				project,
+				folder: m.folder,
+				at: now()
+			});
+			saved.offers.push(record(message, first.startsWith("claude-code:") ? first.slice(12) : null, [server]));
+			await save();
+			flush(index);
+		} finally {
+			draftingOffers.delete(m.request);
+		}
 	}
 	function ended(index, m) {
 		const server = o.offices[index].server;
@@ -16935,25 +17047,7 @@ function createOffers(o) {
 				key: m.key,
 				server
 			};
-			for (const [other, state] of Object.entries(r.offices)) {
-				if (state === "ended") continue;
-				r.offices[other] = "ended";
-				const i = indexOf(other);
-				if (state === "open" && i >= 0) {
-					sendOrQueue(i, {
-						type: "expert-offer-ended",
-						v: 1,
-						id: r.id,
-						why: "withdrawn"
-					});
-					tell(r, {
-						type: "expert-offer-ended",
-						server: other,
-						id: r.id,
-						why: "withdrawn"
-					});
-				}
-			}
+			withdraw(r);
 			tellReady(r);
 		}
 		save();
@@ -16993,6 +17087,10 @@ function createOffers(o) {
 			say(`expert ${m.key}, made from offer ${m.offer}: ${state}${detail ? `: ${detail}` : ""}`);
 			if (m.timer) clearTimeout(m.timer);
 			m.timer = null;
+			if (saved.makings.some((k) => k.request === m.request)) {
+				saved.makings = saved.makings.filter((k) => k.request !== m.request);
+				save();
+			}
 		}
 		sendMaking(m);
 	}
@@ -17014,6 +17112,25 @@ function createOffers(o) {
 	}
 	async function make(index, m) {
 		if (makings.has(m.request)) return;
+		const server = o.offices[index].server;
+		const same = m.by.id === o.account.id ? [...makings.values()].find((x) => x.offer === m.offer && x.key === m.key && x.state !== "failed") : void 0;
+		if (same) {
+			makings.delete(same.request);
+			const kept = saved.makings.find((k) => k.request === same.request);
+			if (kept) Object.assign(kept, {
+				request: m.request,
+				server
+			});
+			Object.assign(same, {
+				request: m.request,
+				index,
+				sent: null
+			});
+			makings.set(m.request, same);
+			say(`expert ${m.key}, made from offer ${m.offer}, is asked for again as ${m.request}: its making goes on`);
+			save();
+			return sendMaking(same);
+		}
 		const making = {
 			index,
 			request: m.request,
@@ -17051,6 +17168,14 @@ function createOffers(o) {
 			return fail("its expert file couldn't be written on that computer");
 		}
 		say(`wrote the expert file for ${m.key}, made from offer ${m.offer} by ${m.by.name || m.by.id}, for ${checkout}`);
+		saved.makings.push({
+			request: m.request,
+			offer: m.offer,
+			key: m.key,
+			since: making.since,
+			server
+		});
+		save();
 		await follow(making);
 	}
 	async function check() {
@@ -17088,33 +17213,49 @@ function createOffers(o) {
 		async start() {
 			try {
 				const value = JSON.parse(await fs.readFile(file, "utf8"));
-				if (value?.version === FILE_VERSION && Array.isArray(value.offered) && Array.isArray(value.offers)) saved = value;
+				if (value?.version === FILE_VERSION && Array.isArray(value.offered) && Array.isArray(value.offers)) saved = {
+					...value,
+					makings: Array.isArray(value.makings) ? value.makings : []
+				};
 			} catch {}
-			const keep = (await settings()).snoozeDays * DAY_MS$1;
-			const at = now();
-			saved.offered = saved.offered.filter((x) => at - x.at < keep);
-			saved.offers = saved.offers.filter((r) => at - r.at < keep);
+			for (const r of saved.offers) for (const [server, state] of Object.entries(r.offices)) if (state === "sent") r.offices[server] = "pending";
+			forget(await settings(), now());
 			started = true;
+			saved.makings = saved.makings.filter((k) => indexOf(k.server) >= 0);
+			for (const k of saved.makings) {
+				const index = indexOf(k.server);
+				if (makings.has(k.request)) continue;
+				const m = {
+					index,
+					request: k.request,
+					offer: k.offer,
+					key: k.key,
+					since: k.since,
+					state: "cloning",
+					sent: null,
+					timer: null
+				};
+				makings.set(m.request, m);
+				follow(m).catch((err) => say(`couldn't follow expert ${m.key}: ${err.message}`));
+			}
 		},
 		seen(s) {
 			if (!started || closed || indexOf(s.server) < 0) return;
+			const byOffice = latest.get(s.session) ?? /* @__PURE__ */ new Map();
 			latest.delete(s.session);
-			latest.set(s.session, s);
-			if (latest.size > MAX_SESSIONS) {
-				const oldest = latest.keys().next().value;
-				latest.delete(oldest);
-				takers.delete(oldest);
-			}
-			let servers = takers.get(s.session);
-			if (!servers) takers.set(s.session, servers = /* @__PURE__ */ new Set());
-			servers.add(s.server);
+			latest.set(s.session, byOffice.set(s.server, s));
+			if (latest.size > MAX_SESSIONS) latest.delete(latest.keys().next().value);
+			const may = names(s);
 			let added = false;
 			for (const r of saved.offers) {
-				if (r.session !== s.session || r.scope !== "session" || r.offices[s.server] !== void 0 || Object.values(r.offices).includes("ended")) continue;
+				if (r.session !== s.session || r.scope !== "session" || r.offices[s.server] !== void 0 || !may.has(r.project.id.toLowerCase()) || Object.values(r.offices).includes("ended")) continue;
 				r.offices[s.server] = "pending";
 				added = true;
 			}
-			if (added) flush(indexOf(s.server));
+			if (added) {
+				save();
+				flush(indexOf(s.server));
+			}
 			if (busy.has(s.session)) return;
 			busy.add(s.session);
 			consider(s).catch(orLog(`look at session ${s.bare}'s areas for an expert offer`)).finally(() => busy.delete(s.session));
@@ -17146,6 +17287,8 @@ function createOffers(o) {
 		linked(index) {
 			offices[index].ready = false;
 			for (const m of makings.values()) if (m.index === index) m.sent = null;
+			const server = o.offices[index].server;
+			for (const r of saved.offers) if (r.offices[server] === "sent") r.offices[server] = "pending";
 		},
 		rehooked(bare) {
 			const hooks = o.hooked(bare);
@@ -17156,11 +17299,12 @@ function createOffers(o) {
 				tellReady(r);
 			}
 		},
-		idle: () => drafting === 0 && !checking && busy.size === 0 && [...makings.values()].every(done),
+		idle: () => draftingOffers.size === 0 && !checking && busy.size === 0 && keeping.size === 0 && [...makings.values()].every(done),
 		close() {
 			closed = true;
 			if (checkTimer) clearTimeout(checkTimer);
 			for (const m of makings.values()) if (m.timer) clearTimeout(m.timer);
+			for (const timer of keeping.values()) clearTimeout(timer);
 		}
 	};
 }

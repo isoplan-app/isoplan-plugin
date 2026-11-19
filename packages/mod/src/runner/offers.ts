@@ -1,8 +1,8 @@
 // Expert offers (isoplan-app#328, ADR 0013): the runner notices when a session on this computer
 // would have been helped by an expert on one folder of its repo, drafts one with a local model and
-// offers it, once per session and folder, to each office that takes the repo. Whoever picks it up
-// on the floor makes it on one of their own computers: that computer's runner writes the expert
-// file and says how making it goes until the expert is ready.
+// offers it, once per session and folder, to each office that may be told of the folder's repo.
+// Whoever picks it up on the floor makes it on one of their own computers: that computer's runner
+// writes the expert file and says how making it goes until the expert is ready.
 //
 // - The signals are the session's areas (data-layer/claude-code.ts), each pass's as one office may
 //   be told of them (report-session.ts SessionAreas). A folder passes when what its reads and
@@ -13,19 +13,33 @@
 //   above it; never one the person dismissed in any office (`offer-dismissals`: until its time, or
 //   for good), nor one inside it; and never one an expert on this computer covers, by its file's
 //   areas: a folder or glob whose part before the first wildcard is the folder or above it. The
-//   office checks other computers' experts itself. Which sessions and folders were offered, and the
-//   open offers, are kept in <claude dir>/isoplan/runner/offers.json for `snoozeDays`.
+//   office checks other computers' experts itself. A folder whose draft couldn't be made, and the
+//   folders inside and above it, wait RETRY_MS for that session before one is tried again. Which
+//   sessions and folders were offered, the offers and the experts being made are kept in
+//   <claude dir>/isoplan/runner/offers.json, the first two for `rememberDays`.
 // - The draft: a local model call with no tools and no hooks (offer-model.ts, prompts/expert-draft.md,
 //   `draftModel`) writes the expert's key, subject and proof question with its answer, from the
-//   folder's files (in the session's checkout, at most MAX_FILES) and what the session said there.
-//   Its area is the folder alone. The whole draft passes the secret scan before any of it is sent;
-//   a match, or patterns that can't be read, means no offer, logged.
+//   names of the folder's files (in the session's checkout, at most MAX_FILES), the start of the
+//   first few that read as text (EXCERPT_FILES, EXCERPT_CHARS each), which its proof is taken
+//   from, and what the session said there. Its area is the folder alone. The whole draft, its
+//   folder included, passes the secret scan before any of it is sent; a match, or patterns that
+//   can't be read, means no offer, logged. A folder that matches isn't drafted at all.
 // - Nothing goes on a connection before its first `offer-dismissals` (protocol 0.15.0): an offer, an
-//   answer and making's progress wait for it, and then go live (link.ts sendLive).
+//   answer and making's progress wait for it, and then go live (link.ts sendLive). Nor is a
+//   session's pass looked at before the office it came for has said them, so a runner started again
+//   never offers a folder its person dismissed. An offer goes to each office whose latest pass of
+//   the session may name the offer's repo (the session's own, or another repo that office holds),
+//   never to one whose dismissals name its folder; one dismissed in any office is withdrawn from
+//   the others.
 // - An office that sees several sessions search one folder asks the runner of the latest to draft
 //   an office-wide offer (`draft-offer`): drafted the same way, from the newest of those sessions
-//   this runner reported, it goes to that office alone as scope `office`, with the request's id, or
-//   `no-draft` goes back when none could be made.
+//   this runner reported to it, it goes to that office alone as scope `office`, with the request's
+//   id, or `no-draft` goes back when none could be made. The same request again, while one is being
+//   drafted or once it was, changes nothing.
+// - An office ends an offer it won't keep at once: `dismissed`, or `made` with the key of an expert
+//   that covers its folder already. So an offer counts as open in an office only once `keptMs` has
+//   passed since it went there with no end; one sent on a connection that closed first goes again
+//   on the next, which the office takes as the same offer.
 // - While an offer is open, the session that showed the need is told through its hooks module, if
 //   it is on this computer (lines.ts ExpertOfferLine), and again each time a hooks module connects
 //   for it; and when the offer ends. Made in one office, it is withdrawn from the others, and the
@@ -38,7 +52,10 @@
 //   that name here already, making fails at once, saying why. Else it writes experts/<key>.json,
 //   whole or not at all, which the experts' watcher picks up (experts.ts), and follows the expert's
 //   state.json (expert-state.ts) every `pollMs`, saying each step (`expert-making`): cloning (its
-//   own clone), grounding, proof, then ready or failed, within MAKING_LIMIT_MS.
+//   own clone), grounding, proof, then ready or failed, within MAKING_LIMIT_MS. A runner started
+//   again goes on following the makings it had under way, on their requests; a make-expert for the
+//   same offer and key as one under way, as the office sends once that runner is back, takes it
+//   over.
 // - Whether the person's message corrected the agent (`corrected`) is a local model's word too
 //   (prompts/correction.md, `draftModel`), one call at a time and at most `checksPerHour`; until it
 //   comes the message counts nothing, and it is asked about again on a later pass.
@@ -75,13 +92,8 @@ export interface ExpertOfferSettings extends OfferModelSettings {
   tokens: number;
   minutes: number;
   corrections: number;
-  /** For the office server, which makes office-wide offers: how many sessions, within how many days. */
-  officeSessions: number;
-  officeDays: number;
-  /** How long an offered session and folder, and an open offer, are remembered. */
-  snoozeDays: number;
-  /** For the floor, which sets the model an expert grounds with: the one it proposes. */
-  model: string;
+  /** How long an offered session and folder, and an offer, are remembered. */
+  rememberDays: number;
   /** The expert file's promoteAtTokens for an expert made from an offer. */
   promoteAtTokens: number;
   /** The most correction checks an hour. */
@@ -129,10 +141,12 @@ export interface OffersOptions {
   now?: () => number;
   /** How often an expert being made is looked at. */
   pollMs?: number;
+  /** How long an offer that went to an office must go unended there to count as open (KEPT_MS). */
+  keptMs?: number;
 }
 
 export interface Offers {
-  /** Reads offers.json: before it settles, nothing is offered. */
+  /** Reads offers.json: before it settles, nothing is offered. The makings under way when the runner stopped are followed again. */
   start(): Promise<void>;
   /** One pass's areas of a session for one office (report-session.ts `areas`). */
   seen(s: SessionAreas): void;
@@ -144,15 +158,21 @@ export interface Offers {
   linked(index: number): void;
   /** A session's hooks module connected, changed or went (pipe server's onChange). */
   rehooked(bare: string): void;
-  /** No draft, check or making under way. */
+  /** No draft, check, making or offer waiting to be kept under way. */
   idle(): boolean;
   close(): void;
 }
 
-/** The most files of a folder a draft is given. */
+/** The most files of a folder a draft is given by name; and of those, the most it is given the start of, and how much. */
 export const MAX_FILES = 200;
+export const EXCERPT_FILES = 6;
+export const EXCERPT_CHARS = 3000;
 /** How long making an expert may take before it is said to have failed. */
 export const MAKING_LIMIT_MS = 60 * 60000;
+/** How long an office has to end an offer it won't keep, which it does at once, before it counts as open there. */
+export const KEPT_MS = 5000;
+/** How long a folder whose draft couldn't be made waits, for that session, before it is tried again. */
+export const RETRY_MS = 60 * 60000;
 // The most messages waiting for the correction check, and verdicts remembered.
 const MAX_CHECKS_WAITING = 50;
 const MAX_VERDICTS = 1000;
@@ -183,8 +203,15 @@ export function signalsOf(area: AreaFact, window: number | null): Why {
 /** Whether a folder's signals pass any of their thresholds. */
 export const passes = (why: Why, t: ExpertOfferSettings) => why.share >= t.contextShare || why.tokens >= t.tokens || why.minutes >= t.minutes || why.corrections >= t.corrections;
 
-// `folder` is `other`, or inside it.
+/** The signals an offer gives (ADR 0004): those that passed their thresholds, each other one 0. Share and tokens are one signal, what reading and searching there took. */
+export function passed(why: Why, t: ExpertOfferSettings): Why {
+  const spent = why.share >= t.contextShare || why.tokens >= t.tokens;
+  return { share: spent ? why.share : 0, tokens: spent ? why.tokens : 0, minutes: why.minutes >= t.minutes ? why.minutes : 0, corrections: why.corrections >= t.corrections ? why.corrections : 0 };
+}
+
+// `folder` is `other`, or inside it; or either is inside the other.
 const within = (folder: string, other: string) => other === "." || folder === other || folder.startsWith(other + "/");
+const near = (a: string, b: string) => within(a, b) || within(b, a);
 
 /** Whether the person dismissed `folder` of `project` (a lower-cased id), or a folder it is inside, as of `now`. */
 export const dismissed = (list: readonly OfferDismissal[], project: string, folder: string, now: number) =>
@@ -217,6 +244,28 @@ export async function folderFiles(checkout: string, folder: string, max = MAX_FI
   return out;
 }
 
+/** The start of the first `max` of `files` (relative to `checkout`) that read as text, each at most EXCERPT_CHARS; an empty file, or one with a NUL byte, is left out. */
+export async function folderExcerpts(checkout: string, files: readonly string[], max = EXCERPT_FILES): Promise<{ file: string; text: string }[]> {
+  const out: { file: string; text: string }[] = [];
+  for (const file of files) {
+    if (out.length >= max) break;
+    const handle = await fs.open(path.join(checkout, file), "r").catch(() => null);
+    if (!handle) continue;
+    try {
+      // Enough bytes for EXCERPT_CHARS characters of any UTF-8.
+      const { bytesRead, buffer } = await handle.read(Buffer.alloc(EXCERPT_CHARS * 4), 0, EXCERPT_CHARS * 4, 0);
+      const bytes = buffer.subarray(0, bytesRead);
+      const text = bytes.includes(0) ? "" : bytes.toString("utf8").slice(0, EXCERPT_CHARS).trim();
+      if (text) out.push({ file, text });
+    } catch {
+      // One that can't be read is left out.
+    } finally {
+      await handle.close().catch(() => {});
+    }
+  }
+  return out;
+}
+
 // What a write leaves while it is under way: never a file the experts' watcher reads (*.json).
 async function writeWhole(file: string, text: string): Promise<void> {
   await fs.mkdir(path.dirname(file), { recursive: true });
@@ -233,7 +282,8 @@ async function writeWhole(file: string, text: string): Promise<void> {
   }
 }
 
-type OfficeOffer = "pending" | "open" | "ended";
+/** Where an offer is in one office: waiting for its connection, sent there but not yet kept (KEPT_MS), open there, or ended. */
+type OfficeOffer = "pending" | "sent" | "open" | "ended";
 
 /** One offer this runner made, as offers.json keeps it. */
 interface OfferRecord {
@@ -247,7 +297,7 @@ interface OfferRecord {
   key: string;
   at: number;
   message: ExpertOfferMessage;
-  /** Where it is, by office: waiting for the office's connection, open there, or ended. */
+  /** Where it is, by office. */
   offices: Record<string, OfficeOffer>;
   /** The expert made from it, in which office, and whether the session has been told. */
   made?: { key: string; server: string };
@@ -259,6 +309,8 @@ interface Saved {
   /** Each session's folders offered, and when. */
   offered: { session: string; project: string; folder: string; at: number }[];
   offers: OfferRecord[];
+  /** The experts being made here, until each is ready or failed, by the office the request came from. */
+  makings: { request: string; offer: string; key: string; since: number; server: string }[];
 }
 
 /** An expert being made here. */
@@ -278,18 +330,23 @@ interface Making {
 export function createOffers(o: OffersOptions): Offers {
   const now = o.now ?? Date.now;
   const pollMs = o.pollMs ?? 2000;
+  const keptMs = o.keptMs ?? KEPT_MS;
   const file = path.join(o.isoplanDir, "runner", "offers.json");
   const sessionFile = (bare: string) => path.join(o.isoplanDir, "offers", `${bare}.json`);
   const expertFile = (key: string) => path.join(o.isoplanDir, "experts", `${key}.json`);
   const offices = o.offices.map(() => ({ ready: false, dismissals: [] as OfferDismissal[], queue: [] as RunnerOfferMessage[] }));
-  let saved: Saved = { version: FILE_VERSION, offered: [], offers: [] };
+  let saved: Saved = { version: FILE_VERSION, offered: [], offers: [], makings: [] };
   let started = false;
   let closed = false;
-  // The latest pass of each session, by its id, for office-wide drafts; and the offices that take each.
-  const latest = new Map<string, SessionAreas>();
-  const takers = new Map<string, Set<string>>();
+  // The latest pass of each session for each office that took it, by the session's id: which
+  // offices may be told of which of its repos, and what office-wide drafts are made from.
+  const latest = new Map<string, Map<string, SessionAreas>>();
   const busy = new Set<string>(); // the sessions whose areas are being looked at, or drafted from
-  let drafting = 0;
+  const draftingOffers = new Set<string>(); // the draft-offer requests being drafted
+  // Folders whose draft couldn't be made, by session, until they may be tried again; in memory only.
+  let held: { session: string; project: string; folder: string; until: number }[] = [];
+  // The offers sent to an office and not yet kept there, by `<id>\n<server>`: each one's wait.
+  const keeping = new Map<string, ReturnType<typeof setTimeout>>();
   const makings = new Map<string, Making>();
   // The correction check: verdicts by key, the messages waiting, and when each check of the last hour ran.
   const verdicts = new Map<string, boolean>();
@@ -340,7 +397,8 @@ export function createOffers(o: OffersOptions): Offers {
     sessionWrites.set(bare, next);
   }
 
-  // Sends what waits for the office at `index`, once its connection has had offer-dismissals.
+  // Sends what waits for the office at `index`, once its connection has had offer-dismissals. An
+  // offer whose folder its dismissals name isn't sent, and is withdrawn wherever else it went.
   function flush(index: number) {
     const office = o.offices[index]!;
     const st = offices[index]!;
@@ -348,15 +406,52 @@ export function createOffers(o: OffersOptions): Offers {
     while (st.queue.length && office.send(st.queue[0]!)) st.queue.shift();
     let changed = false;
     for (const r of saved.offers) {
-      if (r.offices[office.server] !== "pending" || !office.send(r.message)) continue;
-      r.offices[office.server] = "open";
+      if (r.offices[office.server] !== "pending") continue;
+      if (dismissed(st.dismissals, r.project.id.toLowerCase(), r.folder, now())) {
+        r.offices[office.server] = "ended";
+        changed = true;
+        say(`the expert offer ${r.id} on ${r.folder} of ${r.project.name} isn't sent to ${office.server}, where its person dismissed that folder, and is withdrawn wherever else it went`);
+        withdraw(r);
+        writeSessionFile(r.bare);
+        continue;
+      }
+      if (!office.send(r.message)) continue;
+      r.offices[office.server] = "sent";
       changed = true;
       say(`offered an expert on ${r.folder} of ${r.project.name} (${r.key}) to ${office.server}, as ${r.id}`);
-      tell(r, lineOf(r, office.server));
-      writeSessionFile(r.bare);
+      keep(r, office.server);
     }
     if (changed) void save();
     for (const m of makings.values()) if (m.index === index) sendMaking(m);
+  }
+
+  // An offer the office hasn't ended within keptMs of its going is open there, and its session is told.
+  function keep(r: OfferRecord, server: string) {
+    const k = `${r.id}\n${server}`;
+    clearTimeout(keeping.get(k));
+    const timer = setTimeout(() => {
+      keeping.delete(k);
+      if (closed || r.offices[server] !== "sent") return;
+      r.offices[server] = "open";
+      tell(r, lineOf(r, server));
+      writeSessionFile(r.bare);
+      void save();
+    }, keptMs);
+    timer.unref?.();
+    keeping.set(k, timer);
+  }
+
+  // Ends the offer in every office it hasn't ended in: one it went to is told it is withdrawn, and
+  // the session of one open there that it went.
+  function withdraw(r: OfferRecord) {
+    for (const [other, state] of Object.entries(r.offices)) {
+      if (state === "ended") continue;
+      r.offices[other] = "ended";
+      const i = indexOf(other);
+      if (state === "pending" || i < 0) continue;
+      sendOrQueue(i, { type: "expert-offer-ended", v: PROTOCOL_VERSION, id: r.id, why: "withdrawn" });
+      if (state === "open") tell(r, { type: "expert-offer-ended", server: other, id: r.id, why: "withdrawn" });
+    }
   }
 
   // Sends now when the office's connection is ready and up; else it waits there for flush.
@@ -378,8 +473,22 @@ export function createOffers(o: OffersOptions): Offers {
     return false;
   }
 
-  const offeredNear = (session: string, project: string, folder: string) =>
-    saved.offered.some((x) => x.session === session && x.project === project && (within(folder, x.folder) || within(x.folder, folder)));
+  const offeredNear = (session: string, project: string, folder: string) => saved.offered.some((x) => x.session === session && x.project === project && near(folder, x.folder));
+  const heldNear = (session: string, project: string, folder: string, at: number) =>
+    (held = held.filter((x) => x.until > at)).some((x) => x.session === session && x.project === project && near(folder, x.folder));
+
+  // The repos an office's pass of a session may name, lower-cased: the session's own as it says
+  // hello there, and the others its areas were let through for (report-session.ts).
+  const names = (s: SessionAreas) => new Set([s.project, ...s.areas.map((a) => a.project ?? s.project)].map((p) => p.id.toLowerCase()));
+  // The offices whose latest pass of the session may name `project`.
+  const mayTell = (session: string, project: string) => [...(latest.get(session)?.values() ?? [])].filter((p) => names(p).has(project)).map((p) => p.server);
+
+  // What is older than rememberDays goes: offered folders and offers, ended or not.
+  function forget(t: ExpertOfferSettings, at: number) {
+    const keep = t.rememberDays * DAY_MS;
+    saved.offered = saved.offered.filter((x) => at - x.at < keep);
+    saved.offers = saved.offers.filter((r) => at - r.at < keep);
+  }
 
   const windowOf = (s: SessionAreas) => {
     if (s.window) return s.window;
@@ -394,29 +503,36 @@ export function createOffers(o: OffersOptions): Offers {
       say(`no expert is offered on ${where}: this computer has no checkout of the repo to draft it from`);
       return null;
     }
-    drafting++;
-    try {
-      const files = await folderFiles(a.checkout, a.folder);
-      const draft = await o.draft({ project: a.project, folder: a.folder, files, said: a.said }, t);
-      if (!draft) {
-        say(`no expert is offered on ${where}: no usable draft came`);
-        return null;
-      }
-      const matched = await o.scan([draft.key, draft.subject, draft.proof.question, draft.proof.answer].join("\n"));
-      if (matched) {
-        say(`no expert is offered on ${where}: its draft matches the secret pattern "${matched}"`);
-        return null;
-      }
-      const message = { type: "expert-offer" as const, v: PROTOCOL_VERSION, id: a.id, session: a.session, project: { id: a.project.id, name: a.project.name }, folder: a.folder, scope: a.scope, key: draft.key, subject: draft.subject, area: [a.folder], proof: draft.proof, why: a.why, at: new Date(now()).toISOString() };
-      const parsed = ExpertOfferMessageSchema.safeParse(message);
-      if (!parsed.success) {
-        say(`no expert is offered on ${where}: its offer doesn't fit the protocol: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
-        return null;
-      }
-      return parsed.data;
-    } finally {
-      drafting--;
+    // Its folder leaves with it, so one that matches isn't drafted (nor written in the log).
+    const named = await o.scan(a.folder);
+    if (named) {
+      say(`no expert is offered on a folder of ${a.project.name}: its path matches the secret pattern "${named}"`);
+      return null;
     }
+    const files = await folderFiles(a.checkout, a.folder);
+    const excerpts = await folderExcerpts(a.checkout, files);
+    if (!excerpts.length) {
+      say(`no expert is offered on ${where}: none of its files could be read to draft it from`);
+      return null;
+    }
+    const draft = await o.draft({ project: a.project, folder: a.folder, files, excerpts, said: a.said }, t);
+    if (!draft) {
+      say(`no expert is offered on ${where}: no usable draft came`);
+      return null;
+    }
+    // The whole draft, its folder (its one area) included.
+    const matched = await o.scan([a.folder, draft.key, draft.subject, draft.proof.question, draft.proof.answer].join("\n"));
+    if (matched) {
+      say(`no expert is offered on ${where}: its draft matches the secret pattern "${matched}"`);
+      return null;
+    }
+    const message = { type: "expert-offer" as const, v: PROTOCOL_VERSION, id: a.id, session: a.session, project: { id: a.project.id, name: a.project.name }, folder: a.folder, scope: a.scope, key: draft.key, subject: draft.subject, area: [a.folder], proof: draft.proof, why: passed(a.why, t), at: new Date(now()).toISOString() };
+    const parsed = ExpertOfferMessageSchema.safeParse(message);
+    if (!parsed.success) {
+      say(`no expert is offered on ${where}: its offer doesn't fit the protocol: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
+      return null;
+    }
+    return parsed.data;
   }
 
   const record = (message: ExpertOfferMessage, bare: string | null, servers: Iterable<string>): OfferRecord => ({
@@ -432,17 +548,21 @@ export function createOffers(o: OffersOptions): Offers {
     offices: Object.fromEntries([...servers].map((s) => [s, "pending" as const])),
   });
 
-  // A session's pass: the deepest folder that passes, not offered, dismissed or covered, is drafted and offered.
+  // A session's pass, once the office it came for has said its person's dismissals: the deepest
+  // folder that passes, not offered, held, dismissed or covered, is drafted and offered.
   async function consider(s: SessionAreas) {
+    const index = indexOf(s.server);
+    if (!offices[index]!.ready) return;
     const t = await settings();
     const window = windowOf(s);
     const at = now();
+    forget(t, at);
     const candidates: { area: AreaFact; project: Project; why: Why }[] = [];
     for (const area of s.areas) {
       const project = area.project ?? s.project;
       const id = project.id.toLowerCase();
       const why = signalsOf(area, window);
-      if (!passes(why, t) || offeredNear(s.session, id, area.folder)) continue;
+      if (!passes(why, t) || offeredNear(s.session, id, area.folder) || heldNear(s.session, id, area.folder, at)) continue;
       if (offices.some((f) => dismissed(f.dismissals, id, area.folder, at))) continue;
       if (await coveredHere(id, area.folder)) continue;
       candidates.push({ area, project, why });
@@ -451,42 +571,48 @@ export function createOffers(o: OffersOptions): Offers {
     const best = candidates.sort((a, b) => depth(b.area.folder) - depth(a.area.folder) || b.area.tokens - a.area.tokens)[0];
     if (!best) return;
     const { area, project, why } = best;
-    saved.offered.push({ session: s.session, project: project.id.toLowerCase(), folder: area.folder, at });
-    void save();
-    const index = indexOf(s.server);
+    const id = project.id.toLowerCase();
     const checkout = area.project ? await o.checkout(index, project).catch(() => null) : s.checkout;
     const said = await s.said(area.project ? area.project.id : null, area.folder).catch(() => []);
     const message = await drafted({ id: randomBytes(12).toString("base64url"), scope: "session", session: s.session, project, folder: area.folder, checkout, said, why }, t);
-    if (!message || closed) return;
-    saved.offers.push(record(message, s.bare, takers.get(s.session) ?? [s.server]));
+    if (closed) return;
+    if (!message) return void held.push({ session: s.session, project: id, folder: area.folder, until: now() + RETRY_MS });
+    saved.offered.push({ session: s.session, project: id, folder: area.folder, at });
+    saved.offers.push(record(message, s.bare, new Set([s.server, ...mayTell(s.session, id)])));
     await save();
     o.offices.forEach((_, i) => flush(i));
   }
 
-  // An office-wide draft, from the newest of the sessions it names that this runner reported.
+  // An office-wide draft, from the newest of the sessions it names that this runner reported to that office.
   async function draftOffer(index: number, m: DraftOfferMessage) {
     const server = o.offices[index]!.server;
-    if (saved.offers.some((r) => r.id === m.request)) return;
-    const project = m.project.id.toLowerCase();
-    const s = m.sessions.map((id) => latest.get(id)).find((x) => !!x);
-    const area = s?.areas.find((a) => a.folder === m.folder && (a.project ?? s.project).id.toLowerCase() === project);
-    const own = !!s && s.project.id.toLowerCase() === project && !area?.project;
-    const checkout = own ? s!.checkout : await o.checkout(index, m.project).catch(() => null);
-    const said = s ? await s.said(own ? null : m.project.id, m.folder).catch(() => []) : [];
-    const why = area && s ? signalsOf(area, windowOf(s)) : { share: 0, tokens: 0, minutes: 0, corrections: 0 };
-    const t = await settings();
-    const message = await drafted({ id: m.request, scope: "office", session: m.sessions[0]!, project: m.project, folder: m.folder, checkout, said, why }, t);
-    if (closed) return;
-    if (!message) return sendOrQueue(index, { type: "expert-offer-ended", v: PROTOCOL_VERSION, id: m.request, why: "no-draft" });
-    const first = m.sessions[0]!;
-    // Its session isn't offered the same folder again on its own.
-    saved.offered.push({ session: first, project, folder: m.folder, at: now() });
-    saved.offers.push(record(message, first.startsWith("claude-code:") ? first.slice("claude-code:".length) : null, [server]));
-    await save();
-    flush(index);
+    if (draftingOffers.has(m.request) || saved.offers.some((r) => r.id === m.request)) return;
+    draftingOffers.add(m.request);
+    try {
+      const project = m.project.id.toLowerCase();
+      const s = m.sessions.map((id) => latest.get(id)?.get(server)).find((x) => !!x);
+      const area = s?.areas.find((a) => a.folder === m.folder && (a.project ?? s.project).id.toLowerCase() === project);
+      const own = !!s && s.project.id.toLowerCase() === project && !area?.project;
+      const checkout = own ? s!.checkout : await o.checkout(index, m.project).catch(() => null);
+      const said = s ? await s.said(own ? null : m.project.id, m.folder).catch(() => []) : [];
+      const why = area && s ? signalsOf(area, windowOf(s)) : { share: 0, tokens: 0, minutes: 0, corrections: 0 };
+      const t = await settings();
+      const message = await drafted({ id: m.request, scope: "office", session: m.sessions[0]!, project: m.project, folder: m.folder, checkout, said, why }, t);
+      if (closed) return;
+      if (!message) return sendOrQueue(index, { type: "expert-offer-ended", v: PROTOCOL_VERSION, id: m.request, why: "no-draft" });
+      const first = m.sessions[0]!;
+      // Its session isn't offered the same folder again on its own.
+      saved.offered.push({ session: first, project, folder: m.folder, at: now() });
+      saved.offers.push(record(message, first.startsWith("claude-code:") ? first.slice("claude-code:".length) : null, [server]));
+      await save();
+      flush(index);
+    } finally {
+      draftingOffers.delete(m.request);
+    }
   }
 
-  // How an offer ended in one office; made there, it is withdrawn from the others.
+  // How an offer ended in one office; made there, it is withdrawn from the others. One that ended
+  // before it was kept was never shown, so its session isn't told it ended.
   function ended(index: number, m: ServerExpertOfferEndedMessage) {
     const server = o.offices[index]!.server;
     const r = saved.offers.find((x) => x.id === m.id);
@@ -497,15 +623,7 @@ export function createOffers(o: OffersOptions): Offers {
     say(`the expert offer ${r.id} on ${r.folder} of ${r.project.name} ended in ${server}: ${m.why}`);
     if (m.why === "made") {
       r.made = { key: m.key, server };
-      for (const [other, state] of Object.entries(r.offices)) {
-        if (state === "ended") continue;
-        r.offices[other] = "ended";
-        const i = indexOf(other);
-        if (state === "open" && i >= 0) {
-          sendOrQueue(i, { type: "expert-offer-ended", v: PROTOCOL_VERSION, id: r.id, why: "withdrawn" });
-          tell(r, { type: "expert-offer-ended", server: other, id: r.id, why: "withdrawn" });
-        }
-      }
+      withdraw(r);
       tellReady(r);
     }
     void save();
@@ -536,6 +654,10 @@ export function createOffers(o: OffersOptions): Offers {
       say(`expert ${m.key}, made from offer ${m.offer}: ${state}${detail ? `: ${detail}` : ""}`);
       if (m.timer) clearTimeout(m.timer);
       m.timer = null;
+      if (saved.makings.some((k) => k.request === m.request)) {
+        saved.makings = saved.makings.filter((k) => k.request !== m.request);
+        void save();
+      }
     }
     sendMaking(m);
   }
@@ -561,6 +683,20 @@ export function createOffers(o: OffersOptions): Offers {
 
   async function make(index: number, m: MakeExpertMessage) {
     if (makings.has(m.request)) return;
+    const server = o.offices[index]!.server;
+    // The same offer and key asked again, as the office asks once a runner that went mid-making is
+    // back: the making under way answers it, from where it is.
+    const same = m.by.id === o.account.id ? [...makings.values()].find((x) => x.offer === m.offer && x.key === m.key && x.state !== "failed") : undefined;
+    if (same) {
+      makings.delete(same.request);
+      const kept = saved.makings.find((k) => k.request === same.request);
+      if (kept) Object.assign(kept, { request: m.request, server });
+      Object.assign(same, { request: m.request, index, sent: null });
+      makings.set(m.request, same);
+      say(`expert ${m.key}, made from offer ${m.offer}, is asked for again as ${m.request}: its making goes on`);
+      void save();
+      return sendMaking(same);
+    }
     const making: Making = { index, request: m.request, offer: m.offer, key: m.key, since: now(), state: "cloning", sent: null, timer: null };
     makings.set(m.request, making);
     const fail = (detail: string) => setMaking(making, "failed", detail);
@@ -581,6 +717,8 @@ export function createOffers(o: OffersOptions): Offers {
       return fail("its expert file couldn't be written on that computer");
     }
     say(`wrote the expert file for ${m.key}, made from offer ${m.offer} by ${m.by.name || m.by.id}, for ${checkout}`);
+    saved.makings.push({ request: m.request, offer: m.offer, key: m.key, since: making.since, server });
+    void save();
     await follow(making);
   }
 
@@ -623,38 +761,45 @@ export function createOffers(o: OffersOptions): Offers {
     async start() {
       try {
         const value = JSON.parse(await fs.readFile(file, "utf8")) as Saved;
-        if (value?.version === FILE_VERSION && Array.isArray(value.offered) && Array.isArray(value.offers)) saved = value;
+        if (value?.version === FILE_VERSION && Array.isArray(value.offered) && Array.isArray(value.offers)) saved = { ...value, makings: Array.isArray(value.makings) ? value.makings : [] };
       } catch {
         // None yet, or one that doesn't parse: nothing was offered.
       }
-      const keep = (await settings()).snoozeDays * DAY_MS;
-      const at = now();
-      saved.offered = saved.offered.filter((x) => at - x.at < keep);
-      saved.offers = saved.offers.filter((r) => at - r.at < keep);
+      // An offer sent before the runner stopped, and not yet kept, may not have reached its office: it goes again.
+      for (const r of saved.offers) for (const [server, state] of Object.entries(r.offices)) if (state === "sent") r.offices[server] = "pending";
+      forget(await settings(), now());
       started = true;
+      // The makings under way when it stopped are followed again, on their requests; one for an
+      // office no longer listed goes.
+      saved.makings = saved.makings.filter((k) => indexOf(k.server) >= 0);
+      for (const k of saved.makings) {
+        const index = indexOf(k.server);
+        if (makings.has(k.request)) continue;
+        const m: Making = { index, request: k.request, offer: k.offer, key: k.key, since: k.since, state: "cloning", sent: null, timer: null };
+        makings.set(m.request, m);
+        void follow(m).catch((err: Error) => say(`couldn't follow expert ${m.key}: ${err.message}`));
+      }
     },
 
     seen(s) {
       if (!started || closed || indexOf(s.server) < 0) return;
+      const byOffice = latest.get(s.session) ?? new Map<string, SessionAreas>();
       latest.delete(s.session);
-      latest.set(s.session, s);
-      if (latest.size > MAX_SESSIONS) {
-        const oldest = latest.keys().next().value!;
-        latest.delete(oldest);
-        takers.delete(oldest);
-      }
-      let servers = takers.get(s.session);
-      if (!servers) takers.set(s.session, (servers = new Set()));
-      servers.add(s.server);
-      // An offer of this session made before this office took it goes to it too, unless it has
-      // ended anywhere (made, dismissed or expired).
+      latest.set(s.session, byOffice.set(s.server, s));
+      if (latest.size > MAX_SESSIONS) latest.delete(latest.keys().next().value!);
+      // An offer of this session made before this office took it goes to it too, if this office may
+      // be told of its repo, unless it has ended anywhere (made, dismissed or expired).
+      const may = names(s);
       let added = false;
       for (const r of saved.offers) {
-        if (r.session !== s.session || r.scope !== "session" || r.offices[s.server] !== undefined || Object.values(r.offices).includes("ended")) continue;
+        if (r.session !== s.session || r.scope !== "session" || r.offices[s.server] !== undefined || !may.has(r.project.id.toLowerCase()) || Object.values(r.offices).includes("ended")) continue;
         r.offices[s.server] = "pending";
         added = true;
       }
-      if (added) flush(indexOf(s.server));
+      if (added) {
+        void save();
+        flush(indexOf(s.server));
+      }
       if (busy.has(s.session)) return;
       busy.add(s.session);
       void consider(s)
@@ -687,6 +832,10 @@ export function createOffers(o: OffersOptions): Offers {
     linked(index) {
       offices[index]!.ready = false;
       for (const m of makings.values()) if (m.index === index) m.sent = null;
+      // An offer sent on the connection that ended, and not yet kept, may not have reached the
+      // office: it goes again on the next, which the office takes as the same offer.
+      const server = o.offices[index]!.server;
+      for (const r of saved.offers) if (r.offices[server] === "sent") r.offices[server] = "pending";
     },
 
     rehooked(bare) {
@@ -700,12 +849,13 @@ export function createOffers(o: OffersOptions): Offers {
     },
 
     // A making that is done and waits only for its office's link holds nothing up.
-    idle: () => drafting === 0 && !checking && busy.size === 0 && [...makings.values()].every(done),
+    idle: () => draftingOffers.size === 0 && !checking && busy.size === 0 && keeping.size === 0 && [...makings.values()].every(done),
 
     close() {
       closed = true;
       if (checkTimer) clearTimeout(checkTimer);
       for (const m of makings.values()) if (m.timer) clearTimeout(m.timer);
+      for (const timer of keeping.values()) clearTimeout(timer);
     },
   };
 }

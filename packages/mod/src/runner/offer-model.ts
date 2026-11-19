@@ -11,8 +11,9 @@
 // anything of it is sent.
 //
 // - The check is given the agent's reply and the person's next message, and answers YES or NO.
-// - The draft is given the repo's name, the folder, its files and what the session said there, and
-//   answers with one JSON object, { key, subject, proof: { question, answer } }. A key is lower-cased
+// - The draft is given the repo's name, the folder, its files' names, the start of a few of them
+//   (it reads nothing itself, so its proof is taken from those) and what the session said there,
+//   and answers with one JSON object, { key, subject, proof: { question, answer } }. A key is lower-cased
 //   and its spaces and underscores made dashes, then it must be an expert's name (expert-file.ts);
 //   a field that is missing, empty, or longer than the protocol takes gives no draft, never one cut.
 
@@ -36,6 +37,8 @@ export interface DraftInput {
   folder: string;
   /** Its files, relative to the repo's root. */
   files: string[];
+  /** The start of a few of them, which the proof is taken from. */
+  excerpts: { file: string; text: string }[];
   /** What the session said while it worked there (claude-code.ts SourceRead.said). */
   said: string[];
 }
@@ -104,6 +107,9 @@ export function draftInput(d: DraftInput): string {
     "",
     `Its files (${d.files.length}):`,
     ...(d.files.length ? d.files : ["(none listed)"]),
+    "",
+    "The start of some of them:",
+    ...d.excerpts.map((e) => `=== ${e.file}\n${e.text}`),
     "",
     "What the session said while it worked there, oldest first:",
     d.said.length ? d.said.join("\n---\n") : "(nothing kept)",

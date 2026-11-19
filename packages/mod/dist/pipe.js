@@ -6466,9 +6466,10 @@ const Area = array(AreaPathSchema).min(1).max(20);
 * their threshold, which dismissals name. `scope`: `session`, from that session's own signals, or
 * `office`, in answer to a `draft-offer`, whose `request` is then its `id`. The draft: `key`, the
 * expert's name (shown as `expertDisplayName(key)`), `subject`, `area` and `proof`, as the runner's
-* local model wrote them and the secret check passed them. `why`, the signals that passed: `share`,
-* the share of the session's context spent reading and searching the folder (0 to 1); `tokens`,
-* those tokens; `minutes`, the time spent there; `corrections`, the person's corrections there. `at`:
+* local model wrote them and the secret check passed them. `why`, the signals that passed their
+* thresholds, each other one 0: `share`, the share of the session's context spent reading and
+* searching the folder (0 to 1), and `tokens`, those tokens, which are one signal; `minutes`, the time
+* spent there; `corrections`, the person's corrections there. `at`:
 * when it was offered. Of its text, only these leave the machine, under ADR 0004's case for an expert
 * offer's draft.
 */

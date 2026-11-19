@@ -178,10 +178,11 @@ export interface RunnerLine {
  * An expert offer is open for this session in one office (protocol 0.15.0, src/runner/offers.ts): an
  * expert named `name` (expertDisplayName of `key`) could help with `folder`, a folder of the repo,
  * relative to its root. `url` opens the offer's review on that office's floor (its http address and
- * `/?offer=<id>`). Sent by the runner itself, not the data layer, once the offer has reached the
- * office, and again each time a hooks module connects for the session while it is open: one line per
+ * `/?offer=<id>`). Sent by the runner itself, not the data layer, once the office has kept the offer
+ * (it went there and the office didn't end it within the runner's KEPT_MS, as it ends one it won't
+ * keep), and again each time a hooks module connects for the session while it is open: one line per
  * office it is open in. `server` is the office's data-layer address, `label` its short name, as on
- * its status line. `why` is the folder's signals, as the offer gives them. The hooks module shows
+ * its status line. `why` is the signals that passed, as the offer gives them. The hooks module shows
  * it until an ExpertOfferEndedLine for the same `id` and `server` comes (the status line's link, and
  * one transcript line, once per id).
  */

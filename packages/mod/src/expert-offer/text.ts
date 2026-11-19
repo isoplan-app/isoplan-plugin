@@ -39,4 +39,4 @@ export function offerTranscriptText(line: ExpertOfferLine): string {
 }
 
 /** The note on a later tool result once the expert made from the session's offer is ready. */
-export const readyNoteText = (line: ExpertReadyLine) => `Isoplan: the ${line.name} is ready. Ask it (ask_expert, key ${line.key}) before you search ${folderWords(line.folder)} again.`;
+export const readyNoteText = (line: ExpertReadyLine) => `Isoplan: the ${line.name} is ready. Ask it with ask_expert, expert "${line.key}", before you search ${folderWords(line.folder)} again.`;

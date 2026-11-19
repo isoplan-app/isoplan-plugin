@@ -47,13 +47,13 @@ test("offer model: each call runs hidden in the folder given with its input on s
   expect(fs.realpathSync(said.cwd)).toBe(fs.realpathSync(root));
   expect(said.input).toBe("The agent's reply:\nHere it is.\n\nThe person's next message:\nNo, the other file.");
 
-  const input = { project, folder: "src/parser", files: ["src/parser/parse.ts"], said: ["Asked: how does it parse?"] };
+  const input = { project, folder: "src/parser", files: ["src/parser/parse.ts"], excerpts: [{ file: "src/parser/parse.ts", text: "export function parse() {}" }], said: ["Asked: how does it parse?"] };
   const reply = JSON.stringify({ key: "parser", subject: "The parser.", proof: { question: "Where?", answer: "parse.ts" } });
   expect(await model({ FAKE_RESULT: reply }).draft(input, settings)).toEqual({ key: "parser", subject: "The parser.", proof: { question: "Where?", answer: "parse.ts" } });
   said = JSON.parse(fs.readFileSync(log, "utf8"));
   expect(said.argv).toEqual(offerModelArgs("haiku", "Prompt expert-draft.md"));
   expect(said.input).toBe(draftInput(input));
-  expect(said.input).toContain("Folder: src/parser\n\nIts files (1):\nsrc/parser/parse.ts");
+  expect(said.input).toContain("Folder: src/parser\n\nIts files (1):\nsrc/parser/parse.ts\n\nThe start of some of them:\n=== src/parser/parse.ts\nexport function parse() {}\n\n");
 
   expect(await model({ FAKE_HANG: "1" }).corrects("x", null, { ...settings, timeoutSeconds: 0.5 })).toBe(null);
   expect(logs.at(-1)).toContain("longer than 0.5 s");

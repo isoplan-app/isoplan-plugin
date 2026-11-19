@@ -83,7 +83,7 @@ function offerTranscriptText(line) {
 	return `Isoplan: ${spent.length ? `this session has spent ${spent.join(" and ")} on ${where}${corrections > 0 ? `, and you corrected it ${times(corrections)} there` : ""}` : corrections > 0 ? `you corrected this session ${times(corrections)} while it worked in ${where}` : `this session has searched ${where}`}. ${article(line.name)} ${line.name} would answer the next question in seconds. Review it: ${line.url} (or type /isoplan:expert)`;
 }
 /** The note on a later tool result once the expert made from the session's offer is ready. */
-const readyNoteText = (line) => `Isoplan: the ${line.name} is ready. Ask it (ask_expert, key ${line.key}) before you search ${folderWords(line.folder)} again.`;
+const readyNoteText = (line) => `Isoplan: the ${line.name} is ready. Ask it with ask_expert, expert "${line.key}", before you search ${folderWords(line.folder)} again.`;
 //#endregion
 //#region src/lines.ts
 /** How long after a `superseded` line its hooks module tries again (src/hooks/register.ts). */

@@ -1085,6 +1085,19 @@ test("areas: with no kind on the line, an error result saying the person turned 
   expect((await factsOf(home, "s")).areas).toEqual([area("a", { reads: 1, corrections: 1 })]);
 });
 
+test("areas: with no kind on the line, a turned-down result among others in it leaves the others' size and time counted", async () => {
+  const { home, main } = office();
+  fs.mkdirSync(path.join(main, "a"), { recursive: true });
+  const refusal = result(main, "r1", REFUSAL, 90, { isError: true });
+  const ok = result(main, "r2", "x".repeat(400), 90);
+  session(home, "s", [
+    line.user(main, "read both", 100),
+    { type: "assistant", cwd: main, timestamp: at(95), message: { role: "assistant", content: [{ type: "tool_use", id: "r1", name: "Read", input: { file_path: path.join(main, "a", "p.ts") } }, { type: "tool_use", id: "r2", name: "Read", input: { file_path: path.join(main, "a", "q.ts") } }] } },
+    { ...ok, message: { role: "user", content: [...refusal.message.content, ...ok.message.content] } },
+  ]);
+  expect((await factsOf(home, "s")).areas).toEqual([area("a", { reads: 2, tokens: 100, ms: 5000, corrections: 1 })]);
+});
+
 test("areas: a message counts once the local model has said it corrects, and is asked again until then; one after a turn in no folder isn't asked", async () => {
   const { home, main } = office();
   fs.mkdirSync(path.join(main, "a"), { recursive: true });

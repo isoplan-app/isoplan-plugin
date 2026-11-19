@@ -46,11 +46,8 @@
     "tokens": 30000,
     "minutes": 10,
     "corrections": 2,
-    "officeSessions": 3,
-    "officeDays": 7,
-    "snoozeDays": 30,
+    "rememberDays": 30,
     "draftModel": "haiku",
-    "model": "sonnet",
     "promoteAtTokens": 100000,
     "checksPerHour": 20,
     "timeoutSeconds": 60

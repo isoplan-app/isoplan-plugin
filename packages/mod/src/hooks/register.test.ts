@@ -408,7 +408,7 @@ test("hooks: once the expert made from the session's offer is ready, its link go
   expect(h.status.at(-1)).toBe("Isoplan: dev ✓");
   // A subagent's result doesn't carry it; the lead's next does, and only that one.
   expect(await call(h, { agentId: "w1" })).toEqual({ result: "ok" });
-  expect(await call(h, {})).toEqual({ result: "ok", context: ["Isoplan: the Parser Rules Expert is ready. Ask it (ask_expert, key parser-rules) before you search src/parser again."] });
+  expect(await call(h, {})).toEqual({ result: "ok", context: ["Isoplan: the Parser Rules Expert is ready. Ask it with ask_expert, expert \"parser-rules\", before you search src/parser again."] });
   expect(await call(h, {})).toEqual({ result: "ok" });
 });
 

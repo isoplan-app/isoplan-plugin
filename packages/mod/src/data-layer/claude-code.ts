@@ -956,9 +956,9 @@ function foldLine(st: TranscriptState, line: string, home: string | null, isDir?
     let toolResults = false;
     if (typeof content === "string") readNotifications(st, content, at);
     else if (Array.isArray(content)) {
-      // A call that never ran (turned down, interrupted, cancelled) read nothing.
+      // A call that never ran (turned down, interrupted, cancelled) read nothing: a line's
+      // toolDenialKind is the whole line's; without one, each result says for itself.
       const down = turnedDown(ev, content, st.area.names);
-      const ran = !down && ev.toolDenialKind === undefined;
       for (const c of content) {
         if (!c || typeof c !== "object") continue;
         if (c.type === "text" && typeof c.text === "string") readNotifications(st, c.text, at);
@@ -967,7 +967,7 @@ function foldLine(st: TranscriptState, line: string, home: string | null, isDir?
           st.results.set(c.tool_use_id, { ...toolResult(ev.toolUseResult, c.is_error), at });
           const launch = workflowLaunch(ev.toolUseResult);
           if (launch) st.workflows.set(launch.runId, { ...launch, at });
-          areaResult(st.area, c, at, ran);
+          areaResult(st.area, c, at, ev.toolDenialKind === undefined && !refused(c, st.area.names));
         }
       }
       if (down) {
@@ -1286,11 +1286,14 @@ function areaResult(a: AreaState, c: Line, at: number, ran: boolean): void {
   if (at > call.at) t.ms += at - call.at;
 }
 
+// Whether one tool result, in a line with no toolDenialKind, says the person turned its call down.
+const refused = (c: Line, names: Map<string, string>) => c.is_error === true && resultText(c.content).includes(TURNED_DOWN) && !(names.get(c.tool_use_id) ?? "").startsWith("mcp__");
+
 // Whether a user line is a tool result for a call the person turned down (see the top of this file).
 function turnedDown(ev: Line, content: Line[], names: Map<string, string>): boolean {
   if (!content.some((c) => c && c.type === "tool_result")) return false;
   if (typeof ev.toolDenialKind === "string") return ev.toolDenialKind === "user-rejected";
-  return content.some((c) => c && c.type === "tool_result" && c.is_error === true && resultText(c.content).includes(TURNED_DOWN) && !(names.get(c.tool_use_id) ?? "").startsWith("mcp__"));
+  return content.some((c) => c && c.type === "tool_result" && refused(c, names));
 }
 
 // A prompt: the turn before it ends, and a person's message after a turn that worked in a folder

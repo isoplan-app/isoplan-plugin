@@ -30,6 +30,6 @@ test("a name that starts with a vowel takes an", () => {
   expect(offerStatusText(line({}))).toBe("A Parser Expert could help · review: http://127.0.0.1:4747/?offer=o1");
 });
 
-test("the ready note names the expert, its key for ask_expert, and the folder", () => {
-  expect(readyNoteText({ type: "expert-ready", server: "s", id: "o1", key: "docs", name: "Docs Expert", folder: "." })).toBe("Isoplan: the Docs Expert is ready. Ask it (ask_expert, key docs) before you search the repo's top folder again.");
+test("the ready note names the expert, its name for ask_expert's expert, and the folder", () => {
+  expect(readyNoteText({ type: "expert-ready", server: "s", id: "o1", key: "docs", name: "Docs Expert", folder: "." })).toBe("Isoplan: the Docs Expert is ready. Ask it with ask_expert, expert \"docs\", before you search the repo's top folder again.");
 });
