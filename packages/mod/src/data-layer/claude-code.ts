@@ -14,7 +14,9 @@
 // folder of a repo, so the runner can offer an expert on one (runner/offers.ts). Every Read, Grep and
 // Glob call, the lead's and any subagent's folded here, counts in the folder it names and in each
 // folder above it up to the repo's root (the root itself aside), so the deepest folder that passes
-// a threshold can be picked: a read or a search, its result's size as characters / 4 for tokens, and
+// a threshold can be picked. A Grep or Glob at the root (most name no path) counts instead in the
+// deepest folder that holds all its results' files (its toolUseResult's `filenames`, or the file
+// each line of a content or count search starts with), when that isn't the root, else nowhere: a read or a search, its result's size as characters / 4 for tokens, and
 // the time from the call to its result. A turn's corrections count once in each folder it worked in
 // (those calls, and edits): the person interrupting it ("[Request interrupted by user"), turning a
 // tool call down, or a message after it that a local model judges as telling the agent it was wrong
@@ -725,6 +727,8 @@ interface TranscriptState {
 /** One folder's (or a file Grep searched) tally, under the path its calls named. */
 interface AreaTally {
   path: string;
+  /** For searches whose results' files were all in a folder below `path`: that folder, where they count when `path` is a repo's root. */
+  within?: string;
   reads: number;
   searches: number;
   chars: number;
@@ -749,8 +753,8 @@ interface AreaAsk {
 }
 
 interface AreaState {
-  tallies: Map<string, AreaTally>; // pathKey → its tally
-  calls: Map<string, { key: string; at: number }>; // each Read, Grep and Glob waiting for its result, by tool_use id
+  tallies: Map<string, AreaTally>; // pathKey → its tally; `<pathKey>\n<within's pathKey>` for searches whose results were all below it
+  calls: Map<string, { key: string; at: number; cwd: string | null; search: boolean }>; // each Read, Grep and Glob waiting for its result, by tool_use id
   names: Map<string, string>; // the tool of each recent call, by tool_use id
   turn: AreaTurn; // the turn under way
   turns: AreaTurn[]; // ended turns that worked in a folder: the latest with their words, older ones only for their corrections
@@ -967,7 +971,7 @@ function foldLine(st: TranscriptState, line: string, home: string | null, isDir?
           st.results.set(c.tool_use_id, { ...toolResult(ev.toolUseResult, c.is_error), at });
           const launch = workflowLaunch(ev.toolUseResult);
           if (launch) st.workflows.set(launch.runId, { ...launch, at });
-          areaResult(st.area, c, at, ev.toolDenialKind === undefined && !refused(c, st.area.names));
+          areaResult(st.area, c, at, ev.toolDenialKind === undefined && !refused(c, st.area.names), ev.toolUseResult);
         }
       }
       if (down) {
@@ -1264,7 +1268,7 @@ function areaCall(a: AreaState, c: Line, cwd: string | null, at: number): void {
   if (kind === "read") t.reads++;
   else t.searches++;
   if (typeof c.id === "string") {
-    a.calls.set(c.id, { key, at });
+    a.calls.set(c.id, { key, at, cwd, search: kind === "search" });
     capped(a.calls, MAX_AREA_CALLS);
   }
 }
@@ -1275,13 +1279,50 @@ function resultText(content: unknown): string {
   return Array.isArray(content) ? content.map((b) => (b && b.type === "text" && typeof b.text === "string" ? b.text : "")).join("") : "";
 }
 
-// A Read, Grep or Glob's result: its size and the time since its call go to the call's folder, when it ran.
-function areaResult(a: AreaState, c: Line, at: number, ran: boolean): void {
+// The files a Grep's or Glob's result names, as Claude Code writes them (relative to its folder, or
+// absolute): its `filenames`, else the file each line of a content or count search starts with.
+function resultFiles(used: unknown): string[] {
+  if (!used || typeof used !== "object") return [];
+  const r = used as Line;
+  if (Array.isArray(r.filenames) && r.filenames.length) return r.filenames.filter((f: unknown): f is string => typeof f === "string" && f !== "");
+  if (typeof r.content !== "string") return [];
+  return r.content.split(/\r?\n/).flatMap((l: string) => /^(.+?):\d+(?::|$)/.exec(l)?.[1] ?? []);
+}
+
+// The deepest folder that holds every one of `files`, absolute; null with none, or one that can't be placed.
+function holding(files: string[], cwd: string | null): string | null {
+  const dirs = files.map((f) => (isAbsolute(f) ? dirname(f) : cwd ? dirname(join(cwd, f)) : null));
+  if (!dirs.length || dirs.includes(null)) return null;
+  let common = dirs[0]!;
+  for (const d of dirs) {
+    while (pathKey(common) !== pathKey(d!) && relativeTo(common, d!) === null) {
+      const up = dirname(common);
+      if (up === common) return null;
+      common = up;
+    }
+  }
+  return common;
+}
+
+// A Read, Grep or Glob's result: its size and the time since its call go to the call's folder, when
+// it ran. A search whose results' files are all in a folder below the one it named moves to a tally
+// of its own, `within` that folder.
+function areaResult(a: AreaState, c: Line, at: number, ran: boolean, used: unknown): void {
   const call = a.calls.get(c.tool_use_id);
   if (!call) return;
   a.calls.delete(c.tool_use_id);
-  const t = a.tallies.get(call.key);
+  let t = a.tallies.get(call.key);
   if (!t || !ran) return;
+  const within = call.search ? holding(resultFiles(used), call.cwd) : null;
+  if (within && relativeTo(t.path, within)) {
+    const key = `${call.key}\n${pathKey(within)}`;
+    const own = a.tallies.get(key) ?? { path: t.path, within, reads: 0, searches: 0, chars: 0, ms: 0 };
+    a.tallies.set(key, own);
+    t.searches--;
+    if (!t.reads && !t.searches && !t.chars && !t.ms) a.tallies.delete(call.key);
+    own.searches++;
+    t = own;
+  }
   t.chars += resultText(c.content).length;
   if (at > call.at) t.ms += at - call.at;
 }
@@ -1366,8 +1407,10 @@ async function areasOf(sources: AreaSource[], place: Attribution, corrected: Rea
     return f;
   };
   for (const { area } of sources) {
-    for (const [key, t] of area.tallies) {
-      const g = await where(key, t.path);
+    for (const t of area.tallies.values()) {
+      let g = await where(pathKey(t.path), t.path);
+      // A search at a repo's root counts in the folder below it that holds all its results' files.
+      if (g && !g.folders.length && t.within) g = await where(pathKey(t.within), t.within);
       for (const folder of g?.folders ?? []) {
         const f = factOf(g!, folder);
         f.reads += t.reads;
@@ -1409,7 +1452,8 @@ async function areasOf(sources: AreaSource[], place: Attribution, corrected: Rea
         let inside = false;
         for (const [key, path] of turn.dirs) {
           const g = await where(key, path);
-          if (g && g.group === (project ?? "") && g.folders.includes(folder)) inside = true;
+          // Letter case aside: an office may send a project id lower-cased.
+          if (g && g.group.toLowerCase() === (project ?? "").toLowerCase() && g.folders.includes(folder)) inside = true;
         }
         if (inside) out.push([turn.prompt && `Asked: ${turn.prompt}`, turn.reply && `Answered: ${turn.reply}`].filter(Boolean).join("\n"));
       }

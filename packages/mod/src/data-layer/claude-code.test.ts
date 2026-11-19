@@ -1027,6 +1027,28 @@ test("areas: each Read, Grep and Glob counts in its folder and every folder abov
   ]);
 });
 
+test("areas: a Grep or Glob at the repo's root counts in the deepest folder holding all its results' files, when that isn't the root, else nowhere", async () => {
+  const { home, main } = office();
+  for (const dir of ["packages/mod/src", "packages/server", "docs"]) fs.mkdirSync(path.join(main, dir), { recursive: true });
+  session(home, "s", [
+    line.user(main, "where is pairing?", 100),
+    // No path: its files, relative to the session's folder, are all in packages/mod/src.
+    call(main, "g1", "Grep", { pattern: "pair" }, 90),
+    { ...result(main, "g1", "x".repeat(400), 88), toolUseResult: { mode: "files_with_matches", filenames: ["packages/mod/src/a.ts", "packages/mod/src/b.ts"], numFiles: 2 } },
+    // The root as its path, in content mode: each line starts with its file.
+    call(main, "g2", "Grep", { pattern: "pair", path: main, output_mode: "content" }, 80),
+    { ...result(main, "g2", "y".repeat(40), 80), toolUseResult: { mode: "content", filenames: [], content: "packages/server/x.ts:3:pair()\npackages/mod/src/a.ts:9:pair" } },
+    // Files across the root: nowhere.
+    call(main, "b1", "Glob", { pattern: "**/*.md" }, 70),
+    { ...result(main, "b1", "z".repeat(40), 70), toolUseResult: { filenames: [path.join(main, "docs", "a.md"), path.join(main, "README.md")], numFiles: 2 } },
+  ]);
+  expect((await factsOf(home, "s")).areas).toEqual([
+    area("packages", { searches: 2, tokens: 110, ms: 2000 }),
+    area("packages/mod", { searches: 1, tokens: 100, ms: 2000 }),
+    area("packages/mod/src", { searches: 1, tokens: 100, ms: 2000 }),
+  ]);
+});
+
 test("areas: a subagent's calls count to its session's areas, and still do once it has left the view", async () => {
   const { home, main } = office();
   const adr = path.join(main, "docs", "adr");
@@ -1139,4 +1161,13 @@ test("areas: what the session said in its turns in a folder stays on the machine
   expect(await r.said!(null, "a")).toEqual(["Asked: how is b laid out?\nAnswered: b holds the parser.", "Asked: map a\nAnswered: a has b in it."]);
   expect(await r.said!(null, "a/b")).toEqual(["Asked: how is b laid out?\nAnswered: b holds the parser."]);
   expect(await r.said!("github.com/team/web", "a")).toEqual([]);
+});
+
+test("areas: what the session said in another repo's folder is found whatever the letter case of that repo's id", async () => {
+  const { home, main, other } = office();
+  fs.mkdirSync(path.join(other, "a"), { recursive: true });
+  session(home, "s", [line.user(main, "how does a work?", 100), call(main, "r1", "Read", { file_path: path.join(other, "a", "p.ts") }, 95), result(main, "r1", "x", 95), line.text(main, "a parses.", 94)]);
+  const r = await sourceIn(home)("s", main);
+  const id = r.facts!.areas!.find((a) => a.folder === "a")!.project!.id;
+  expect(await r.said!(id.toUpperCase(), "a")).toEqual(["Asked: how does a work?\nAnswered: a parses."]);
 });
