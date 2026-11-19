@@ -8585,6 +8585,7 @@ function inRepos(facts) {
 		...facts,
 		edits: placed(facts.edits),
 		reads: placed(facts.reads),
+		...facts.areas && { areas: placed(facts.areas) },
 		agents: facts.agents.map((a) => a.doing && !a.doing.project && a.doing.file !== void 0 ? {
 			...a,
 			doing: {
@@ -8871,6 +8872,8 @@ function diffFacts(before, after, answered) {
 	const workflows = diff(before.workflows ?? [], after.workflows ?? [], (w) => w.id);
 	if (workflows.upsert.length) upsert.workflows = workflows.upsert;
 	if (workflows.remove.length) remove.workflows = workflows.remove.map((w) => w.id);
+	const areas = diff(before.areas ?? [], after.areas ?? [], (a) => key(a.folder, a.project?.id ?? ""));
+	if (areas.upsert.length) upsert.areas = areas.upsert;
 	return Object.keys(upsert).length || Object.keys(remove).length ? {
 		upsert,
 		remove
@@ -9288,6 +9291,7 @@ function createAttribution({ folder, where: home, resolve, projectOf, stat, real
 			const up = dirname(at);
 			if (up === at) return {
 				real: p,
+				found: p,
 				where: null
 			};
 			at = up;
@@ -9297,12 +9301,14 @@ function createAttribution({ folder, where: home, resolve, projectOf, stat, real
 		const where = await resolve(realAt);
 		return {
 			real: rest ? `${realAt.replace(/\/$/, "")}/${rest}` : realAt,
+			found: realAt,
 			where: where && {
 				...where,
 				toplevel: await realOf(where.toplevel)
 			}
 		};
 	}
+	const under = (root, dir) => pathKey(root) === pathKey(dir) ? "." : relativeTo(root, dir);
 	async function elsewhere(where, real) {
 		if (home && pathKey(where.commonDir) === pathKey(home.commonDir)) return {};
 		const project = await projectOf(where);
@@ -9327,11 +9333,21 @@ function createAttribution({ folder, where: home, resolve, projectOf, stat, real
 			const { real: d, where } = await locate(dir, true);
 			if (where) return elsewhere(where, d);
 			return !home && (relativeTo(await homeFolder, d) !== null || pathKey(await homeFolder) === pathKey(d)) ? {} : null;
+		},
+		async folder(path) {
+			const { found, where } = await locate(path, true);
+			const folder = where && under(where.toplevel, found);
+			if (where && folder) return {
+				folder,
+				...await elsewhere(where, found)
+			};
+			const own = !home && under(await homeFolder, found);
+			return own ? { folder: own } : null;
 		}
 	};
 }
 /**
-* The facts as they may leave the machine: a file, command or subagent's checkout in another repo
+* The facts as they may leave the machine: a file, command, area or subagent's checkout in another repo
 * only when `projects`, the office's from the server's welcome, holds that repo. Without a welcome
 * (an older server, or none yet on this connection) none of them leave. `checkouts` names the
 * project of each subagent whose worktree is another repo's, by agent id.
@@ -9358,7 +9374,8 @@ function forOffice$1(facts, projects, checkouts = {}) {
 			return out;
 		}),
 		edits: files(facts.edits),
-		reads: files(facts.reads)
+		reads: files(facts.reads),
+		...facts.areas && { areas: facts.areas.every((a) => ok(a.project)) ? facts.areas : facts.areas.filter((a) => ok(a.project)) }
 	};
 }
 //#endregion
@@ -10109,7 +10126,7 @@ function createWorkflowReader(io) {
 				label: text(ev.label) ?? "",
 				phase: text(ev.phase) ?? ""
 			});
-			if (ev.type === "result") st.results.set(ev.agentId, resultText$1(ev.result));
+			if (ev.type === "result") st.results.set(ev.agentId, resultText$2(ev.result));
 		}
 		return st;
 	}
@@ -10477,7 +10494,7 @@ function literal(src, start) {
 		return null;
 	}
 }
-function resultText$1(v) {
+function resultText$2(v) {
 	if (v === void 0 || v === null) return null;
 	if (typeof v === "string") return v.trim() ? v : null;
 	try {
@@ -10532,8 +10549,9 @@ function createClaudeCode(io) {
 	const places = attributionCache();
 	const searched = /* @__PURE__ */ new Map();
 	const runs = createWorkflowReader(io);
+	const areaStates = /* @__PURE__ */ new Map();
 	let used = /* @__PURE__ */ new Set();
-	async function read({ sessionId, cwd, now, config, resolve, projectOf }) {
+	async function read({ sessionId, cwd, now, config, resolve, projectOf, corrected }) {
 		used = /* @__PURE__ */ new Set();
 		runs.begin();
 		const errors = {
@@ -10590,14 +10608,15 @@ function createClaudeCode(io) {
 				now
 			});
 			const checkouts = {};
-			const { facts, answered } = await sessionFacts(c, main, where, workspace, now, config, resolve, place, fail, checkouts);
+			const { facts, answered, said } = await sessionFacts(c, main, where, workspace, now, config, resolve, place, fail, checkouts, corrected);
 			return {
 				facts,
 				status: null,
 				errors,
 				workspace,
 				checkouts,
-				answered
+				answered,
+				said
 			};
 		} finally {
 			for (const cache of [transcripts, metas]) for (const key of cache.keys()) if (!used.has(key)) cache.delete(key);
@@ -10696,7 +10715,7 @@ function createClaudeCode(io) {
 		});
 		return is;
 	}
-	async function sessionFacts(c, main, where, workspace, now, config, resolve, place, fail, checkouts) {
+	async function sessionFacts(c, main, where, workspace, now, config, resolve, place, fail, checkouts, corrected) {
 		const session = `${SOURCE}:${c.id}`;
 		const lead = `${session}:lead`;
 		const agentFiles = [];
@@ -10916,13 +10935,25 @@ function createClaudeCode(io) {
 			a.t.touches = await addFiles(facts.edits, id, a.t.touches, [...config.touchedTools, ...config.shellTools], now, config, place);
 			a.t.reads = await addFiles(facts.reads, id, a.t.reads, [...READ_TOOLS$1, ...config.shellTools], now, config, place);
 		}
+		areaStates.set(c.path, {
+			area: main.area,
+			lastText: main.lastText
+		});
+		for (const a of agentFiles) areaStates.set(a.path, {
+			area: a.t.area,
+			lastText: a.t.lastText
+		});
+		const own = [...areaStates].filter(([p]) => p !== c.path && pathKey(p).startsWith(pathKey(sessionDir) + "/")).map(([, s]) => s);
+		const { areas, said } = await areasOf([areaStates.get(c.path), ...own], place, corrected);
+		if (areas.length) facts.areas = areas;
 		const answered = (id) => {
 			const r = results.get(id);
 			return !!r && !r.launched && r.status === "completed";
 		};
 		return {
 			facts,
-			answered
+			answered,
+			said
 		};
 	}
 	async function readMeta(p) {
@@ -11091,9 +11122,24 @@ function newTranscriptState() {
 		firstPrompt: null,
 		compacted: false,
 		asks: /* @__PURE__ */ new Map(),
-		workflows: /* @__PURE__ */ new Map()
+		workflows: /* @__PURE__ */ new Map(),
+		area: {
+			tallies: /* @__PURE__ */ new Map(),
+			calls: /* @__PURE__ */ new Map(),
+			names: /* @__PURE__ */ new Map(),
+			turn: newTurn(null),
+			turns: [],
+			rejected: false,
+			asks: []
+		}
 	};
 }
+const newTurn = (prompt) => ({
+	dirs: /* @__PURE__ */ new Map(),
+	corrections: 0,
+	prompt,
+	reply: null
+});
 const MESSAGE_TYPES = /* @__PURE__ */ new Set([
 	"user",
 	"assistant",
@@ -11126,6 +11172,7 @@ function foldLine(st, line, home, isDir) {
 	if (ev.type === "assistant" && Array.isArray(content)) {
 		st.lastRole = "assistant";
 		st.waiting = false;
+		st.area.rejected = false;
 		readUsage(st, ev.message, at);
 		for (const c of content) {
 			if (!c || typeof c !== "object") continue;
@@ -11147,6 +11194,7 @@ function foldLine(st, line, home, isDir) {
 			});
 			const input = c.input || {};
 			const cwd = ev.cwd || st.cwd;
+			areaCall(st.area, c, cwd, at);
 			const shell = typeof input.command === "string" ? shellFiles(input.command, cwd, {
 				powershell: c.name === "PowerShell",
 				home,
@@ -11200,25 +11248,39 @@ function foldLine(st, line, home, isDir) {
 		st.lastRole = "user";
 		let toolResults = false;
 		if (typeof content === "string") readNotifications(st, content, at);
-		else if (Array.isArray(content)) for (const c of content) {
-			if (!c || typeof c !== "object") continue;
-			if (c.type === "text" && typeof c.text === "string") readNotifications(st, c.text, at);
-			if (c.type === "tool_result" && typeof c.tool_use_id === "string") {
-				toolResults = true;
-				st.results.set(c.tool_use_id, {
-					...toolResult(ev.toolUseResult, c.is_error),
-					at
-				});
-				const launch = workflowLaunch(ev.toolUseResult);
-				if (launch) st.workflows.set(launch.runId, {
-					...launch,
-					at
-				});
+		else if (Array.isArray(content)) {
+			const down = turnedDown(ev, content, st.area.names);
+			const ran = !down && ev.toolDenialKind === void 0;
+			for (const c of content) {
+				if (!c || typeof c !== "object") continue;
+				if (c.type === "text" && typeof c.text === "string") readNotifications(st, c.text, at);
+				if (c.type === "tool_result" && typeof c.tool_use_id === "string") {
+					toolResults = true;
+					st.results.set(c.tool_use_id, {
+						...toolResult(ev.toolUseResult, c.is_error),
+						at
+					});
+					const launch = workflowLaunch(ev.toolUseResult);
+					if (launch) st.workflows.set(launch.runId, {
+						...launch,
+						at
+					});
+					areaResult(st.area, c, at, ran);
+				}
+			}
+			if (down) {
+				st.area.turn.corrections++;
+				st.area.rejected = true;
 			}
 		}
 		const turn = userTurn$1(ev, content);
 		if (turn !== null) setTurn(st, turn, at);
+		if (turn === false) {
+			if (!st.area.rejected) st.area.turn.corrections++;
+			st.area.rejected = false;
+		}
 		if (turn === true && !toolResults) {
+			areaPrompt(st, ev, content, at);
 			st.lastTool = null;
 			st.asks.clear();
 			st.prompts++;
@@ -11398,6 +11460,222 @@ async function doingOf(st, place, fallbackMs, config) {
 		kind,
 		...t.file && t.cwd ? await place.file(t.file) : t.dir ? await place.dir(t.dir) : null,
 		since: iso$1(t.at, fallbackMs)
+	};
+}
+const AREA_TOOLS = {
+	Read: "read",
+	Grep: "search",
+	Glob: "search"
+};
+const AREA_EDITS = /* @__PURE__ */ new Set([
+	"Edit",
+	"Write",
+	"NotebookEdit"
+]);
+const TURNED_DOWN = "The user doesn't want to proceed with this tool use";
+const MAX_AREA_CALLS = 200;
+const MAX_AREA_NAMES = 100;
+const SAID_TURNS = 20;
+const MAX_AREA_TURNS = 500;
+const MAX_AREA_ASKS = 100;
+const SAID_PROMPT_CHARS = 500;
+const SAID_REPLY_CHARS = 1e3;
+const ASK_CHARS = 2e3;
+const NOT_AREAS = /* @__PURE__ */ new Set(["node_modules", ".git"]);
+const capped = (map, max) => {
+	if (map.size > max) map.delete(map.keys().next().value);
+};
+function areaPath(name, input, cwd) {
+	const absolute = (p) => typeof p !== "string" || !p ? null : isAbsolute(p) ? normalize(p) : cwd ? join(cwd, p) : null;
+	const here = cwd ? normalize(cwd) : null;
+	if (name === "Grep") return absolute(input.path) ?? here;
+	if (name === "Glob") {
+		const base = absolute(input.path) ?? here;
+		const parts = (typeof input.pattern === "string" ? input.pattern : "").replace(/\\/g, "/").split("/");
+		const wild = parts.findIndex((p) => /[*?[\]{}]/.test(p));
+		const prefix = (wild < 0 ? parts : parts.slice(0, wild)).join("/");
+		if (!prefix) return base;
+		return isAbsolute(prefix) ? normalize(prefix) : base && join(base, prefix);
+	}
+	const file = absolute(input.file_path ?? input.notebook_path);
+	return file && dirname(file);
+}
+function areaCall(a, c, cwd, at) {
+	if (typeof c.id === "string" && typeof c.name === "string") {
+		a.names.set(c.id, c.name);
+		capped(a.names, MAX_AREA_NAMES);
+	}
+	const kind = Object.hasOwn(AREA_TOOLS, c.name) ? AREA_TOOLS[c.name] : AREA_EDITS.has(c.name) ? "edit" : null;
+	const path = kind && areaPath(c.name, c.input && typeof c.input === "object" ? c.input : {}, cwd);
+	if (!kind || !path) return;
+	const key = pathKey(path);
+	a.turn.dirs.set(key, path);
+	if (kind === "edit") return;
+	let t = a.tallies.get(key);
+	if (!t) a.tallies.set(key, t = {
+		path,
+		reads: 0,
+		searches: 0,
+		chars: 0,
+		ms: 0
+	});
+	if (kind === "read") t.reads++;
+	else t.searches++;
+	if (typeof c.id === "string") {
+		a.calls.set(c.id, {
+			key,
+			at
+		});
+		capped(a.calls, MAX_AREA_CALLS);
+	}
+}
+function resultText$1(content) {
+	if (typeof content === "string") return content;
+	return Array.isArray(content) ? content.map((b) => b && b.type === "text" && typeof b.text === "string" ? b.text : "").join("") : "";
+}
+function areaResult(a, c, at, ran) {
+	const call = a.calls.get(c.tool_use_id);
+	if (!call) return;
+	a.calls.delete(c.tool_use_id);
+	const t = a.tallies.get(call.key);
+	if (!t || !ran) return;
+	t.chars += resultText$1(c.content).length;
+	if (at > call.at) t.ms += at - call.at;
+}
+function turnedDown(ev, content, names) {
+	if (!content.some((c) => c && c.type === "tool_result")) return false;
+	if (typeof ev.toolDenialKind === "string") return ev.toolDenialKind === "user-rejected";
+	return content.some((c) => c && c.type === "tool_result" && c.is_error === true && resultText$1(c.content).includes(TURNED_DOWN) && !(names.get(c.tool_use_id) ?? "").startsWith("mcp__"));
+}
+function areaPrompt(st, ev, content, at) {
+	const a = st.area;
+	const before = a.turn;
+	endTurn(a, st.lastText);
+	const text = promptText(content).trim();
+	const person = text !== "" && !text.startsWith("<");
+	if (person && before.dirs.size) {
+		a.asks.push({
+			key: typeof ev.uuid === "string" ? ev.uuid : String(at),
+			text: text.slice(0, ASK_CHARS),
+			reply: before.reply,
+			dirs: [...before.dirs.values()],
+			correction: null
+		});
+		if (a.asks.length > MAX_AREA_ASKS) a.asks.shift();
+	}
+	a.turn = newTurn(person ? text.slice(0, SAID_PROMPT_CHARS) : null);
+}
+function endTurn(a, reply) {
+	const t = a.turn;
+	if (!t.dirs.size) return;
+	t.reply = reply ? reply.slice(0, SAID_REPLY_CHARS) : null;
+	a.turns.push(t);
+	const at = a.turns.length - 1 - SAID_TURNS;
+	const older = a.turns[at];
+	if (older) {
+		older.prompt = older.reply = null;
+		if (!older.corrections) a.turns.splice(at, 1);
+	}
+	if (a.turns.length > MAX_AREA_TURNS) a.turns.shift();
+}
+function ancestors(folder) {
+	if (folder === ".") return [];
+	const out = [];
+	const parts = folder.split("/");
+	for (let i = 0; i < parts.length && !NOT_AREAS.has(parts[i]); i++) out.push(parts.slice(0, i + 1).join("/"));
+	return out;
+}
+/**
+* The session's areas from its transcripts' area states, the lead's first, at most MAX_AREAS, and
+* what it said in each. A path is placed as a folder (attribution.ts): its nearest folder that
+* exists, in a repo or the workspace. A message `corrected` has judged is settled for good, and its
+* words dropped.
+*/
+async function areasOf(sources, place, corrected) {
+	const placed = /* @__PURE__ */ new Map();
+	const where = (key, path) => {
+		let p = placed.get(key);
+		if (!p) {
+			p = place.folder(path).then((f) => f && {
+				group: f.project?.id ?? "",
+				...f.project && { project: f.project },
+				...f.away && { away: true },
+				folders: ancestors(f.folder)
+			}, () => null);
+			placed.set(key, p);
+		}
+		return p;
+	};
+	const facts = /* @__PURE__ */ new Map();
+	const factOf = (g, folder) => {
+		const k = `${g.group}\n${folder}`;
+		let f = facts.get(k);
+		if (!f) facts.set(k, f = {
+			folder,
+			reads: 0,
+			searches: 0,
+			tokens: 0,
+			ms: 0,
+			corrections: 0,
+			chars: 0,
+			...g.project && { project: g.project },
+			...g.away && { away: true }
+		});
+		return f;
+	};
+	for (const { area } of sources) for (const [key, t] of area.tallies) {
+		const g = await where(key, t.path);
+		for (const folder of g?.folders ?? []) {
+			const f = factOf(g, folder);
+			f.reads += t.reads;
+			f.searches += t.searches;
+			f.ms += t.ms;
+			f.chars += t.chars;
+		}
+	}
+	const correct = async (dirs, n) => {
+		const hit = /* @__PURE__ */ new Set();
+		for (const [key, path] of dirs) {
+			const g = await where(key, path);
+			for (const folder of g?.folders ?? []) hit.add(factOf(g, folder));
+		}
+		for (const f of hit) f.corrections += n;
+	};
+	for (const { area } of sources) for (const turn of [...area.turns, area.turn]) if (turn.corrections) await correct(turn.dirs, turn.corrections);
+	for (const ask of sources[0].area.asks) {
+		if (ask.correction === null && ask.text !== null && corrected) {
+			const judged = corrected(ask.key, ask.text, ask.reply);
+			if (judged !== null) Object.assign(ask, {
+				correction: judged,
+				text: null,
+				reply: null
+			});
+		}
+		if (ask.correction) await correct(ask.dirs.map((p) => [pathKey(p), p]), 1);
+	}
+	const areas = [...facts.values()].filter((f) => AreaPathSchema.safeParse(f.folder).success).map(({ chars, ...f }) => ({
+		...f,
+		tokens: Math.round(chars / 4)
+	})).sort((a, b) => b.tokens - a.tokens || b.ms - a.ms || (a.folder < b.folder ? -1 : a.folder > b.folder ? 1 : 0)).slice(0, 100);
+	const said = async (project, folder) => {
+		const out = [];
+		for (const { area, lastText } of sources) for (const turn of [...area.turns, {
+			...area.turn,
+			reply: lastText?.slice(0, SAID_REPLY_CHARS) ?? null
+		}]) {
+			if (!turn.prompt && !turn.reply) continue;
+			let inside = false;
+			for (const [key, path] of turn.dirs) {
+				const g = await where(key, path);
+				if (g && g.group === (project ?? "") && g.folders.includes(folder)) inside = true;
+			}
+			if (inside) out.push([turn.prompt && `Asked: ${turn.prompt}`, turn.reply && `Answered: ${turn.reply}`].filter(Boolean).join("\n"));
+		}
+		return out.slice(-8);
+	};
+	return {
+		areas,
+		said
 	};
 }
 //#endregion
@@ -18471,7 +18749,7 @@ async function reporting(o, c) {
 		readText: (p) => fs.readFile(p, "utf8").catch(() => null),
 		run: io.run
 	}, claudeJson, cwd);
-	const openLink = (run, home, mayConnect) => createLink({
+	const openLink = (run, home, mayConnect) => (run.home = home, createLink({
 		url: run.office.server,
 		emit: run.emit,
 		pairing: run.pairing,
@@ -18549,7 +18827,7 @@ async function reporting(o, c) {
 			session: factsSession,
 			project: home
 		}
-	});
+	}));
 	const runs = await Promise.all(offices.filter((o) => !o.plainRefused).map(async (office) => {
 		const { server, label } = office;
 		const until = notWantedBefore[server];
@@ -18563,7 +18841,8 @@ async function reporting(o, c) {
 			connected: false,
 			unwanted: held,
 			unwantedUntil: held ? until : null,
-			sent: null
+			sent: null,
+			home: null
 		};
 		run.hold = await openReportHold(releasedPath(claudeDir, office, sessionId), (text) => emit({
 			type: "log",
@@ -18765,7 +19044,8 @@ async function reporting(o, c) {
 			now,
 			config,
 			resolve,
-			projectOf: projectOfRepo
+			projectOf: projectOfRepo,
+			...o.corrected && { corrected: c.guard(o.corrected, null) }
 		}).catch((err) => ({
 			facts: null,
 			status: String(err?.message ?? err),
@@ -18877,6 +19157,34 @@ async function reporting(o, c) {
 				type: "log",
 				text: `couldn't send this session's facts to ${run.office.server}: ${String(err?.message ?? err)}`
 			});
+		}
+		if (o.areas && facts.areas?.length) {
+			const model = facts.agents.find((a) => a.id === facts.session.lead)?.usage?.model ?? null;
+			for (const run of taking) {
+				const link = run.gate.current();
+				if (!run.home || !link) continue;
+				const welcome = link.projects();
+				const areas = facts.areas.filter((a) => a.project ? !!welcome?.has(a.project.id.toLowerCase()) : !workspace);
+				if (!areas.length) continue;
+				try {
+					o.areas({
+						server: run.office.server,
+						session: facts.session.id,
+						bare: sessionId,
+						project: run.home,
+						checkout: facts.session.checkout ?? cwd,
+						window: contextWindow,
+						model,
+						areas,
+						said: read.said ?? (async () => [])
+					});
+				} catch (err) {
+					emit({
+						type: "log",
+						text: `couldn't look at this session's areas for an expert offer: ${String(err?.message ?? err)}`
+					});
+				}
+			}
 		}
 		const quiet = hooked ? null : detachedStop({
 			now,

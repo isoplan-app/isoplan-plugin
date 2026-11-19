@@ -9,11 +9,29 @@
 //
 // Ids are source-scoped: the session is claude-code:<session id>, its lead claude-code:<session
 // id>:lead, and a subagent claude-code:<agent id>.
+//
+// The session's areas (protocol 0.15.0, isoplan-app#328) say how much its agents worked in each
+// folder of a repo, so the runner can offer an expert on one (runner/offers.ts). Every Read, Grep and
+// Glob call, the lead's and any subagent's folded here, counts in the folder it names and in each
+// folder above it up to the repo's root (the root itself aside), so the deepest folder that passes
+// a threshold can be picked: a read or a search, its result's size as characters / 4 for tokens, and
+// the time from the call to its result. A turn's corrections count once in each folder it worked in
+// (those calls, and edits): the person interrupting it ("[Request interrupted by user"), turning a
+// tool call down, or a message after it that a local model judges as telling the agent it was wrong
+// (ReadInput.corrected; the lead's prompts alone, since a subagent's come from its parent). Claude
+// Code 2.1.328 marks a turned-down call on its tool_result line, `toolDenialKind: "user-rejected"`
+// (found in its own code, 19 Nov 2026, beside the other kinds: permission-rule, automode-*,
+// interrupted, cancelled); an older transcript has no kind, and an error result reading "The user
+// doesn't want to proceed with this tool use" is one, never an MCP tool's, whose text is its own. A
+// plain turn-down is followed by an interruption line, which isn't counted again. Counts only: no
+// path's contents, pattern or result is kept. A subagent that leaves the view keeps its counts.
+// What the session said in its latest turns in a folder (its prompts and replies) stays on the
+// machine, for the runner's draft of an expert (SourceRead.said).
 
-import type { AgentFact, Facts, FileFact, Project, QuestionFact, WorkflowFact } from "@isoplan/protocol";
+import { AreaPathSchema, type AgentFact, type AreaFact, type Facts, type FileFact, type Project, type QuestionFact, type WorkflowFact } from "@isoplan/protocol";
 import { attributionCache, createAttribution, type Attribution, type Placed } from "./attribution.js";
 import type { Config } from "./config.js";
-import { join, normalize, pathKey, relativeTo, type MaybePromise, type Stat, type Where } from "./git.js";
+import { dirname, isAbsolute, join, normalize, pathKey, relativeTo, type MaybePromise, type Stat, type Where } from "./git.js";
 import type { DirEntry } from "./io.js";
 import { shellFiles } from "./shell-writes.js";
 import { agentsInView, createWorkflowReader, endStatus, listWorkflows, viewWorkflow, workflowLaunch, type RunState, type WorkflowAgentView, type WorkflowFiles, type WorkflowLaunch } from "./workflows.js";
@@ -80,6 +98,12 @@ export interface ReadInput {
   resolve: (dir: string) => Promise<Where | null>;
   /** The project a repo is (the caller caches it), for an edit or command that lands in another repo. */
   projectOf: (where: Where) => MaybePromise<Project>;
+  /**
+   * Whether the person's message `text` (its line's `key`), sent after the agent's turn that ended
+   * with `reply`, tells the agent it was wrong: a local model's word, or null while there is none
+   * yet, when it is asked again on a later pass. Without it no message counts as a correction.
+   */
+  corrected?: (key: string, text: string, reply: string | null) => boolean | null;
 }
 
 export interface SourceRead {
@@ -97,6 +121,12 @@ export interface SourceRead {
   checkouts?: Record<string, string>;
   /** Whether the call with this id has a result that isn't an error: for a question, that it was answered. */
   answered?: (id: string) => boolean;
+  /**
+   * What the session said in its latest turns that worked in `folder` of `project` (null for the
+   * session's own), oldest first: each turn's prompt and reply, cut short. Never sent: it is what a
+   * local model drafts an expert from (runner/offers.ts).
+   */
+  said?: (project: string | null, folder: string) => Promise<string[]>;
 }
 
 /**
@@ -112,9 +142,12 @@ export function createClaudeCode(io: SourceIo) {
   const places = attributionCache(); // which folders exist and where links lead, across passes
   const searched = new Map<string, number>(); // session id → when every project folder was last searched
   const runs = createWorkflowReader(io); // the session's workflow runs (workflows.ts)
+  // Each transcript's area state as last read, by its path, kept once it leaves the view, so a
+  // session's areas don't shrink when a subagent does.
+  const areaStates = new Map<string, AreaSource>();
   let used = new Set<string>(); // the cache keys this pass has used
 
-  async function read({ sessionId, cwd, now, config, resolve, projectOf }: ReadInput): Promise<SourceRead> {
+  async function read({ sessionId, cwd, now, config, resolve, projectOf, corrected }: ReadInput): Promise<SourceRead> {
     used = new Set();
     runs.begin();
     const errors = { count: 0, first: null as string | null };
@@ -160,8 +193,8 @@ export function createClaudeCode(io: SourceIo) {
         now,
       });
       const checkouts: Record<string, string> = {};
-      const { facts, answered } = await sessionFacts(c, main, where, workspace, now, config, resolve, place, fail, checkouts);
-      return { facts, status: null, errors, workspace, checkouts, answered };
+      const { facts, answered, said } = await sessionFacts(c, main, where, workspace, now, config, resolve, place, fail, checkouts, corrected);
+      return { facts, status: null, errors, workspace, checkouts, answered, said };
     } finally {
       for (const cache of [transcripts, metas]) {
         for (const key of cache.keys()) if (!used.has(key)) cache.delete(key);
@@ -277,7 +310,8 @@ export function createClaudeCode(io: SourceIo) {
     place: Attribution,
     fail: (err: unknown) => void,
     checkouts: Record<string, string>,
-  ): Promise<{ facts: Facts; answered: (id: string) => boolean }> {
+    corrected: ReadInput["corrected"],
+  ): Promise<{ facts: Facts; answered: (id: string) => boolean; said: NonNullable<SourceRead["said"]> }> {
     const session = `${SOURCE}:${c.id}`;
     const lead = `${session}:lead`;
     const agentFiles: (AgentFile & { t: TranscriptState; meta: Meta })[] = [];
@@ -489,13 +523,20 @@ export function createClaudeCode(io: SourceIo) {
       a.t.touches = await addFiles(facts.edits, id, a.t.touches, [...config.touchedTools, ...config.shellTools], now, config, place);
       a.t.reads = await addFiles(facts.reads, id, a.t.reads, [...READ_TOOLS, ...config.shellTools], now, config, place);
     }
+    // The areas, from every transcript of the session read in this one's life, the lead's first.
+    areaStates.set(c.path, { area: main.area, lastText: main.lastText });
+    for (const a of agentFiles) areaStates.set(a.path, { area: a.t.area, lastText: a.t.lastText });
+    const own = [...areaStates].filter(([p]) => p !== c.path && pathKey(p).startsWith(pathKey(sessionDir) + "/")).map(([, s]) => s);
+    const { areas, said } = await areasOf([areaStates.get(c.path)!, ...own], place, corrected);
+    if (areas.length) facts.areas = areas;
+
     // A question no longer open was answered if its call has a result that isn't an error; an
     // interruption is an error, and a prompt that came first left it with no result at all.
     const answered = (id: string) => {
       const r = results.get(id);
       return !!r && !r.launched && r.status === "completed";
     };
-    return { facts, answered };
+    return { facts, answered, said };
   }
 
   async function readMeta(p: string): Promise<Meta> {
@@ -678,6 +719,49 @@ interface TranscriptState {
   compacted: boolean; // the session was compacted at least once
   asks: Map<string, { at: number; input: unknown }>; // id of each AskUserQuestion tool_use since the last prompt → its time and input
   workflows: Map<string, WorkflowLaunch & { at: number }>; // run id of each workflow this file launched → its launch
+  area: AreaState; // what its calls did in each folder, its turns' corrections and the prompts to check (areasOf)
+}
+
+/** One folder's (or a file Grep searched) tally, under the path its calls named. */
+interface AreaTally {
+  path: string;
+  reads: number;
+  searches: number;
+  chars: number;
+  ms: number;
+}
+
+/** A turn: the folders its calls named (pathKey → path), its corrections, and its words, cut short. */
+interface AreaTurn {
+  dirs: Map<string, string>;
+  corrections: number;
+  prompt: string | null;
+  reply: string | null;
+}
+
+/** A person's message after a turn that worked in folders, until a local model has judged it. */
+interface AreaAsk {
+  key: string;
+  text: string | null;
+  reply: string | null;
+  dirs: string[];
+  correction: boolean | null;
+}
+
+interface AreaState {
+  tallies: Map<string, AreaTally>; // pathKey → its tally
+  calls: Map<string, { key: string; at: number }>; // each Read, Grep and Glob waiting for its result, by tool_use id
+  names: Map<string, string>; // the tool of each recent call, by tool_use id
+  turn: AreaTurn; // the turn under way
+  turns: AreaTurn[]; // ended turns that worked in a folder: the latest with their words, older ones only for their corrections
+  rejected: boolean; // the newest tool result was turned down, so the interruption after it isn't a second correction
+  asks: AreaAsk[];
+}
+
+/** A transcript's area state as areasOf reads it, with its newest text, which a subagent's last turn ends with. */
+interface AreaSource {
+  area: AreaState;
+  lastText: string | null;
 }
 
 const agentId = (id: string) => `${SOURCE}:${id}`;
@@ -779,8 +863,11 @@ function newTranscriptState(): TranscriptState {
     compacted: false,
     asks: new Map(),
     workflows: new Map(),
+    area: { tallies: new Map(), calls: new Map(), names: new Map(), turn: newTurn(null), turns: [], rejected: false, asks: [] },
   };
 }
+
+const newTurn = (prompt: string | null): AreaTurn => ({ dirs: new Map(), corrections: 0, prompt, reply: null });
 
 const MESSAGE_TYPES = new Set(["user", "assistant", "attachment", "system"]);
 
@@ -818,6 +905,7 @@ function foldLine(st: TranscriptState, line: string, home: string | null, isDir?
   if (ev.type === "assistant" && Array.isArray(content)) {
     st.lastRole = "assistant";
     st.waiting = false;
+    st.area.rejected = false;
     readUsage(st, ev.message, at);
     for (const c of content) {
       if (!c || typeof c !== "object") continue;
@@ -840,6 +928,7 @@ function foldLine(st: TranscriptState, line: string, home: string | null, isDir?
       // in the agent's own folder, and its lines stay there. So a cd in an earlier call is already
       // in this line, and shellFiles follows only the ones inside this command.
       const cwd: string | null = ev.cwd || st.cwd;
+      areaCall(st.area, c, cwd, at);
       // Any tool with a command is read as a shell: read time keeps only the `shellTools`.
       const shell = typeof input.command === "string" ? shellFiles(input.command, cwd, { powershell: c.name === "PowerShell", home, isDir }) : { writes: [], reads: [], dirs: [] };
       const writes = shell.writes;
@@ -867,6 +956,9 @@ function foldLine(st: TranscriptState, line: string, home: string | null, isDir?
     let toolResults = false;
     if (typeof content === "string") readNotifications(st, content, at);
     else if (Array.isArray(content)) {
+      // A call that never ran (turned down, interrupted, cancelled) read nothing.
+      const down = turnedDown(ev, content, st.area.names);
+      const ran = !down && ev.toolDenialKind === undefined;
       for (const c of content) {
         if (!c || typeof c !== "object") continue;
         if (c.type === "text" && typeof c.text === "string") readNotifications(st, c.text, at);
@@ -875,13 +967,24 @@ function foldLine(st: TranscriptState, line: string, home: string | null, isDir?
           st.results.set(c.tool_use_id, { ...toolResult(ev.toolUseResult, c.is_error), at });
           const launch = workflowLaunch(ev.toolUseResult);
           if (launch) st.workflows.set(launch.runId, { ...launch, at });
+          areaResult(st.area, c, at, ran);
         }
+      }
+      if (down) {
+        st.area.turn.corrections++;
+        st.area.rejected = true;
       }
     }
     const turn = userTurn(ev, content);
     if (turn !== null) setTurn(st, turn, at);
+    // An interruption, unless it only follows a call the person turned down.
+    if (turn === false) {
+      if (!st.area.rejected) st.area.turn.corrections++;
+      st.area.rejected = false;
+    }
     // A prompt (not a tool result) starts a new turn: the last turn's tool is not what it is doing.
     if (turn === true && !toolResults) {
+      areaPrompt(st, ev, content, at);
       st.lastTool = null;
       st.asks.clear();
       st.prompts++;
@@ -1092,4 +1195,223 @@ async function doingOf(st: TranscriptState, place: Attribution, fallbackMs: numb
   if (!t || !kind) return null;
   const placed = t.file && t.cwd ? await place.file(t.file) : t.dir ? await place.dir(t.dir) : null;
   return { kind, ...placed, since: iso(t.at, fallbackMs) };
+}
+
+// Areas (see the top of this file).
+
+// The calls that count in a folder, and the edits that only mark a turn as working there.
+const AREA_TOOLS: Record<string, "read" | "search"> = { Read: "read", Grep: "search", Glob: "search" };
+const AREA_EDITS = new Set(["Edit", "Write", "NotebookEdit"]);
+// The start of the result Claude Code gives a call the person turned down, in a transcript with no toolDenialKind.
+const TURNED_DOWN = "The user doesn't want to proceed with this tool use";
+// How many calls wait for their results, and how many calls' tools are remembered, at most.
+const MAX_AREA_CALLS = 200;
+const MAX_AREA_NAMES = 100;
+// The latest turns kept with their words, every turn with corrections kept at most, and the
+// person's messages waiting for the correction check at most.
+const SAID_TURNS = 20;
+const MAX_AREA_TURNS = 500;
+const MAX_AREA_ASKS = 100;
+// How much of a prompt, a reply and a message to check is kept.
+const SAID_PROMPT_CHARS = 500;
+const SAID_REPLY_CHARS = 1000;
+const ASK_CHARS = 2000;
+// How many of what a session said in a folder the draft is given.
+const SAID_MAX = 8;
+/** The most areas a session's facts carry: those that took the most tokens, then the most time. */
+export const MAX_AREAS = 100;
+// A folder no expert is offered on, nor anything inside it: what a package manager or git keeps.
+const NOT_AREAS = new Set(["node_modules", ".git"]);
+
+const capped = <K, V>(map: Map<K, V>, max: number) => {
+  if (map.size > max) map.delete(map.keys().next().value!);
+};
+
+// The folder a call names, absolute: Read's and an edit's file's folder, Grep's path (a folder or a
+// file; the session's folder without one), and Glob's path joined with its pattern's part before the
+// first wildcard. Null when there is no folder to place it by.
+function areaPath(name: string, input: Line, cwd: string | null): string | null {
+  const absolute = (p: unknown) => (typeof p !== "string" || !p ? null : isAbsolute(p) ? normalize(p) : cwd ? join(cwd, p) : null);
+  const here = cwd ? normalize(cwd) : null;
+  if (name === "Grep") return absolute(input.path) ?? here;
+  if (name === "Glob") {
+    const base = absolute(input.path) ?? here;
+    const parts = (typeof input.pattern === "string" ? input.pattern : "").replace(/\\/g, "/").split("/");
+    const wild = parts.findIndex((p) => /[*?[\]{}]/.test(p));
+    const prefix = (wild < 0 ? parts : parts.slice(0, wild)).join("/");
+    if (!prefix) return base;
+    return isAbsolute(prefix) ? normalize(prefix) : base && join(base, prefix);
+  }
+  const file = absolute(input.file_path ?? input.notebook_path);
+  return file && dirname(file);
+}
+
+// A tool call: a Read, Grep or Glob counts in its folder now, and waits for its result's size and
+// time; it and an edit mark the turn as working in that folder.
+function areaCall(a: AreaState, c: Line, cwd: string | null, at: number): void {
+  if (typeof c.id === "string" && typeof c.name === "string") {
+    a.names.set(c.id, c.name);
+    capped(a.names, MAX_AREA_NAMES);
+  }
+  const kind = Object.hasOwn(AREA_TOOLS, c.name) ? AREA_TOOLS[c.name]! : AREA_EDITS.has(c.name) ? "edit" : null;
+  const path = kind && areaPath(c.name, c.input && typeof c.input === "object" ? c.input : {}, cwd);
+  if (!kind || !path) return;
+  const key = pathKey(path);
+  a.turn.dirs.set(key, path);
+  if (kind === "edit") return;
+  let t = a.tallies.get(key);
+  if (!t) a.tallies.set(key, (t = { path, reads: 0, searches: 0, chars: 0, ms: 0 }));
+  if (kind === "read") t.reads++;
+  else t.searches++;
+  if (typeof c.id === "string") {
+    a.calls.set(c.id, { key, at });
+    capped(a.calls, MAX_AREA_CALLS);
+  }
+}
+
+// A tool result's text: a string, or its text blocks.
+function resultText(content: unknown): string {
+  if (typeof content === "string") return content;
+  return Array.isArray(content) ? content.map((b) => (b && b.type === "text" && typeof b.text === "string" ? b.text : "")).join("") : "";
+}
+
+// A Read, Grep or Glob's result: its size and the time since its call go to the call's folder, when it ran.
+function areaResult(a: AreaState, c: Line, at: number, ran: boolean): void {
+  const call = a.calls.get(c.tool_use_id);
+  if (!call) return;
+  a.calls.delete(c.tool_use_id);
+  const t = a.tallies.get(call.key);
+  if (!t || !ran) return;
+  t.chars += resultText(c.content).length;
+  if (at > call.at) t.ms += at - call.at;
+}
+
+// Whether a user line is a tool result for a call the person turned down (see the top of this file).
+function turnedDown(ev: Line, content: Line[], names: Map<string, string>): boolean {
+  if (!content.some((c) => c && c.type === "tool_result")) return false;
+  if (typeof ev.toolDenialKind === "string") return ev.toolDenialKind === "user-rejected";
+  return content.some((c) => c && c.type === "tool_result" && c.is_error === true && resultText(c.content).includes(TURNED_DOWN) && !(names.get(c.tool_use_id) ?? "").startsWith("mcp__"));
+}
+
+// A prompt: the turn before it ends, and a person's message after a turn that worked in a folder
+// waits for the correction check. A notification, a reminder or a command's echo is no person's.
+function areaPrompt(st: TranscriptState, ev: Line, content: unknown, at: number): void {
+  const a = st.area;
+  const before = a.turn;
+  endTurn(a, st.lastText);
+  const text = promptText(content).trim();
+  const person = text !== "" && !text.startsWith("<");
+  if (person && before.dirs.size) {
+    a.asks.push({ key: typeof ev.uuid === "string" ? ev.uuid : String(at), text: text.slice(0, ASK_CHARS), reply: before.reply, dirs: [...before.dirs.values()], correction: null });
+    if (a.asks.length > MAX_AREA_ASKS) a.asks.shift();
+  }
+  a.turn = newTurn(person ? text.slice(0, SAID_PROMPT_CHARS) : null);
+}
+
+// The turn under way ends with `reply`: kept when it worked in a folder. Only the latest SAID_TURNS
+// keep their words; an older one stays for its corrections, or goes.
+function endTurn(a: AreaState, reply: string | null): void {
+  const t = a.turn;
+  if (!t.dirs.size) return;
+  t.reply = reply ? reply.slice(0, SAID_REPLY_CHARS) : null;
+  a.turns.push(t);
+  const at = a.turns.length - 1 - SAID_TURNS;
+  const older = a.turns[at];
+  if (older) {
+    older.prompt = older.reply = null;
+    if (!older.corrections) a.turns.splice(at, 1);
+  }
+  if (a.turns.length > MAX_AREA_TURNS) a.turns.shift();
+}
+
+// The folders a repo-relative folder counts in: each from the top down to itself, the root aside,
+// stopping at a package manager's or git's own.
+function ancestors(folder: string): string[] {
+  if (folder === ".") return [];
+  const out: string[] = [];
+  const parts = folder.split("/");
+  for (let i = 0; i < parts.length && !NOT_AREAS.has(parts[i]!); i++) out.push(parts.slice(0, i + 1).join("/"));
+  return out;
+}
+
+type AreaPlace = { group: string; project?: Project; away?: true; folders: string[] };
+
+/**
+ * The session's areas from its transcripts' area states, the lead's first, at most MAX_AREAS, and
+ * what it said in each. A path is placed as a folder (attribution.ts): its nearest folder that
+ * exists, in a repo or the workspace. A message `corrected` has judged is settled for good, and its
+ * words dropped.
+ */
+async function areasOf(sources: AreaSource[], place: Attribution, corrected: ReadInput["corrected"]): Promise<{ areas: AreaFact[]; said: NonNullable<SourceRead["said"]> }> {
+  const placed = new Map<string, Promise<AreaPlace | null>>();
+  const where = (key: string, path: string) => {
+    let p = placed.get(key);
+    if (!p) {
+      p = place.folder(path).then(
+        (f) => f && { group: f.project?.id ?? "", ...(f.project && { project: f.project }), ...(f.away && { away: true as const }), folders: ancestors(f.folder) },
+        () => null,
+      );
+      placed.set(key, p);
+    }
+    return p;
+  };
+  const facts = new Map<string, AreaFact & { chars: number }>();
+  const factOf = (g: AreaPlace, folder: string) => {
+    const k = `${g.group}\n${folder}`;
+    let f = facts.get(k);
+    if (!f) facts.set(k, (f = { folder, reads: 0, searches: 0, tokens: 0, ms: 0, corrections: 0, chars: 0, ...(g.project && { project: g.project }), ...(g.away && { away: true as const }) }));
+    return f;
+  };
+  for (const { area } of sources) {
+    for (const [key, t] of area.tallies) {
+      const g = await where(key, t.path);
+      for (const folder of g?.folders ?? []) {
+        const f = factOf(g!, folder);
+        f.reads += t.reads;
+        f.searches += t.searches;
+        f.ms += t.ms;
+        f.chars += t.chars;
+      }
+    }
+  }
+  // A turn's corrections count once in each folder it worked in, however many of its calls named it.
+  const correct = async (dirs: Iterable<[string, string]>, n: number) => {
+    const hit = new Set<AreaFact>();
+    for (const [key, path] of dirs) {
+      const g = await where(key, path);
+      for (const folder of g?.folders ?? []) hit.add(factOf(g!, folder));
+    }
+    for (const f of hit) f.corrections += n;
+  };
+  for (const { area } of sources) for (const turn of [...area.turns, area.turn]) if (turn.corrections) await correct(turn.dirs, turn.corrections);
+  for (const ask of sources[0]!.area.asks) {
+    if (ask.correction === null && ask.text !== null && corrected) {
+      const judged = corrected(ask.key, ask.text, ask.reply);
+      if (judged !== null) Object.assign(ask, { correction: judged, text: null, reply: null });
+    }
+    if (ask.correction) await correct(ask.dirs.map((p): [string, string] => [pathKey(p), p]), 1);
+  }
+  const areas = [...facts.values()]
+    .filter((f) => AreaPathSchema.safeParse(f.folder).success)
+    .map(({ chars, ...f }) => ({ ...f, tokens: Math.round(chars / 4) }))
+    .sort((a, b) => b.tokens - a.tokens || b.ms - a.ms || (a.folder < b.folder ? -1 : a.folder > b.folder ? 1 : 0))
+    .slice(0, MAX_AREAS);
+
+  // The latest turns' words in the folder, each turn once, a subagent's ending with its report.
+  const said = async (project: string | null, folder: string) => {
+    const out: string[] = [];
+    for (const { area, lastText } of sources) {
+      for (const turn of [...area.turns, { ...area.turn, reply: lastText?.slice(0, SAID_REPLY_CHARS) ?? null }]) {
+        if (!turn.prompt && !turn.reply) continue;
+        let inside = false;
+        for (const [key, path] of turn.dirs) {
+          const g = await where(key, path);
+          if (g && g.group === (project ?? "") && g.folders.includes(folder)) inside = true;
+        }
+        if (inside) out.push([turn.prompt && `Asked: ${turn.prompt}`, turn.reply && `Answered: ${turn.reply}`].filter(Boolean).join("\n"));
+      }
+    }
+    return out.slice(-SAID_MAX);
+  };
+  return { areas, said };
 }

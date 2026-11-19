@@ -33,6 +33,11 @@
 // whom it may ask (`asksExperts`, protocol 0.13.0) says `asksExperts`, so the server sends it the
 // experts it may ask (`expert-rights`).
 //
+// Each pass's areas (protocol 0.15.0), the folders its agents read and searched, go to the runner as
+// each office that takes the repo may be told of them (`areas`), with what the session said in each,
+// which stays on the machine: the runner offers an expert from them (src/runner/offers.ts). Whether
+// a person's message corrected the agent is the runner's local model's word (`corrected`).
+//
 // Its log lines go to <claude dir>/isoplan/logs/<session>.log (the runner's sessionLog), and without
 // a hooks module the other lines are dropped. Without one it reports only while the session is at work, and the
 // runner starts it again once the session's transcript moves: it ends once the session has been
@@ -71,7 +76,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { PROTOCOL_VERSION, type Facts, type Project } from "@isoplan/protocol";
+import { PROTOCOL_VERSION, type AreaFact, type Facts, type Project } from "@isoplan/protocol";
 import { installApp, type InstallApp } from "../install/app.js";
 import { installWake, type LinkHandlerPlace } from "../install/install.js";
 import type { LoginItemPlace } from "../install/login-item.js";
@@ -126,6 +131,29 @@ interface OfficeRun {
   /** Without a hooks module, and the server said this project isn't wanted; until when that holds, once it ends. */
   unwanted: boolean;
   unwantedUntil: number | null;
+  /** The project its link says hello as, once one is open. */
+  home: Project | null;
+}
+
+/** One pass's areas of a session, as an office that takes its repo may be told of them, for the runner's expert offers (src/runner/offers.ts). */
+export interface SessionAreas {
+  /** The office's data-layer address. */
+  server: string;
+  /** The session's id in its facts (claude-code:<id>). */
+  session: string;
+  /** Its bare id, which its hooks module and its transcript go by. */
+  bare: string;
+  /** The project the session says hello as to this office: an area with no project is in it. */
+  project: Project;
+  /** The session's checkout, which its own areas' folders are in. */
+  checkout: string;
+  /** Its context window, once its hooks module has said it; else null. */
+  window: number | null;
+  /** The model of its lead's newest reply, to tell a window by when none was said; null before one. */
+  model: string | null;
+  /** Its areas this office may be told of: another repo's only when the office holds it (attribution.ts forOffice). */
+  areas: AreaFact[];
+  said: NonNullable<SourceRead["said"]>;
 }
 
 // How long a session the office doesn't take waits between passes.
@@ -199,6 +227,10 @@ export interface ReportSessionOptions {
   shared?: (office: Office) => { pairing: Pairing; approved: Approved } | null;
   /** The session's title as each pass works it out for the offices, sent or not, for the desktop app's menu (runner/status.ts). */
   titled?: (title: string) => void;
+  /** Each pass's areas, once per office that takes the session's repo, when it has any (SessionAreas). */
+  areas?: (seen: SessionAreas) => void;
+  /** Whether the person's message corrected the agent, the runner's local model's word, or null while unknown (claude-code.ts ReadInput). */
+  corrected?: (key: string, text: string, reply: string | null) => boolean | null;
 }
 
 /** How it ended: why, as its log says; and without a hooks module, a hold-off for the runner to keep. */
@@ -456,7 +488,8 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
   let contextWindow: number | null = null; // the session's context window, once the hooks module wrote it
 
   const account = await accountOf({ readText: (p) => fs.readFile(p, "utf8").catch(() => null), run: io.run }, claudeJson, cwd);
-  const openLink = (run: OfficeRun, home: Project, mayConnect: () => Promise<boolean>): Link =>
+  const openLink = (run: OfficeRun, home: Project, mayConnect: () => Promise<boolean>): Link => (
+    (run.home = home),
     createLink({
       url: run.office.server,
       emit: run.emit,
@@ -518,7 +551,7 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
         session: factsSession,
         project: home,
       },
-    });
+    }));
   // Each office's link, opened by its gate only while that office takes the session's home
   // (approved.ts), which it asks again before every reconnect, so a hello never goes on a list that
   // changed or aged out.
@@ -528,7 +561,7 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
       const { server, label } = office;
       const until = notWantedBefore[server];
       const held = typeof until === "number" && until > Date.now();
-      const run = { office, known: held, dormant: null, homing: null, result: null, connected: false, unwanted: held, unwantedUntil: held ? until : null, sent: null } as OfficeRun;
+      const run = { office, known: held, dormant: null, homing: null, result: null, connected: false, unwanted: held, unwantedUntil: held ? until : null, sent: null, home: null } as OfficeRun;
       run.hold = await openReportHold(releasedPath(claudeDir, office, sessionId), (text) => emit({ type: "log", text: `${text} (for ${server})` }));
       run.emit = c.guard((line: DataLayerLine) => {
         if (line.type === "status") {
@@ -683,7 +716,7 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
       continue;
     }
 
-    const read: SourceRead = await source.read({ sessionId, cwd, now, config, resolve, projectOf: projectOfRepo }).catch((err: unknown) => ({
+    const read: SourceRead = await source.read({ sessionId, cwd, now, config, resolve, projectOf: projectOfRepo, ...(o.corrected && { corrected: c.guard(o.corrected, null) }) }).catch((err: unknown) => ({
       facts: null,
       status: String((err as Error)?.message ?? err),
       errors: { count: 0, first: null },
@@ -757,6 +790,23 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
         run.gate.link()?.update((run.sent = outgoing(run, facts, patterns)));
       } catch (err) {
         emit({ type: "log", text: `couldn't send this session's facts to ${run.office.server}: ${String((err as Error)?.message ?? err)}` });
+      }
+    }
+    // The areas each office may be told of, for the runner's expert offers: in a workspace only its
+    // repos', and another repo's only once this connection's welcome names it.
+    if (o.areas && facts.areas?.length) {
+      const model = facts.agents.find((a) => a.id === facts.session.lead)?.usage?.model ?? null;
+      for (const run of taking) {
+        const link = run.gate.current();
+        if (!run.home || !link) continue;
+        const welcome = link.projects();
+        const areas = facts.areas.filter((a) => (a.project ? !!welcome?.has(a.project.id.toLowerCase()) : !workspace));
+        if (!areas.length) continue;
+        try {
+          o.areas({ server: run.office.server, session: facts.session.id, bare: sessionId, project: run.home, checkout: facts.session.checkout ?? cwd, window: contextWindow, model, areas, said: read.said ?? (async () => []) });
+        } catch (err) {
+          emit({ type: "log", text: `couldn't look at this session's areas for an expert offer: ${String((err as Error)?.message ?? err)}` });
+        }
       }
     }
     const quiet = hooked ? null : detachedStop({ now, lastActive: facts.session.lastActive, idleMinutes: config.idleMinutes, downSince });

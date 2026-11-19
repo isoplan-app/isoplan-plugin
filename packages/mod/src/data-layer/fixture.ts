@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll } from "vitest";
-import { createClaudeCode, type SourceRead } from "./claude-code.js";
+import { createClaudeCode, type ReadInput, type SourceRead } from "./claude-code.js";
 import type { Config } from "./config.js";
 import type { Project } from "@isoplan/protocol";
 import { createGit, type Where } from "./git.js";
@@ -128,6 +128,8 @@ export interface SourceOptions {
   projectOf?: (where: Where) => Project;
   /** The person's home folder; by default none. */
   home?: string;
+  /** The local model's word on whether a message corrected the agent; by default none is asked. */
+  corrected?: ReadInput["corrected"];
 }
 
 /**
@@ -142,7 +144,7 @@ export function sourceIn(home: string, opts: SourceOptions = {}) {
   return (sessionId: string, cwd = path.join(home, "elsewhere")): Promise<SourceRead> => {
     const now = (opts.now ?? (() => NOW))();
     const config = { ...defaults, ...opts.config };
-    return source.read({ sessionId, cwd, now, config, resolve: (dir) => git.resolve(dir, { now, maxAgeMs: config.gitCacheSeconds * 1000 }), projectOf: opts.projectOf ?? ((where) => projectOf(null, where, where.toplevel, "test-machine")) });
+    return source.read({ sessionId, cwd, now, config, resolve: (dir) => git.resolve(dir, { now, maxAgeMs: config.gitCacheSeconds * 1000 }), projectOf: opts.projectOf ?? ((where) => projectOf(null, where, where.toplevel, "test-machine")), ...(opts.corrected && { corrected: opts.corrected }) });
   };
 }
 

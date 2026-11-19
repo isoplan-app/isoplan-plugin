@@ -40,3 +40,13 @@ test("forOffice: a subagent's checkout in another repo goes only where that repo
   // The session's own worktrees aren't named, and go as before.
   expect(forOffice(withCheckout, null, {}).agents[1]).toMatchObject({ checkout: "C:/w/web-wt" });
 });
+
+test("forOffice: another repo's areas leave only for a project the office holds, the session's own always", () => {
+  const own = { folder: "src", reads: 1, searches: 0, tokens: 10, ms: 5, corrections: 0 };
+  const away = { ...own, folder: "docs", project: secret, away: true as const };
+  const withAreas: Facts = { ...facts, areas: [own, away] };
+  expect(forOffice(withAreas, new Set(["github.com/me/notes"])).areas).toEqual([own, away]);
+  expect(forOffice(withAreas, new Set(["github.com/team/web"])).areas).toEqual([own]);
+  expect(forOffice(withAreas, null).areas).toEqual([own]);
+  expect("areas" in forOffice(facts, null)).toBe(false);
+});
