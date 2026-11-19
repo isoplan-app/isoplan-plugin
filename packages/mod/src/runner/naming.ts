@@ -3,11 +3,12 @@
 // Windows machine had one (9 Nov 2026, Claude Code 2.1.319), though most terminal sessions did. So the
 // runner asks once, off the session's own turn:
 //
-//   claude -p --no-session-persistence --tools "" --setting-sources "" --strict-mcp-config
+//   claude -p --no-session-persistence --tools "" --setting-sources "" NO_HOOKS --strict-mcp-config
 //     --model <namingModel> --system-prompt <prompts/naming.md> --output-format json
 //
 // with the instruction on stdin. As the answerer's fork (claude.ts), it has no tools and no MCP
-// servers, reads no settings file, so no plugin or hook loads in it, and is never saved; it runs
+// servers, reads no settings file, so no plugin loads in it, runs no hook (NO_HOOKS, since the
+// person's hooks run despite `--setting-sources ""`), and is never saved; it runs
 // hidden in the OS's temp folder, so no project's CLAUDE.md loads either. Probed the same day: Haiku
 // answered in about 3 s with one JSON object, `type` "result", `subtype` "success", `is_error`
 // false, its `result` the name ("Fix login 500 error for plus-sign emails"). One that takes longer
@@ -18,7 +19,7 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import os from "node:os";
 import { cleanTitle } from "../data-layer/titles.js";
 import { claudeCommand } from "./claude-binary.js";
-import { forkEnv, hiddenSpawn, killTree, type Spawn } from "./claude.js";
+import { forkEnv, hiddenSpawn, killTree, NO_HOOKS, type Spawn } from "./claude.js";
 
 /** What runner.json says of naming sessions. */
 export interface NamingSettings {
@@ -35,7 +36,7 @@ const STDERR_CHARS = 500;
 
 /** Every flag of the naming call's command line, after the binary. */
 export function namingArgs(model: string, system: string): string[] {
-  return ["-p", "--no-session-persistence", "--tools", "", "--setting-sources", "", "--strict-mcp-config", "--model", model, "--system-prompt", system, "--output-format", "json"];
+  return ["-p", "--no-session-persistence", "--tools", "", "--setting-sources", "", ...NO_HOOKS, "--strict-mcp-config", "--model", model, "--system-prompt", system, "--output-format", "json"];
 }
 
 /** The name from the call's output, the one JSON object `--output-format json` writes; null for a failure or nothing usable. */

@@ -7939,8 +7939,7 @@ async function openPairedLink(url, hello, pairing, first, wanted, timeoutMs) {
 }
 new TextEncoder();
 new TextEncoder();
-//#endregion
-//#region src/runner/claude.ts
+JSON.stringify({ disableAllHooks: true });
 /** Ends a process and everything it started: on Windows `kill` reaches only the process itself. */
 function killTree(child, platform = process.platform) {
 	if (child.exitCode !== null || child.signalCode !== null || child.pid === void 0) return;

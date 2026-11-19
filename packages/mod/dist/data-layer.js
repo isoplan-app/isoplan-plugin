@@ -8686,6 +8686,7 @@ function join(base, rel) {
 }
 new TextEncoder();
 new TextEncoder();
+JSON.stringify({ disableAllHooks: true });
 //#endregion
 //#region src/data-layer/claude-paths.ts
 /**

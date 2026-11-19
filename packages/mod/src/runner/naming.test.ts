@@ -17,7 +17,7 @@ process.stdin.setEncoding("utf8").on("data", (d) => (input += d)).on("end", () =
 `;
 
 test("name: the command line is pinned: no tools, settings, MCP servers or saved session, the model and the prompt given", () => {
-  expect(namingArgs("haiku", "Name it.")).toEqual(["-p", "--no-session-persistence", "--tools", "", "--setting-sources", "", "--strict-mcp-config", "--model", "haiku", "--system-prompt", "Name it.", "--output-format", "json"]);
+  expect(namingArgs("haiku", "Name it.")).toEqual(["-p", "--no-session-persistence", "--tools", "", "--setting-sources", "", "--settings", '{"disableAllHooks":true}', "--strict-mcp-config", "--model", "haiku", "--system-prompt", "Name it.", "--output-format", "json"]);
 });
 
 test("name: the result's first line, unquoted, with no full stop; a failure or an output that isn't the result gives none", () => {

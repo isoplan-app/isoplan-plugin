@@ -8702,6 +8702,7 @@ const writeLine = (socket, value) => {
 };
 new TextEncoder();
 new TextEncoder();
+JSON.stringify({ disableAllHooks: true });
 //#endregion
 //#region src/data-layer/report-session.ts
 const LOG_CAP_BYTES = 65536;

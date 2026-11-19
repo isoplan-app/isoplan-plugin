@@ -5,14 +5,14 @@ import { tempRoot } from "../data-layer/fixture.js";
 import { forkEnv, hiddenSpawn } from "./claude.js";
 import { appendArgs, converse, expertForkArgs, inside, judgeArgs, trunkArgs } from "./expert-claude.js";
 
-const READ_ONLY = ["--tools", "Read,Grep,Glob,Agent", "--disallowedTools", "Bash,PowerShell,Edit,Write,NotebookEdit,WebFetch,WebSearch", "--setting-sources", "", "--strict-mcp-config", "--permission-mode", "dontAsk", "--autocompact", "1000000"];
+const READ_ONLY = ["--tools", "Read,Grep,Glob,Agent", "--disallowedTools", "Bash,PowerShell,Edit,Write,NotebookEdit,WebFetch,WebSearch", "--setting-sources", "", "--settings", '{"disableAllHooks":true}', "--strict-mcp-config", "--permission-mode", "dontAsk", "--autocompact", "1000000"];
 const STREAM = ["--input-format", "stream-json", "--output-format", "stream-json", "--verbose"];
 
 test("argv: the four kinds are pinned, flag by flag", () => {
   expect(trunkArgs("t-1", "sonnet")).toEqual(["-p", "--session-id", "t-1", "--model", "sonnet", ...READ_ONLY, ...STREAM]);
   expect(appendArgs("t-1", "claude-sonnet-5-5")).toEqual(["-p", "--resume", "t-1", "--model", "claude-sonnet-5-5", ...READ_ONLY, ...STREAM]);
   expect(expertForkArgs("t-1", "claude-sonnet-5-5")).toEqual(["-p", "--resume", "t-1", "--fork-session", "--no-session-persistence", "--model", "claude-sonnet-5-5", ...READ_ONLY, ...STREAM]);
-  expect(judgeArgs("haiku")).toEqual(["-p", "--no-session-persistence", "--tools", "", "--setting-sources", "", "--strict-mcp-config", "--permission-mode", "dontAsk", "--model", "haiku", ...STREAM]);
+  expect(judgeArgs("haiku")).toEqual(["-p", "--no-session-persistence", "--tools", "", "--setting-sources", "", "--settings", '{"disableAllHooks":true}', "--strict-mcp-config", "--permission-mode", "dontAsk", "--model", "haiku", ...STREAM]);
 });
 
 test("inside: resolved, with forward slashes, lower-case on Windows; null outside", () => {

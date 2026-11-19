@@ -47,6 +47,8 @@ test("runner offices: one office not wanting the runner closes its link alone, w
   expect(s.latest("internal").closed).toBe(false);
   s.leave();
   expect(await s.loop.ended).toBe("orphaned");
+  // A supervisor ended from outside can't say so: its worker does.
+  expect(s.logs).toContain("the runner's supervisor has gone without stopping its worker (it was ended from outside, or the computer is shutting down), so the worker stops too");
 });
 
 test("runner offices: an ended pairing closes that link until the machine is paired again; replies meanwhile wait for it", async () => {

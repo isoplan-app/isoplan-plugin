@@ -1,11 +1,13 @@
 // The Claude Code answerer: answers from a fork of a session's lead, run as #44's probe settled.
 //
 //   claude -p --resume <lead> --fork-session --no-session-persistence --tools "" --setting-sources ""
-//     --strict-mcp-config --model <model> --input-format stream-json --output-format stream-json --verbose
+//     NO_HOOKS --strict-mcp-config --model <model> --input-format stream-json --output-format stream-json --verbose
 //
 // - The fork runs in the lead's folder. It has no tools and no MCP servers; `--setting-sources ""`
-//   reads no settings file, so neither this plugin nor the wake hook loads in it, and nothing it does
-//   reaches the office server. It is never saved. A login that comes from settings.json
+//   reads no settings file, so this plugin doesn't load in it, and nothing it does reaches the office
+//   server. The person's hooks still ran with that flag alone (Claude Code 2.1.328, 19 Nov 2026: a
+//   UserPromptSubmit hook's routing note took over a Haiku judge's first line, failing 7 of 12
+//   correct answers), so NO_HOOKS turns every hook off, the wake hook's too. It is never saved. A login that comes from settings.json
 //   (apiKeyHelper, its env block) doesn't reach it either; Claude Code's own login and auth from
 //   environment variables do.
 // - Its environment is the runner's, less the variables that tie a process to the Claude Code
@@ -41,6 +43,9 @@ const STDERR_CHARS = 2000;
 // How long a fork that has answered gets to exit by itself.
 const EXIT_GRACE_MS = 5000;
 
+/** Turns off every hook in a process Isoplan runs for itself: the person's hooks read their prompts too, even with `--setting-sources ""`. */
+export const NO_HOOKS = ["--settings", JSON.stringify({ disableAllHooks: true })];
+
 /** Every flag of the fork's command line, after the binary. */
 export function forkArgs(sessionId: string, model: string): string[] {
   return [
@@ -53,6 +58,7 @@ export function forkArgs(sessionId: string, model: string): string[] {
     "",
     "--setting-sources",
     "",
+    ...NO_HOOKS,
     "--strict-mcp-config",
     "--model",
     model,
