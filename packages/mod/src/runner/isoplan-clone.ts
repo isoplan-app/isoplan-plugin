@@ -6,7 +6,8 @@
 //   runner.json's `clonesFolder` names a folder, the name from the project id (cloneName). One made
 //   earlier is used where it is: at its longer name from before (earlierCloneName), or in a folder
 //   clonesFolder named before (repo-folders.ts readClonesFolders). On Windows git takes long paths
-//   in it (core.longpaths, set as it is cloned, so the agent's git has it too).
+//   in it (core.longpaths, set as it is cloned, or in one made before, as it is next fetched, so
+//   the agent's git has it too).
 //   It is made as an expert's read/ is (expert-checkout.ts): from the origin of the person's
 //   checkout the start names, only one on the wire, never a local path, a file:// URL or a share;
 //   borrowing the checkout's objects while it is made (--reference-if-able, then --dissociate, or
@@ -29,7 +30,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { RunGit } from "../handoff/git.js";
 import { onTheWire } from "../handoff/take.js";
-import { borrowFrom, cloneBorrowing, longPaths, renamed } from "./expert-checkout.js";
+import { borrowFrom, cloneBorrowing, keepLongPaths, longPaths, renamed } from "./expert-checkout.js";
 
 const NO_REMOTE = "This repo has no remote, so Isoplan can't keep a copy of its own and nothing was started.";
 const NOT_ON_WIRE = "This repo's remote is a folder or a share, not an https or ssh address, so Isoplan can't keep a copy of its own and nothing was started.";
@@ -103,6 +104,7 @@ export function createIsoplanClones({ git, claudeDir, clonesFolder = "", clonesF
         return { problem: NOT_MADE };
       }
       const set = await run(clone, ["remote", "set-url", "origin", url]);
+      if (set.code === 0) await keepLongPaths((args) => run(clone, args), platform, (why) => log(`couldn't turn on long paths in Isoplan's own clone ${clone} (${why})`));
       const fetched = set.code === 0 ? await run(clone, ["fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"]) : set;
       if (fetched.code !== 0) {
         log(`couldn't fetch origin in Isoplan's own clone ${clone} (${why(fetched)})`);

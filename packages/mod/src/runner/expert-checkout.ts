@@ -7,7 +7,7 @@
 //   exclusive hold (expert-lock.ts), and reset if a fork ever changed it. It is in the expert's
 //   folder, or in <clonesFolder>/experts/<name>/ when runner.json's `clonesFolder` named a folder
 //   as it was first made (experts.ts readFolder). On Windows git takes long paths in it
-//   (core.longpaths, set as it is cloned).
+//   (core.longpaths, set as it is cloned, or in one cloned before, as it is next prepared).
 // - The clone borrows the person's repo's objects while it is made (--reference-if-able, then
 //   --dissociate, so it never depends on them after; when that fails, as it does in a folder too deep
 //   for the repack on Windows, it is cloned again borrowing nothing), and holds the default branch
@@ -51,6 +51,18 @@ export async function renamed(from: string, to: string) {
  */
 export const longPaths = (platform: NodeJS.Platform) =>
   platform === "win32" ? { git: ["-c", "core.longpaths=true"], clone: ["--config", "core.longpaths=true"] } : { git: [], clone: [] };
+
+/**
+ * On Windows, long paths turned on in a clone made before Isoplan set them as it cloned: written
+ * only while git doesn't already have them, so the clone's config is rewritten once rather than on
+ * every use, while the agent's git may be in it; a write that fails is only told, since the clone
+ * works as it did before.
+ */
+export async function keepLongPaths(run: (args: string[]) => Promise<GitResult>, platform: NodeJS.Platform, told: (why: string) => void): Promise<void> {
+  if (platform !== "win32" || (await run(["config", "--get", "core.longpaths"])).stdout.trim() === "true") return;
+  const set = await run(["config", "core.longpaths", "true"]);
+  if (set.code !== 0) told(`${set.timedOut ? "git took too long" : "git failed"}: ${set.stderr.trim()}`);
+}
 
 /** Where a clone of `repo` borrows objects from: its own .git folder, since git won't borrow from a linked worktree (Orca's, say); the repo itself when git can't say. */
 export async function borrowFrom(run: (cwd: string, args: string[]) => Promise<GitResult>, repo: string): Promise<string> {
@@ -183,6 +195,7 @@ export function createExpertCheckout({ git, repo, dir, read = path.join(dir, "re
         throw new Error(`${read} is there already and isn't a clone of its own (a worktree of ${repo} from an earlier Isoplan, say), so it was left as it is. Remove it (a worktree with \`git worktree remove --force ${read}\` in ${repo}), and the expert clones it again for its next question or at the runner's next start`);
       }
       await must(read, ["remote", "set-url", "origin", url]);
+      await keepLongPaths((args) => run(read, args), platform, (why) => log(`couldn't turn on long paths in expert ${name}'s clone ${read} (${why})`));
       if (!(await fetchOrigin())) await originTip(); // no fetch, but a branch fetched before: carry on
       return { branch, commit: await head() };
     },

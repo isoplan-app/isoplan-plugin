@@ -15114,6 +15114,25 @@ const longPaths = (platform) => platform === "win32" ? {
 	git: [],
 	clone: []
 };
+/**
+* On Windows, long paths turned on in a clone made before Isoplan set them as it cloned: written
+* only while git doesn't already have them, so the clone's config is rewritten once rather than on
+* every use, while the agent's git may be in it; a write that fails is only told, since the clone
+* works as it did before.
+*/
+async function keepLongPaths(run, platform, told) {
+	if (platform !== "win32" || (await run([
+		"config",
+		"--get",
+		"core.longpaths"
+	])).stdout.trim() === "true") return;
+	const set = await run([
+		"config",
+		"core.longpaths",
+		"true"
+	]);
+	if (set.code !== 0) told(`${set.timedOut ? "git took too long" : "git failed"}: ${set.stderr.trim()}`);
+}
 /** Where a clone of `repo` borrows objects from: its own .git folder, since git won't borrow from a linked worktree (Orca's, say); the repo itself when git can't say. */
 async function borrowFrom(run, repo) {
 	const common = await run(repo, [
@@ -15258,6 +15277,7 @@ function createExpertCheckout({ git, repo, dir, read = path.join(dir, "read"), n
 				"origin",
 				url
 			]);
+			await keepLongPaths((args) => run(read, args), platform, (why) => log(`couldn't turn on long paths in expert ${name}'s clone ${read} (${why})`));
 			if (!await fetchOrigin()) await originTip();
 			return {
 				branch,
@@ -15401,6 +15421,7 @@ function createIsoplanClones({ git, claudeDir, clonesFolder = "", clonesFolders 
 				"origin",
 				url
 			]);
+			if (set.code === 0) await keepLongPaths((args) => run(clone, args), platform, (why) => log(`couldn't turn on long paths in Isoplan's own clone ${clone} (${why})`));
 			const fetched = set.code === 0 ? await run(clone, [
 				"fetch",
 				"origin",

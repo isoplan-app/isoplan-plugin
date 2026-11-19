@@ -4,7 +4,7 @@ import { expect, test, vi } from "vitest";
 import { tempRoot } from "../data-layer/fixture.js";
 import { git as gitIn, remoteAndClone } from "../handoff/fixture.js";
 import { createRunGit, type GitResult, type RunGit } from "../handoff/git.js";
-import { cloneBorrowing, createExpertCheckout } from "./expert-checkout.js";
+import { cloneBorrowing, createExpertCheckout, keepLongPaths } from "./expert-checkout.js";
 
 // The empty folder git runs with as its hooks (handoff/take.ts noHooks) is made in the Claude folder: a temp one, never this machine's.
 vi.stubEnv("CLAUDE_CONFIG_DIR", path.join(tempRoot(), "claude"));
@@ -97,6 +97,21 @@ test("prepare: a clone cut short leaves no read/, and the half-made one is clear
   cut = false;
   expect(await t.checkout.prepare()).toEqual({ branch: "main", commit: MAIN });
   expect(fs.existsSync(path.join(t.read, "left-over"))).toBe(false);
+});
+
+test("keepLongPaths: on Windows long paths are written only while git hasn't them, and a write that fails is only told; elsewhere git isn't asked", async () => {
+  for (const [platform, got, write, calls, told] of [
+    ["win32", ok("true\n"), ok(), 1, 0],
+    ["win32", failed(""), ok(), 2, 0],
+    ["win32", failed(""), failed("could not lock config file"), 2, 1],
+    ["linux", failed(""), ok(), 0, 0],
+  ] as const) {
+    const asked: string[][] = [];
+    const why: string[] = [];
+    await keepLongPaths(async (args) => (asked.push(args), args[1] === "--get" ? got : write), platform, (w) => void why.push(w));
+    expect(asked).toEqual([["config", "--get", "core.longpaths"], ["config", "core.longpaths", "true"]].slice(0, calls));
+    expect(why).toEqual(told ? ["git failed: could not lock config file"] : []);
+  }
 });
 
 test("cloneBorrowing: a clone that fails borrowing is made once more borrowing nothing, after its folder is emptied; one that works or takes too long isn't", async () => {
@@ -281,5 +296,9 @@ test("with real git on Windows: read/ takes long paths in its own config, and th
   const before = fs.readFileSync(path.join(t.repo, ".git", "config"), "utf8");
   await t.checkout.prepare();
   expect(gitIn(t.read, "config", "--local", "core.longpaths")).toBe("true");
+  // One cloned before Isoplan set them takes them as it is next prepared.
+  gitIn(t.read, "config", "--unset", "core.longpaths");
+  await t.checkout.prepare();
+  expect(gitIn(t.read, "config", "--get", "core.longpaths")).toBe("true");
   expect(fs.readFileSync(path.join(t.repo, ".git", "config"), "utf8")).toBe(before);
 }, 60000);

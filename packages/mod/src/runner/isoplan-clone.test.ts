@@ -109,6 +109,10 @@ test("on Windows a clone takes long paths in its own config, so later git in it 
   const before = t.person();
   const windows = (await t.make({ platform: "win32" })(t.checkout, PROJECT)) as string;
   expect(git(windows, "config", "--local", "core.longpaths")).toBe("true");
+  // One made before Isoplan set them takes them as it is next fetched.
+  git(windows, "config", "--unset", "core.longpaths");
+  expect(await t.make({ platform: "win32" })(t.checkout, PROJECT)).toBe(windows);
+  expect(git(windows, "config", "--get", "core.longpaths")).toBe("true");
   expect(t.person()).toEqual(before);
   const mac = (await t.make({ platform: "darwin" })(t.checkout, "github.com/ada/mac")) as string;
   expect(() => git(mac, "config", "--local", "core.longpaths")).toThrow();
