@@ -631,7 +631,8 @@ export const RunnerExpertOfferEndedMessageSchema = z.object({
 /**
  * Where making an expert stands on the runner that took the `make-expert` request `request`, for the
  * offer `offer` (protocol 0.15.0), sent as each state is reached: `cloning`, it prepares the
- * expert's own clone of the repo; `grounding`, the expert reads its area; `proof`, it answers its
+ * expert's own clone of the repo; `grounding`, the expert reads what its subject rests on, as any
+ * expert grounds (its area decides only which folders it covers, for offers); `proof`, it answers its
  * proof question; `ready`, it answers questions; `failed`, it stopped, with `detail` in the runner's
  * own words (no checkout of the repo on this machine, a key already used here, a failed proof).
  */
