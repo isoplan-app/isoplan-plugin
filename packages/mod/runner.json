@@ -40,5 +40,19 @@
   "branchRefreshMinutes": 5,
   "expertJudgeModel": "haiku",
   "expertWaitSeconds": 10,
-  "clonesFolder": ""
+  "clonesFolder": "",
+  "expertOffers": {
+    "contextShare": 0.15,
+    "tokens": 30000,
+    "minutes": 10,
+    "corrections": 2,
+    "officeSessions": 3,
+    "officeDays": 7,
+    "snoozeDays": 30,
+    "draftModel": "haiku",
+    "model": "sonnet",
+    "promoteAtTokens": 100000,
+    "checksPerHour": 20,
+    "timeoutSeconds": 60
+  }
 }

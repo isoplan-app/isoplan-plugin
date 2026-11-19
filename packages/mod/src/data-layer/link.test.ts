@@ -436,3 +436,30 @@ test("link: a throw in its socket handlers goes to onError, and that handler sen
   expect(types(s.got)).toEqual(["hello", "full 0", "changes 1"]);
   l.close();
 });
+
+test("link: a runner's passes the server's offer messages to onOffers, and sends its own offer messages only while up; without onOffers they are logged", async () => {
+  const runner = await server();
+  const runnerHello: RunnerHelloMessage = { type: "runner", v: PROTOCOL_VERSION, account: hello.account, machine: hello.machine, offers: true };
+  const offers: unknown[] = [];
+  const { link: l, lines } = link(runner.url, { hello: runnerHello, onOffers: (m) => offers.push(m) });
+  await until(() => runner.got.length === 1);
+  expect(runner.got[0]).toMatchObject({ type: "runner", offers: true });
+  const dismissals = { type: "offer-dismissals", v: PROTOCOL_VERSION, dismissals: [] };
+  const ended = { type: "expert-offer-ended", v: PROTOCOL_VERSION, id: "o1", why: "made", key: "pairing" };
+  for (const m of [dismissals, ended]) runner.sockets[0]!.send(JSON.stringify(m));
+  await until(() => offers.length === 2);
+  expect(offers).toEqual([dismissals, ended]);
+  const making = { type: "expert-making", v: PROTOCOL_VERSION, request: "m1", offer: "o1", state: "cloning" } as const;
+  expect(l.sendLive(making)).toBe(true);
+  await until(() => runner.got.length === 2);
+  expect(runner.got[1]).toMatchObject(making);
+  runner.sockets[0]!.terminate();
+  await until(() => lines.some((x) => x.type === "status" && x.state === "disconnected"));
+  expect(l.sendLive(making)).toBe(false);
+
+  const plain = await server();
+  const { lines: plainLines } = link(plain.url, { hello: runnerHello });
+  await until(() => plain.got.length === 1);
+  plain.sockets[0]!.send(JSON.stringify(dismissals));
+  await until(() => plainLines.some((x) => x.type === "log" && x.text.includes("offer-dismissals message, which this data layer doesn't handle")));
+});

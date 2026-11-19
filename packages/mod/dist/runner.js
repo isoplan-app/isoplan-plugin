@@ -6170,6 +6170,11 @@ const ExpertCapSchema = _enum([
 	"expert-tokens"
 ]);
 /**
+* An expert's name as people read it, from its key: the key's words, split on dashes, each
+* capitalised, then "Expert" (`pairing` is "Pairing Expert", `pairing-tokens` "Pairing Tokens Expert").
+*/
+const expertDisplayName = (key) => [...key.split("-").filter(Boolean).map((word) => word[0].toUpperCase() + word.slice(1)), "Expert"].join(" ");
+/**
 * One expert a runner hosts, as it lists it to an office server whose list takes its repo. `senior`
 * (protocol 0.14.0): it has a senior generation, which its junior can ask (see `expert-senior`);
 * absent from an older runner. `areas` (protocol 0.15.0): the folders and globs of its repo it
@@ -7373,12 +7378,18 @@ function officesOf(config) {
 	if (!offices.length) add(config.plainRefused ?? config.server, new URL(config.plainRefused ?? config.server).host, !!config.plainRefused);
 	return offices;
 }
-/** The same per-key override for any settings file of the mod's, such as the runner's runner.json. */
+/**
+* The same per-key override for any settings file of the mod's, such as the runner's runner.json. A
+* block of settings (an object, such as runner.json's `expertOffers`) is overridden per key inside it.
+*/
 async function loadSettings(io, defaultsPath, userPath) {
-	const defaults = await readJson$2(io, defaultsPath);
-	const user = await readJson$2(io, userPath, true);
+	return overridden(await readJson$2(io, defaultsPath), await readJson$2(io, userPath, true));
+}
+const isBlock = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+function overridden(defaults, user) {
 	const config = {};
-	for (const [key, fallback] of Object.entries(defaults)) config[key] = fits(key, user[key], fallback) ? user[key] : fallback;
+	for (const [key, fallback] of Object.entries(defaults)) if (isBlock(fallback)) config[key] = overridden(fallback, isBlock(user[key]) ? user[key] : {});
+	else config[key] = fits(key, user[key], fallback) ? user[key] : fallback;
 	return config;
 }
 const BYTE_KEYS = /* @__PURE__ */ new Set(["tailBytes"]);
@@ -8894,7 +8905,7 @@ const same = (a, b) => a !== void 0 && JSON.stringify(a) === JSON.stringify(b);
 const STABLE_MS$1 = 3e4;
 const OUTBOX_MAX$1 = 100;
 const OUTBOX_MAX_AGE_MS$1 = 36e5;
-function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, retryCapMs = 3e4, notWantedRetryMs = 36e5, takenRetryMs = 36e5, onNotWanted, onPairingEnded, onMessage, onDrive, onHosting, onOpen, onClose, filter = (facts) => facts, answered, pairing, pairPollMs = 5e3, admit, random = Math.random, onError }) {
+function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, retryCapMs = 3e4, notWantedRetryMs = 36e5, takenRetryMs = 36e5, onNotWanted, onPairingEnded, onMessage, onDrive, onHosting, onOffers, onOpen, onClose, filter = (facts) => facts, answered, pairing, pairPollMs = 5e3, admit, random = Math.random, onError }) {
 	const outbox = [];
 	let latest = null;
 	let socket = null;
@@ -9148,6 +9159,7 @@ function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, 
 		} else if (onMessage && (message.type === "request" || message.type === "release" || message.type === "handoff" || message.type === "drop")) onMessage(message);
 		else if (onDrive && (message.type === "drive" || message.type === "drive-policy")) onDrive(message);
 		else if (onHosting && message.type === "hosting") onHosting(message);
+		else if (onOffers && (message.type === "offer-dismissals" || message.type === "draft-offer" || message.type === "make-expert" || message.type === "expert-offer-ended")) onOffers(message);
 		else emit({
 			type: "log",
 			text: `the office server sent a ${message.type} message, which this data layer doesn't handle yet`
@@ -9188,8 +9200,8 @@ function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, 
 }
 //#endregion
 //#region src/runner/caps.ts
-const HOUR_MS = 36e5;
-const DAY_MS$1 = 24 * HOUR_MS;
+const HOUR_MS$1 = 36e5;
+const DAY_MS$2 = 24 * HOUR_MS$1;
 /** The tokens `usage` counts for against the budget. */
 function weighted(usage, s) {
 	return usage.input * s.inputTokenWeight + usage.cacheWrite * s.cacheWriteTokenWeight + usage.cacheRead * s.cacheReadTokenWeight + usage.output * s.outputTokenWeight;
@@ -9205,8 +9217,8 @@ function estimate(context, s) {
 }
 /** The cap one more answer in `room`, expected to use `expected`, would go over, or null. */
 function overCap(entries, room, expected, now, s) {
-	const day = entries.filter((e) => now - e.at < DAY_MS$1);
-	if (day.filter((e) => e.room === room && now - e.at < HOUR_MS).length >= s.answersPerRoomPerHour) return "room-hour";
+	const day = entries.filter((e) => now - e.at < DAY_MS$2);
+	if (day.filter((e) => e.room === room && now - e.at < HOUR_MS$1).length >= s.answersPerRoomPerHour) return "room-hour";
 	if (day.length >= s.answersPerMachinePerDay) return "owner-day";
 	if (day.reduce((sum, e) => sum + weighted(e.usage, s), 0) + weighted(expected, s) > s.tokenBudgetPerMachinePerDay) return "owner-tokens";
 	return null;
@@ -9218,7 +9230,7 @@ async function openLedger(file) {
 		const value = JSON.parse(await fs.readFile(file, "utf8"));
 		if (Array.isArray(value)) entries = value.filter(isEntry);
 	} catch {}
-	const recent = (now) => entries.filter((e) => now - e.at < DAY_MS$1);
+	const recent = (now) => entries.filter((e) => now - e.at < DAY_MS$2);
 	let writing = Promise.resolve();
 	const save = () => {
 		const text = JSON.stringify(entries) + "\n";
@@ -16005,7 +16017,7 @@ function createIsoplanClones({ git, claudeDir, clonesFolder = "", clonesFolders 
 //#endregion
 //#region src/data-layer/titles.ts
 const ASK_EVERY_MS = 6e5;
-const MAX_FILES = 15;
+const MAX_FILES$1 = 15;
 const MAX_TASKS = 10;
 const MAX_TITLE = 60;
 const TITLE_SYSTEM = "You name coding sessions for a floor plan of a team's work. From the facts given, write a title of 3 to 6 words saying what the session is working on. Reply with the title alone: no quotes and no full stop.";
@@ -16024,7 +16036,7 @@ function titleInputs(facts) {
 	const tasks = subs.filter((a) => a.task).sort((a, b) => cmp(b.lastActive, a.lastActive));
 	return {
 		branch: facts.session.branch,
-		files: [...files.values()].sort((a, b) => cmp(b.at, a.at)).slice(0, MAX_FILES).map((f) => f.file).sort(),
+		files: [...files.values()].sort((a, b) => cmp(b.at, a.at)).slice(0, MAX_FILES$1).map((f) => f.file).sort(),
 		types: [...new Set(subs.map((a) => a.agentType).filter((t) => !!t))].sort(),
 		tasks: [...new Set(tasks.map((a) => a.task))].slice(0, MAX_TASKS).sort()
 	};
@@ -16147,6 +16159,998 @@ function createNamer(o) {
 		close() {
 			for (const child of running) killTree(child, platform);
 			running.clear();
+		}
+	};
+}
+//#endregion
+//#region src/runner/offer-model.ts
+/** Every flag of a call's command line, after the binary. */
+function offerModelArgs(model, system) {
+	return [
+		"-p",
+		"--no-session-persistence",
+		"--tools",
+		"",
+		"--setting-sources",
+		"",
+		...NO_HOOKS,
+		"--strict-mcp-config",
+		"--model",
+		model,
+		"--system-prompt",
+		system,
+		"--output-format",
+		"json"
+	];
+}
+/** The text of the call's result, the one JSON object `--output-format json` writes; null for a failure. */
+function resultOf(stdout) {
+	let e;
+	try {
+		e = JSON.parse(stdout.trim());
+	} catch {
+		return null;
+	}
+	if (!e || e.type !== "result" || e.is_error === true || e.subtype !== "success" || typeof e.result !== "string") return null;
+	return e.result;
+}
+/** The check's word: YES true, NO false, anything else null. */
+function verdictFrom(text) {
+	const word = /^\W*(yes|no)\b/i.exec(text.trim())?.[1]?.toLowerCase();
+	return word === "yes" ? true : word === "no" ? false : null;
+}
+/** The draft in the model's reply: its one JSON object, fenced or not; null when it isn't a whole draft. */
+function draftFrom(text) {
+	const start = text.indexOf("{");
+	const end = text.lastIndexOf("}");
+	if (start < 0 || end < start) return null;
+	let o;
+	try {
+		o = JSON.parse(text.slice(start, end + 1));
+	} catch {
+		return null;
+	}
+	const proof = o?.proof ?? {};
+	const words = (v, max) => typeof v === "string" && v.trim() && v.trim().length <= max ? v.trim() : null;
+	const key = typeof o?.key === "string" ? o.key.trim().toLowerCase().replace(/[\s_]+/g, "-") : "";
+	const subject = words(o?.subject, MAX_EXPERT_SUBJECT_LENGTH);
+	const question = words(proof.question, MAX_QUESTION_LENGTH);
+	const answer = words(proof.answer, MAX_EXPERT_ANSWER_LENGTH);
+	if (!ExpertNameSchema.safeParse(key).success || !subject || !question || !answer) return null;
+	return {
+		key,
+		subject,
+		proof: {
+			question,
+			answer
+		}
+	};
+}
+/** The check's input: the agent's reply, then the person's message. */
+const correctionInput = (text, reply) => `The agent's reply:\n${reply ?? "(none)"}\n\nThe person's next message:\n${text}`;
+/** The draft's input. */
+function draftInput(d) {
+	return [
+		`Repo: ${d.project.name}`,
+		`Folder: ${d.folder}`,
+		"",
+		`Its files (${d.files.length}):`,
+		...d.files.length ? d.files : ["(none listed)"],
+		"",
+		"What the session said while it worked there, oldest first:",
+		d.said.length ? d.said.join("\n---\n") : "(nothing kept)"
+	].join("\n");
+}
+function createOfferModel(o) {
+	const spawn = o.spawn ?? hiddenSpawn;
+	const env = o.env ?? process.env;
+	const platform = o.platform ?? process.platform;
+	const running = /* @__PURE__ */ new Set();
+	async function ask(what, prompt, input, s) {
+		const bin = await o.binary();
+		if (!bin) return null;
+		const system = (await o.prompt(prompt)).trim();
+		let child;
+		try {
+			child = spawn([...claudeCommand(bin), ...offerModelArgs(s.draftModel, system)], {
+				cwd: o.cwd ?? os.tmpdir(),
+				env: forkEnv(env)
+			});
+		} catch (err) {
+			o.log(`couldn't start claude to ${what}: ${err.message}`);
+			return null;
+		}
+		running.add(child);
+		return new Promise((resolve) => {
+			let stdout = "";
+			let stderr = "";
+			let over = false;
+			const finish = (text, why) => {
+				if (over) return;
+				over = true;
+				clearTimeout(timer);
+				running.delete(child);
+				if (why) o.log(`couldn't ${what}: ${why}`);
+				resolve(text);
+			};
+			const timer = setTimeout(() => {
+				killTree(child, platform);
+				finish(null, `it took longer than ${s.timeoutSeconds} s`);
+			}, s.timeoutSeconds * 1e3);
+			timer.unref?.();
+			child.stdout.setEncoding("utf8").on("data", (piece) => stdout += piece);
+			child.stderr.setEncoding("utf8").on("data", (piece) => stderr = (stderr + piece).slice(-500));
+			child.stdin.on("error", () => {});
+			child.on("error", (err) => finish(null, `claude failed: ${err.message}`));
+			child.on("close", (code) => {
+				const text = resultOf(stdout);
+				finish(text, text !== null ? void 0 : `claude exited${code === null ? "" : ` with code ${code}`} with no result${stderr.trim() ? `: ${stderr.trim().split("\n").slice(-2).join(" ")}` : ""}`);
+			});
+			child.stdin.end(input);
+		});
+	}
+	return {
+		async corrects(text, reply, s) {
+			const said = await ask("check whether a message corrected the agent", "correction.md", correctionInput(text, reply), s);
+			return said === null ? null : verdictFrom(said);
+		},
+		async draft(input, s) {
+			const said = await ask(`draft an expert on ${input.folder}`, "expert-draft.md", draftInput(input), s);
+			if (said === null) return null;
+			const draft = draftFrom(said);
+			if (!draft) o.log(`the draft of an expert on ${input.folder} wasn't usable: no key, subject, proof question and answer that fit`);
+			return draft;
+		},
+		close() {
+			for (const child of running) killTree(child, platform);
+			running.clear();
+		}
+	};
+}
+//#endregion
+//#region src/runner/expert-file.ts
+/** What an expert file leaves out. */
+const EXPERT_DEFAULTS = {
+	forkTimeLimitMinutes: 5,
+	groundingTimeLimitMinutes: 15,
+	fetchSeconds: 60,
+	maxForks: 3,
+	caps: {
+		perAskerPerDay: 30,
+		openPerAsker: 3,
+		tokenBudgetPerDay: 2e6
+	}
+};
+const KNOWN = [
+	"version",
+	"name",
+	"repo",
+	"subject",
+	"model",
+	"promoteAtTokens",
+	"forkTimeLimitMinutes",
+	"groundingTimeLimitMinutes",
+	"fetchSeconds",
+	"maxForks",
+	"caps",
+	"proof",
+	"window",
+	"areas"
+];
+const KNOWN_CAPS = [
+	"perAskerPerDay",
+	"openPerAsker",
+	"tokenBudgetPerDay"
+];
+const KNOWN_PROOF = ["question", "answer"];
+var Bad = class extends Error {
+	field;
+	reason;
+	constructor(field, reason) {
+		super(`${field}: ${reason}`);
+		this.field = field;
+		this.reason = reason;
+	}
+};
+const isObject$2 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+/** `text` as the expert file named `fileName` (its base name is the expert's name). */
+function parseExpertFile(text, fileName) {
+	let value;
+	try {
+		value = JSON.parse(text);
+	} catch (err) {
+		return {
+			ok: false,
+			field: "(file)",
+			reason: `isn't valid JSON: ${err.message}`
+		};
+	}
+	try {
+		return parse$1(value, path.basename(fileName, ".json"));
+	} catch (err) {
+		if (err instanceof Bad) return {
+			ok: false,
+			field: err.field,
+			reason: err.reason
+		};
+		throw err;
+	}
+}
+function parse$1(value, base) {
+	if (!isObject$2(value)) throw new Bad("(file)", "must be a JSON object");
+	const o = value;
+	const whole = (field, v, min, fallback) => {
+		if (v === void 0 && fallback !== void 0) return fallback;
+		if (v === void 0) throw new Bad(field, "is required");
+		if (typeof v !== "number" || !Number.isInteger(v) || v < min) throw new Bad(field, `must be a whole number of at least ${min}`);
+		return v;
+	};
+	const words = (field, v) => {
+		if (v === void 0) throw new Bad(field, "is required");
+		if (typeof v !== "string" || !v.trim()) throw new Bad(field, "must be text that isn't empty");
+		return v.trim();
+	};
+	if (o.version === void 0) throw new Bad("version", "is required");
+	if (typeof o.version === "number" && Number.isInteger(o.version) && o.version > 1) throw new Bad("version", `is ${o.version}: written for a newer runner; update the Isoplan plugin on this machine`);
+	if (o.version !== 1) throw new Bad("version", "must be 1");
+	if (o.name === void 0) throw new Bad("name", "is required");
+	if (typeof o.name !== "string" || !ExpertNameSchema.safeParse(o.name).success) throw new Bad("name", "must be lowercase letters, digits and dashes, at most 63, starting with a letter or digit");
+	if (o.name !== base) throw new Bad("name", `is "${o.name}", but the file is ${base}.json; they must be the same`);
+	const repo = words("repo", o.repo);
+	if (!path.isAbsolute(repo)) throw new Bad("repo", "must be the full path of the repo's folder");
+	const subject = words("subject", o.subject);
+	if (subject.length > 1e3) throw new Bad("subject", `must be at most ${MAX_EXPERT_SUBJECT_LENGTH} characters`);
+	const model = words("model", o.model);
+	if (model.startsWith("-")) throw new Bad("model", "must be a model name, not starting with -");
+	const caps = o.caps === void 0 ? {} : o.caps;
+	if (!isObject$2(caps)) throw new Bad("caps", "must be an object");
+	if (o.proof === void 0) throw new Bad("proof", "is required");
+	if (!isObject$2(o.proof)) throw new Bad("proof", "must be an object with a question and its answer");
+	if (o.areas !== void 0 && !(Array.isArray(o.areas) && o.areas.every((a) => typeof a === "string"))) throw new Bad("areas", "must be a list of globs");
+	return {
+		ok: true,
+		expert: {
+			version: 1,
+			name: o.name,
+			repo,
+			subject,
+			model,
+			promoteAtTokens: whole("promoteAtTokens", o.promoteAtTokens, 1),
+			forkTimeLimitMinutes: whole("forkTimeLimitMinutes", o.forkTimeLimitMinutes, 1, EXPERT_DEFAULTS.forkTimeLimitMinutes),
+			groundingTimeLimitMinutes: whole("groundingTimeLimitMinutes", o.groundingTimeLimitMinutes, 1, EXPERT_DEFAULTS.groundingTimeLimitMinutes),
+			fetchSeconds: whole("fetchSeconds", o.fetchSeconds, 0, EXPERT_DEFAULTS.fetchSeconds),
+			maxForks: whole("maxForks", o.maxForks, 1, EXPERT_DEFAULTS.maxForks),
+			caps: {
+				perAskerPerDay: whole("caps.perAskerPerDay", caps.perAskerPerDay, 1, EXPERT_DEFAULTS.caps.perAskerPerDay),
+				openPerAsker: whole("caps.openPerAsker", caps.openPerAsker, 1, EXPERT_DEFAULTS.caps.openPerAsker),
+				tokenBudgetPerDay: whole("caps.tokenBudgetPerDay", caps.tokenBudgetPerDay, 1, EXPERT_DEFAULTS.caps.tokenBudgetPerDay)
+			},
+			proof: {
+				question: words("proof.question", o.proof.question),
+				answer: words("proof.answer", o.proof.answer)
+			},
+			...o.window !== void 0 && { window: whole("window", o.window, 1e5) },
+			areas: o.areas ?? []
+		},
+		unknown: [
+			...Object.keys(o).filter((k) => !KNOWN.includes(k)),
+			...Object.keys(caps).filter((k) => !KNOWN_CAPS.includes(k)).map((k) => `caps.${k}`),
+			...Object.keys(o.proof).filter((k) => !KNOWN_PROOF.includes(k)).map((k) => `proof.${k}`)
+		]
+	};
+}
+//#endregion
+//#region src/runner/expert-meter.ts
+const native1m = {
+	window: 1e6,
+	compactAt: 967e3
+};
+const window200k = {
+	window: 2e5,
+	compactAt: null
+};
+/** The office server's table as of 6 Nov 2026: a model id matches the longest key it starts with, at a "-" or "[" or its end. */
+const EXPERT_WINDOWS = {
+	"claude-fable-5-1": native1m,
+	"claude-opus-5-5": native1m,
+	"claude-sonnet-5-5": native1m,
+	"claude-haiku-5-5": native1m,
+	"claude-fable-5": native1m,
+	"claude-opus-5": native1m,
+	"claude-sonnet-5": native1m,
+	"claude-opus-4-8": native1m,
+	"claude-opus-4-7": native1m,
+	"claude-opus-4-6": window200k,
+	"claude-opus-4-6[1m]": native1m,
+	"claude-sonnet-4-6": window200k,
+	"claude-sonnet-4-6[1m]": native1m,
+	"claude-opus-4-5": window200k,
+	"claude-opus-4-5-20251101": window200k,
+	"claude-sonnet-4-5": window200k,
+	"claude-sonnet-4-5-20250929": window200k,
+	"claude-haiku-4-5": window200k,
+	"claude-haiku-4-5-20251001": window200k
+};
+/** How far below the compaction point a threshold has to stay. */
+const THRESHOLD_MARGIN = 1e5;
+/**
+* The window of the model the trunk resolved to: the expert file's `window` when it sets one (with
+* the table's compaction point only when the table gives that same window), else the table's entry.
+* With neither, why the generation can't run.
+*/
+function windowFor(modelId, override) {
+	const key = Object.keys(EXPERT_WINDOWS).filter((k) => modelId.startsWith(k) && (modelId.length === k.length || "-[".includes(modelId.charAt(k.length)))).sort((x, y) => y.length - x.length)[0];
+	const listed = key === void 0 ? null : EXPERT_WINDOWS[key];
+	if (override !== void 0) return {
+		ok: true,
+		window: override,
+		compactAt: listed?.window === override ? listed.compactAt : null
+	};
+	if (listed) return {
+		ok: true,
+		...listed
+	};
+	return {
+		ok: false,
+		why: `no context window is known for ${modelId}; set "window" in the expert file`
+	};
+}
+/** A trunk's meter after a turn: that turn's context. */
+const meterOf = (turn) => turn.context;
+/** Why `promoteAt` is too close to the compaction point (the table's `compactAt`, else the window), or null. */
+function thresholdProblem(promoteAt, compactAt) {
+	if (promoteAt <= compactAt - 1e5) return null;
+	return `promoteAtTokens ${promoteAt} is within ${THRESHOLD_MARGIN.toLocaleString("en")} tokens of the compaction point at ${compactAt}; set it lower in the expert file`;
+}
+/** Why a junior grounded at `grounded` tokens leaves too little room below `promoteAt` for learned notes, or null. */
+function notesRoomProblem(promoteAt, grounded) {
+	if (promoteAt - grounded >= 1e4) return null;
+	return `room for fewer than 20 learned notes: grounded at ${grounded} tokens, promoteAtTokens ${promoteAt}; raise promoteAtTokens in the expert file`;
+}
+//#endregion
+//#region src/runner/expert-state.ts
+const statePath = (dir) => path.join(dir, "state.json");
+const indexPath = (dir, n) => path.join(dir, `index-${n}.json`);
+const STATES = [
+	"grounding",
+	"junior",
+	"senior",
+	"retired",
+	"failed"
+];
+const isGeneration = (g) => {
+	const o = g;
+	return !!o && Number.isInteger(o.n) && typeof o.trunk === "string" && typeof o.model === "string" && typeof o.commit === "string" && Number.isFinite(o.groundedAt) && Number.isFinite(o.meter) && Number.isInteger(o.notes) && STATES.includes(o.state) && (o.last === void 0 || o.last === null || typeof o.last === "string");
+};
+async function readJson$1(file) {
+	try {
+		return JSON.parse(await fs.readFile(file, "utf8"));
+	} catch {
+		return null;
+	}
+}
+async function writeJson(file, value) {
+	await fs.mkdir(path.dirname(file), { recursive: true });
+	const temp = `${file}.${process.pid}.tmp`;
+	await fs.writeFile(temp, JSON.stringify(value, null, 2) + "\n");
+	for (let tries = 0;; tries++) try {
+		return await fs.rename(temp, file);
+	} catch (err) {
+		if (tries >= 5 || ![
+			"EPERM",
+			"EBUSY",
+			"EACCES"
+		].includes(err.code ?? "")) throw err;
+		await new Promise((r) => setTimeout(r, 50 * (tries + 1)));
+	}
+}
+/** The expert's state.json, or null when there is none it can use. */
+async function readState(dir) {
+	const o = await readJson$1(statePath(dir));
+	if (!o || o.version !== 1 || typeof o.fingerprint !== "string" || typeof o.repo !== "string" || typeof o.branch !== "string" || !Array.isArray(o.generations) || !o.generations.every(isGeneration)) return null;
+	return o;
+}
+const writeState = (dir, s) => writeJson(statePath(dir), s);
+/** Generation n's file → commit index; empty when it has none. */
+async function readIndex(dir, n) {
+	const files = (await readJson$1(indexPath(dir, n)))?.files;
+	if (!files || typeof files !== "object" || Array.isArray(files)) return {};
+	return Object.fromEntries(Object.entries(files).filter((e) => typeof e[1] === "string"));
+}
+const writeIndex = (dir, n, index) => writeJson(indexPath(dir, n), {
+	version: 1,
+	files: index
+});
+/** The expert file fields a new generation is grounded for: a change to any of them starts one. */
+function fingerprint(file) {
+	return createHash("sha256").update(JSON.stringify([
+		file.repo,
+		file.subject,
+		file.model,
+		file.proof.question,
+		file.proof.answer,
+		file.window ?? null
+	])).digest("hex");
+}
+/** How long making an expert may take before it is said to have failed. */
+const MAKING_LIMIT_MS = 36e5;
+const MAX_CHECKS_WAITING = 50;
+const MAX_VERDICTS = 1e3;
+const MAX_SESSIONS = 200;
+const PROJECT_MS = 3e5;
+const HOUR_MS = 36e5;
+const DAY_MS$1 = 864e5;
+const FILE_VERSION = 1;
+/** The address of an offer's review on the office's floor: its http address, with `/?offer=<id>`. */
+function reviewUrl(server, id) {
+	const url = new URL(server);
+	url.protocol = url.protocol === "wss:" ? "https:" : "http:";
+	url.pathname = url.pathname.replace(/\/data-layer\/?$/, "") + "/";
+	url.search = `offer=${id}`;
+	url.hash = "";
+	return url.toString();
+}
+/** A folder's signals, given the session's context window (null when it isn't known): its minutes to a tenth, rounded down. */
+function signalsOf(area, window) {
+	return {
+		share: window ? Math.min(1, area.tokens / window) : 0,
+		tokens: area.tokens,
+		minutes: Math.floor(area.ms / 6e3) / 10,
+		corrections: area.corrections
+	};
+}
+/** Whether a folder's signals pass any of their thresholds. */
+const passes = (why, t) => why.share >= t.contextShare || why.tokens >= t.tokens || why.minutes >= t.minutes || why.corrections >= t.corrections;
+const within$1 = (folder, other) => other === "." || folder === other || folder.startsWith(other + "/");
+/** Whether the person dismissed `folder` of `project` (a lower-cased id), or a folder it is inside, as of `now`. */
+const dismissed = (list, project, folder, now) => list.some((d) => d.project.toLowerCase() === project && within$1(folder, d.folder) && (d.forever === true || Date.parse(d.until ?? "") > now));
+/** Whether an expert's areas cover `folder`: one whose part before its first wildcard is the folder or above it. */
+function covers(areas, folder) {
+	return areas.some((a) => {
+		const parts = a.split("/");
+		const wild = parts.findIndex((p) => /[*?[\]{}]/.test(p));
+		const prefix = (wild < 0 ? parts : parts.slice(0, wild)).join("/") || ".";
+		return within$1(folder, prefix);
+	});
+}
+/** The files under `folder` of `checkout`, relative to it, by name, at most `max`; dot entries and node_modules left out. */
+async function folderFiles(checkout, folder, max = 200) {
+	const out = [];
+	const queue = [folder === "." ? "" : folder];
+	while (queue.length && out.length < max) {
+		const rel = queue.shift();
+		const entries = await fs.readdir(path.join(checkout, rel), { withFileTypes: true }).catch(() => []);
+		for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+			if (e.name.startsWith(".") || e.name === "node_modules") continue;
+			const p = rel ? `${rel}/${e.name}` : e.name;
+			if (e.isDirectory()) queue.push(p);
+			else if (e.isFile() && out.length < max) out.push(p);
+		}
+	}
+	return out;
+}
+async function writeWhole$1(file, text) {
+	await fs.mkdir(path.dirname(file), { recursive: true });
+	const temp = `${file}.${process.pid}.tmp`;
+	await fs.writeFile(temp, text);
+	for (let tries = 0;; tries++) try {
+		return await fs.rename(temp, file);
+	} catch (err) {
+		if (tries >= 5 || ![
+			"EPERM",
+			"EBUSY",
+			"EACCES"
+		].includes(err.code ?? "")) throw err;
+		await new Promise((r) => setTimeout(r, 50 * (tries + 1)));
+	}
+}
+function createOffers(o) {
+	const now = o.now ?? Date.now;
+	const pollMs = o.pollMs ?? 2e3;
+	const file = path.join(o.isoplanDir, "runner", "offers.json");
+	const sessionFile = (bare) => path.join(o.isoplanDir, "offers", `${bare}.json`);
+	const expertFile = (key) => path.join(o.isoplanDir, "experts", `${key}.json`);
+	const offices = o.offices.map(() => ({
+		ready: false,
+		dismissals: [],
+		queue: []
+	}));
+	let saved = {
+		version: FILE_VERSION,
+		offered: [],
+		offers: []
+	};
+	let started = false;
+	let closed = false;
+	const latest = /* @__PURE__ */ new Map();
+	const takers = /* @__PURE__ */ new Map();
+	const busy = /* @__PURE__ */ new Set();
+	let drafting = 0;
+	const makings = /* @__PURE__ */ new Map();
+	const verdicts = /* @__PURE__ */ new Map();
+	const waiting = [];
+	const checked = [];
+	let checking = false;
+	let checkTimer = null;
+	let saving = Promise.resolve();
+	const settings = async () => (await o.settings()).expertOffers;
+	const indexOf = (server) => o.offices.findIndex((f) => f.server === server);
+	const say = (text) => o.log(text);
+	const done = (m) => m.state === "ready" || m.state === "failed";
+	const save = () => {
+		const copy = JSON.stringify(saved, null, 2) + "\n";
+		saving = saving.then(() => writeWhole$1(file, copy)).catch((err) => say(`couldn't save the expert offers: ${err.message}`));
+		return saving;
+	};
+	const lineOf = (r, server) => {
+		const label = o.offices[indexOf(server)]?.label;
+		return {
+			type: "expert-offer",
+			server,
+			...label && { label },
+			id: r.id,
+			key: r.key,
+			name: expertDisplayName(r.key),
+			folder: r.folder,
+			url: reviewUrl(server, r.id)
+		};
+	};
+	const tell = (r, line) => r.bare ? o.hooked(r.bare)?.send(line) : void 0;
+	const sessionWrites = /* @__PURE__ */ new Map();
+	function writeSessionFile(bare) {
+		if (!bare || !/^[\w-]{1,200}$/.test(bare)) return;
+		const write = async () => {
+			const open = saved.offers.filter((r) => r.bare === bare).flatMap((r) => Object.entries(r.offices).filter(([, s]) => s === "open").map(([server]) => lineOf(r, server)));
+			if (open.length) await writeWhole$1(sessionFile(bare), JSON.stringify({ offers: open }, null, 2) + "\n");
+			else await fs.rm(sessionFile(bare), { force: true });
+		};
+		const next = (sessionWrites.get(bare) ?? Promise.resolve()).then(write).catch((err) => say(`couldn't write the open expert offers of session ${bare}: ${err.message}`)).finally(() => sessionWrites.get(bare) === next && sessionWrites.delete(bare));
+		sessionWrites.set(bare, next);
+	}
+	function flush(index) {
+		const office = o.offices[index];
+		const st = offices[index];
+		if (!st.ready || closed) return;
+		while (st.queue.length && office.send(st.queue[0])) st.queue.shift();
+		let changed = false;
+		for (const r of saved.offers) {
+			if (r.offices[office.server] !== "pending" || !office.send(r.message)) continue;
+			r.offices[office.server] = "open";
+			changed = true;
+			say(`offered an expert on ${r.folder} of ${r.project.name} (${r.key}) to ${office.server}, as ${r.id}`);
+			tell(r, lineOf(r, office.server));
+			writeSessionFile(r.bare);
+		}
+		if (changed) save();
+		for (const m of makings.values()) if (m.index === index) sendMaking(m);
+	}
+	function sendOrQueue(index, message) {
+		const st = offices[index];
+		if (!(st.ready && o.offices[index].send(message))) st.queue.push(message);
+	}
+	const expertProjects = /* @__PURE__ */ new Map();
+	async function coveredHere(project, folder) {
+		for (const e of o.experts()) {
+			if (!e.areas?.length || !covers(e.areas, folder)) continue;
+			let hit = expertProjects.get(e.repo);
+			if (!hit || now() - hit.at > PROJECT_MS) expertProjects.set(e.repo, hit = {
+				at: now(),
+				project: o.projectOf(e.repo).catch(() => null)
+			});
+			if (await hit.project === project) return true;
+		}
+		return false;
+	}
+	const offeredNear = (session, project, folder) => saved.offered.some((x) => x.session === session && x.project === project && (within$1(folder, x.folder) || within$1(x.folder, folder)));
+	const windowOf = (s) => {
+		if (s.window) return s.window;
+		const w = s.model ? windowFor(s.model) : null;
+		return w && w.ok ? w.window : null;
+	};
+	async function drafted(a, t) {
+		const where = `${a.folder} of ${a.project.name}`;
+		if (!a.checkout) {
+			say(`no expert is offered on ${where}: this computer has no checkout of the repo to draft it from`);
+			return null;
+		}
+		drafting++;
+		try {
+			const files = await folderFiles(a.checkout, a.folder);
+			const draft = await o.draft({
+				project: a.project,
+				folder: a.folder,
+				files,
+				said: a.said
+			}, t);
+			if (!draft) {
+				say(`no expert is offered on ${where}: no usable draft came`);
+				return null;
+			}
+			const matched = await o.scan([
+				draft.key,
+				draft.subject,
+				draft.proof.question,
+				draft.proof.answer
+			].join("\n"));
+			if (matched) {
+				say(`no expert is offered on ${where}: its draft matches the secret pattern "${matched}"`);
+				return null;
+			}
+			const message = {
+				type: "expert-offer",
+				v: 1,
+				id: a.id,
+				session: a.session,
+				project: {
+					id: a.project.id,
+					name: a.project.name
+				},
+				folder: a.folder,
+				scope: a.scope,
+				key: draft.key,
+				subject: draft.subject,
+				area: [a.folder],
+				proof: draft.proof,
+				why: a.why,
+				at: new Date(now()).toISOString()
+			};
+			const parsed = ExpertOfferMessageSchema.safeParse(message);
+			if (!parsed.success) {
+				say(`no expert is offered on ${where}: its offer doesn't fit the protocol: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
+				return null;
+			}
+			return parsed.data;
+		} finally {
+			drafting--;
+		}
+	}
+	const record = (message, bare, servers) => ({
+		id: message.id,
+		scope: message.scope,
+		session: message.session,
+		bare,
+		project: message.project,
+		folder: message.folder,
+		key: message.key,
+		at: now(),
+		message,
+		offices: Object.fromEntries([...servers].map((s) => [s, "pending"]))
+	});
+	async function consider(s) {
+		const t = await settings();
+		const window = windowOf(s);
+		const at = now();
+		const candidates = [];
+		for (const area of s.areas) {
+			const project = area.project ?? s.project;
+			const id = project.id.toLowerCase();
+			const why = signalsOf(area, window);
+			if (!passes(why, t) || offeredNear(s.session, id, area.folder)) continue;
+			if (offices.some((f) => dismissed(f.dismissals, id, area.folder, at))) continue;
+			if (await coveredHere(id, area.folder)) continue;
+			candidates.push({
+				area,
+				project,
+				why
+			});
+		}
+		const depth = (folder) => folder.split("/").length;
+		const best = candidates.sort((a, b) => depth(b.area.folder) - depth(a.area.folder) || b.area.tokens - a.area.tokens)[0];
+		if (!best) return;
+		const { area, project, why } = best;
+		saved.offered.push({
+			session: s.session,
+			project: project.id.toLowerCase(),
+			folder: area.folder,
+			at
+		});
+		save();
+		const index = indexOf(s.server);
+		const checkout = area.project ? await o.checkout(index, project).catch(() => null) : s.checkout;
+		const said = await s.said(area.project ? area.project.id : null, area.folder).catch(() => []);
+		const message = await drafted({
+			id: randomBytes(12).toString("base64url"),
+			scope: "session",
+			session: s.session,
+			project,
+			folder: area.folder,
+			checkout,
+			said,
+			why
+		}, t);
+		if (!message || closed) return;
+		saved.offers.push(record(message, s.bare, takers.get(s.session) ?? [s.server]));
+		await save();
+		o.offices.forEach((_, i) => flush(i));
+	}
+	async function draftOffer(index, m) {
+		const server = o.offices[index].server;
+		if (saved.offers.some((r) => r.id === m.request)) return;
+		const project = m.project.id.toLowerCase();
+		const s = m.sessions.map((id) => latest.get(id)).find((x) => !!x);
+		const area = s?.areas.find((a) => a.folder === m.folder && (a.project ?? s.project).id.toLowerCase() === project);
+		const own = !!s && s.project.id.toLowerCase() === project && !area?.project;
+		const checkout = own ? s.checkout : await o.checkout(index, m.project).catch(() => null);
+		const said = s ? await s.said(own ? null : m.project.id, m.folder).catch(() => []) : [];
+		const why = area && s ? signalsOf(area, windowOf(s)) : {
+			share: 0,
+			tokens: 0,
+			minutes: 0,
+			corrections: 0
+		};
+		const t = await settings();
+		const message = await drafted({
+			id: m.request,
+			scope: "office",
+			session: m.sessions[0],
+			project: m.project,
+			folder: m.folder,
+			checkout,
+			said,
+			why
+		}, t);
+		if (closed) return;
+		if (!message) return sendOrQueue(index, {
+			type: "expert-offer-ended",
+			v: 1,
+			id: m.request,
+			why: "no-draft"
+		});
+		const first = m.sessions[0];
+		saved.offered.push({
+			session: first,
+			project,
+			folder: m.folder,
+			at: now()
+		});
+		saved.offers.push(record(message, first.startsWith("claude-code:") ? first.slice(12) : null, [server]));
+		await save();
+		flush(index);
+	}
+	function ended(index, m) {
+		const server = o.offices[index].server;
+		const r = saved.offers.find((x) => x.id === m.id);
+		if (!r || r.offices[server] === void 0) return say(`${server} says the expert offer ${m.id} ended, but this runner didn't offer it there`);
+		const was = r.offices[server];
+		r.offices[server] = "ended";
+		if (was === "open") tell(r, {
+			type: "expert-offer-ended",
+			server,
+			id: r.id,
+			why: m.why
+		});
+		say(`the expert offer ${r.id} on ${r.folder} of ${r.project.name} ended in ${server}: ${m.why}`);
+		if (m.why === "made") {
+			r.made = {
+				key: m.key,
+				server
+			};
+			for (const [other, state] of Object.entries(r.offices)) {
+				if (state === "ended") continue;
+				r.offices[other] = "ended";
+				const i = indexOf(other);
+				if (state === "open" && i >= 0) {
+					sendOrQueue(i, {
+						type: "expert-offer-ended",
+						v: 1,
+						id: r.id,
+						why: "withdrawn"
+					});
+					tell(r, {
+						type: "expert-offer-ended",
+						server: other,
+						id: r.id,
+						why: "withdrawn"
+					});
+				}
+			}
+			tellReady(r);
+		}
+		save();
+		writeSessionFile(r.bare);
+	}
+	function tellReady(r) {
+		const hooks = r.made && !r.told && r.bare ? o.hooked(r.bare) : null;
+		if (!hooks || !r.made) return;
+		hooks.send({
+			type: "expert-ready",
+			server: r.made.server,
+			id: r.id,
+			key: r.made.key,
+			name: expertDisplayName(r.made.key),
+			folder: r.folder
+		});
+		r.told = true;
+		save();
+	}
+	function sendMaking(m) {
+		const text = `${m.state}\n${m.detail ?? ""}`;
+		if (m.sent !== text && offices[m.index].ready && o.offices[m.index].send({
+			type: "expert-making",
+			v: 1,
+			request: m.request,
+			offer: m.offer,
+			state: m.state,
+			...m.detail && { detail: m.detail }
+		})) m.sent = text;
+		if (m.sent === text && done(m)) makings.delete(m.request);
+	}
+	function setMaking(m, state, detail) {
+		const changed = m.state !== state || m.detail !== detail;
+		m.state = state;
+		m.detail = detail;
+		if (changed && done(m)) {
+			say(`expert ${m.key}, made from offer ${m.offer}: ${state}${detail ? `: ${detail}` : ""}`);
+			if (m.timer) clearTimeout(m.timer);
+			m.timer = null;
+		}
+		sendMaking(m);
+	}
+	async function follow(m) {
+		m.timer = null;
+		if (closed || m.state === "ready" || m.state === "failed") return;
+		const st = await readState(path.join(o.isoplanDir, "experts", m.key));
+		const hosted = o.experts().find((e) => e.name === m.key);
+		const g = st?.generations.reduce((a, b) => !a || b.n > a.n ? b : a, null) ?? null;
+		if (g?.state === "junior" || g?.state === "senior" || hosted?.state === "ready") setMaking(m, "ready");
+		else if (g?.state === "failed") setMaking(m, "failed", g.proof?.passed === false ? "its answer to the proof question didn't match the answer expected" : "its grounding failed; its health log on that computer says why");
+		else if (!g && hosted?.state === "failed") setMaking(m, "failed", "its own copy of the repo couldn't be made");
+		else if (now() - m.since > 36e5) setMaking(m, "failed", `it wasn't ready within ${MAKING_LIMIT_MS / 6e4} minutes`);
+		else {
+			setMaking(m, !g ? "cloning" : g.commit ? "proof" : "grounding");
+			m.timer = setTimeout(() => void follow(m).catch((err) => say(`couldn't follow expert ${m.key}: ${err.message}`)), pollMs);
+			m.timer.unref?.();
+		}
+	}
+	async function make(index, m) {
+		if (makings.has(m.request)) return;
+		const making = {
+			index,
+			request: m.request,
+			offer: m.offer,
+			key: m.key,
+			since: now(),
+			state: "cloning",
+			sent: null,
+			timer: null
+		};
+		makings.set(m.request, making);
+		const fail = (detail) => setMaking(making, "failed", detail);
+		if (m.by.id !== o.account.id) return fail("this computer's runner is someone else's, so it makes experts only for them");
+		if (o.experts().some((e) => e.name === m.key) || await fs.stat(expertFile(m.key)).then(() => true, () => false)) return fail(`an expert named ${m.key} is already on this computer`);
+		const checkout = await o.checkout(index, m.project).catch(() => null);
+		if (!checkout) return fail(`this computer has no checkout of ${m.project.name}`);
+		const t = await settings();
+		const body = {
+			version: 1,
+			name: m.key,
+			repo: checkout,
+			subject: m.subject,
+			model: m.model,
+			promoteAtTokens: t.promoteAtTokens,
+			proof: m.proof,
+			areas: m.area
+		};
+		const text = JSON.stringify(body, null, 2) + "\n";
+		const parsed = parseExpertFile(text, `${m.key}.json`);
+		if (!parsed.ok) return fail(`its expert file wouldn't be read: ${parsed.field} ${parsed.reason}`);
+		try {
+			await writeWhole$1(expertFile(m.key), text);
+		} catch (err) {
+			say(`couldn't write the expert file ${expertFile(m.key)}: ${err.message}`);
+			return fail("its expert file couldn't be written on that computer");
+		}
+		say(`wrote the expert file for ${m.key}, made from offer ${m.offer} by ${m.by.name || m.by.id}, for ${checkout}`);
+		await follow(making);
+	}
+	async function check() {
+		if (checking || closed || !waiting.length) return;
+		checking = true;
+		let again = false;
+		try {
+			const t = await settings();
+			const at = now();
+			while (checked.length && at - checked[0] >= HOUR_MS) checked.shift();
+			if (checked.length >= t.checksPerHour) {
+				if (!checkTimer) {
+					checkTimer = setTimeout(() => (checkTimer = null, void check()), checked[0] + HOUR_MS - at);
+					checkTimer.unref?.();
+				}
+				return;
+			}
+			const next = waiting.shift();
+			checked.push(at);
+			again = true;
+			const verdict = await o.corrects(next.text, next.reply, t);
+			if (verdict !== null) {
+				verdicts.set(next.key, verdict);
+				if (verdicts.size > MAX_VERDICTS) verdicts.delete(verdicts.keys().next().value);
+			}
+		} catch (err) {
+			say(`couldn't check whether a message corrected the agent: ${err.message}`);
+		} finally {
+			checking = false;
+		}
+		if (again) check();
+	}
+	const orLog = (what) => (err) => say(`couldn't ${what}: ${err.message}`);
+	return {
+		async start() {
+			try {
+				const value = JSON.parse(await fs.readFile(file, "utf8"));
+				if (value?.version === FILE_VERSION && Array.isArray(value.offered) && Array.isArray(value.offers)) saved = value;
+			} catch {}
+			const keep = (await settings()).snoozeDays * DAY_MS$1;
+			const at = now();
+			saved.offered = saved.offered.filter((x) => at - x.at < keep);
+			saved.offers = saved.offers.filter((r) => at - r.at < keep);
+			started = true;
+		},
+		seen(s) {
+			if (!started || closed || indexOf(s.server) < 0) return;
+			latest.delete(s.session);
+			latest.set(s.session, s);
+			if (latest.size > MAX_SESSIONS) {
+				const oldest = latest.keys().next().value;
+				latest.delete(oldest);
+				takers.delete(oldest);
+			}
+			let servers = takers.get(s.session);
+			if (!servers) takers.set(s.session, servers = /* @__PURE__ */ new Set());
+			servers.add(s.server);
+			let added = false;
+			for (const r of saved.offers) {
+				if (r.session !== s.session || r.scope !== "session" || r.made || r.offices[s.server] !== void 0) continue;
+				r.offices[s.server] = "pending";
+				added = true;
+			}
+			if (added) flush(indexOf(s.server));
+			if (busy.has(s.session)) return;
+			busy.add(s.session);
+			consider(s).catch(orLog(`look at session ${s.bare}'s areas for an expert offer`)).finally(() => busy.delete(s.session));
+		},
+		corrected(key, text, reply) {
+			const verdict = verdicts.get(key);
+			if (verdict !== void 0) return verdict;
+			if (!closed && !waiting.some((w) => w.key === key) && waiting.length < MAX_CHECKS_WAITING) {
+				waiting.push({
+					key,
+					text,
+					reply
+				});
+				check().catch(orLog("check whether a message corrected the agent"));
+			}
+			return null;
+		},
+		take(index, message) {
+			if (closed) return;
+			if (message.type === "offer-dismissals") {
+				offices[index].dismissals = message.dismissals;
+				offices[index].ready = true;
+				return flush(index);
+			}
+			if (message.type === "draft-offer") return void draftOffer(index, message).catch(orLog(`draft the office-wide expert offer ${message.request}`));
+			if (message.type === "make-expert") return void make(index, message).catch(orLog(`make the expert ${message.key}`));
+			ended(index, message);
+		},
+		linked(index) {
+			offices[index].ready = false;
+			for (const m of makings.values()) if (m.index === index) m.sent = null;
+		},
+		rehooked(bare) {
+			const hooks = o.hooked(bare);
+			if (!hooks) return;
+			for (const r of saved.offers) {
+				if (r.bare !== bare) continue;
+				for (const [server, state] of Object.entries(r.offices)) if (state === "open") hooks.send(lineOf(r, server));
+				tellReady(r);
+			}
+		},
+		idle: () => drafting === 0 && !checking && busy.size === 0 && [...makings.values()].every(done),
+		close() {
+			closed = true;
+			if (checkTimer) clearTimeout(checkTimer);
+			for (const m of makings.values()) if (m.timer) clearTimeout(m.timer);
 		}
 	};
 }
@@ -17694,18 +18698,18 @@ function compareSemver(a, b) {
 }
 async function isComplete(install) {
 	for (const file of KEY_FILES) if (!await fs.stat(path.join(install.installPath, ...file)).then((s) => s.isFile(), () => false)) return false;
-	const manifest = await readJson$1(path.join(install.installPath, ".claude-plugin", "plugin.json"));
+	const manifest = await readJson(path.join(install.installPath, ".claude-plugin", "plugin.json"));
 	return !!manifest && (typeof manifest.version !== "string" || manifest.version === install.version);
 }
 const realPath = async (p) => normalPath(await fs.realpath(p).catch(() => p));
 const nameOf = (id) => id.slice(0, id.lastIndexOf("@"));
 /** Every install installed_plugins.json records; null when it is missing, can't be read, or isn't the shape known. */
 async function installs(plugins) {
-	const record = await readJson$1(path.join(plugins, "installed_plugins.json"));
+	const record = await readJson(path.join(plugins, "installed_plugins.json"));
 	const list = record?.plugins;
-	if (record?.version !== 2 || !isObject$2(list) || !Object.values(list).every(Array.isArray)) return null;
+	if (record?.version !== 2 || !isObject$1(list) || !Object.values(list).every(Array.isArray)) return null;
 	return Object.entries(list).flatMap(([id, entries]) => entries.map((entry) => {
-		const e = isObject$2(entry) ? entry : {};
+		const e = isObject$1(entry) ? entry : {};
 		const text = (key) => typeof e[key] === "string" ? e[key] : null;
 		return {
 			id,
@@ -17719,8 +18723,8 @@ async function installs(plugins) {
 }
 /** Whether `enabledPlugins` names the plugin `id` enabled, disabled, or not at all (null). */
 async function enabledIn(file, id) {
-	const value = (await readJson$1(file))?.enabledPlugins;
-	return isObject$2(value) && typeof value[id] === "boolean" ? value[id] : null;
+	const value = (await readJson(file))?.enabledPlugins;
+	return isObject$1(value) && typeof value[id] === "boolean" ? value[id] : null;
 }
 /**
 * What Claude Code says of the plugin `dataLayer` belongs to. With `project` (a session's project
@@ -17754,7 +18758,7 @@ async function enabledFor(place, id, project) {
 	return true;
 }
 async function isInPluginDirs(dirs, name) {
-	for (const dir of dirs) if ((await readJson$1(path.join(dir, ".claude-plugin", "plugin.json")))?.name === name) return true;
+	for (const dir of dirs) if ((await readJson(path.join(dir, ".claude-plugin", "plugin.json")))?.name === name) return true;
 	return false;
 }
 async function managedFiles(managed) {
@@ -17777,11 +18781,11 @@ async function gitRoot(dir) {
 		if (path.dirname(at) === at) return null;
 	}
 }
-const isObject$2 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
-async function readJson$1(file) {
+const isObject$1 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
+async function readJson(file) {
 	try {
 		const value = JSON.parse((await fs.readFile(file, "utf8")).replace(/^\uFEFF/, ""));
-		return isObject$2(value) ? value : null;
+		return isObject$1(value) ? value : null;
 	} catch {
 		return null;
 	}
@@ -18022,8 +19026,8 @@ function runHidden(argv, cwd, { env = commandEnv(process.env), timeoutMs = COMMA
 async function turnOnAutoUpdate(settings, marketplace) {
 	const current = await readSettings(settings);
 	const known = current.extraKnownMarketplaces;
-	const entry = isObject$1(known) ? known[marketplace] : void 0;
-	if (!isObject$1(entry) || !isObject$1(entry.source) || "autoUpdate" in entry) return null;
+	const entry = isObject(known) ? known[marketplace] : void 0;
+	if (!isObject(entry) || !isObject(entry.source) || "autoUpdate" in entry) return null;
 	entry.autoUpdate = true;
 	await writeSettings(settings, current);
 	return `turned on Claude Code's auto-update for the ${marketplace} marketplace in ${settings}`;
@@ -18115,7 +19119,7 @@ async function checkForUpdate({ claudeDir, settings, plugins, id, cwd, claude, e
 	}
 }
 const lastLine = (output) => output.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean).at(-1) ?? "";
-const isObject$1 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
+const isObject = (value) => !!value && typeof value === "object" && !Array.isArray(value);
 //#endregion
 //#region src/data-layer/detached.ts
 const LINK_DOWN_MS = 3e5;
@@ -18355,7 +19359,7 @@ async function relayOwnerMessage(request, { detached, takes, owner, session, fil
 	});
 	for (let waited = 0; waited < waitMs; waited += POLL_MS) {
 		await sleep(POLL_MS);
-		const taken = parse$1(await take(file));
+		const taken = parse(await take(file));
 		if (!taken) continue;
 		if (taken.taken) return {
 			type: "reply",
@@ -18368,7 +19372,7 @@ async function relayOwnerMessage(request, { detached, takes, owner, session, fil
 	}
 	return refuse("no-answer");
 }
-function parse$1(text) {
+function parse(text) {
 	if (text === null) return null;
 	let said;
 	try {
@@ -20208,138 +21212,6 @@ function within(p, ms) {
 	});
 }
 //#endregion
-//#region src/runner/expert-file.ts
-/** What an expert file leaves out. */
-const EXPERT_DEFAULTS = {
-	forkTimeLimitMinutes: 5,
-	groundingTimeLimitMinutes: 15,
-	fetchSeconds: 60,
-	maxForks: 3,
-	caps: {
-		perAskerPerDay: 30,
-		openPerAsker: 3,
-		tokenBudgetPerDay: 2e6
-	}
-};
-const KNOWN = [
-	"version",
-	"name",
-	"repo",
-	"subject",
-	"model",
-	"promoteAtTokens",
-	"forkTimeLimitMinutes",
-	"groundingTimeLimitMinutes",
-	"fetchSeconds",
-	"maxForks",
-	"caps",
-	"proof",
-	"window",
-	"areas"
-];
-const KNOWN_CAPS = [
-	"perAskerPerDay",
-	"openPerAsker",
-	"tokenBudgetPerDay"
-];
-const KNOWN_PROOF = ["question", "answer"];
-var Bad = class extends Error {
-	field;
-	reason;
-	constructor(field, reason) {
-		super(`${field}: ${reason}`);
-		this.field = field;
-		this.reason = reason;
-	}
-};
-const isObject = (v) => !!v && typeof v === "object" && !Array.isArray(v);
-/** `text` as the expert file named `fileName` (its base name is the expert's name). */
-function parseExpertFile(text, fileName) {
-	let value;
-	try {
-		value = JSON.parse(text);
-	} catch (err) {
-		return {
-			ok: false,
-			field: "(file)",
-			reason: `isn't valid JSON: ${err.message}`
-		};
-	}
-	try {
-		return parse(value, path.basename(fileName, ".json"));
-	} catch (err) {
-		if (err instanceof Bad) return {
-			ok: false,
-			field: err.field,
-			reason: err.reason
-		};
-		throw err;
-	}
-}
-function parse(value, base) {
-	if (!isObject(value)) throw new Bad("(file)", "must be a JSON object");
-	const o = value;
-	const whole = (field, v, min, fallback) => {
-		if (v === void 0 && fallback !== void 0) return fallback;
-		if (v === void 0) throw new Bad(field, "is required");
-		if (typeof v !== "number" || !Number.isInteger(v) || v < min) throw new Bad(field, `must be a whole number of at least ${min}`);
-		return v;
-	};
-	const words = (field, v) => {
-		if (v === void 0) throw new Bad(field, "is required");
-		if (typeof v !== "string" || !v.trim()) throw new Bad(field, "must be text that isn't empty");
-		return v.trim();
-	};
-	if (o.version === void 0) throw new Bad("version", "is required");
-	if (typeof o.version === "number" && Number.isInteger(o.version) && o.version > 1) throw new Bad("version", `is ${o.version}: written for a newer runner; update the Isoplan plugin on this machine`);
-	if (o.version !== 1) throw new Bad("version", "must be 1");
-	if (o.name === void 0) throw new Bad("name", "is required");
-	if (typeof o.name !== "string" || !ExpertNameSchema.safeParse(o.name).success) throw new Bad("name", "must be lowercase letters, digits and dashes, at most 63, starting with a letter or digit");
-	if (o.name !== base) throw new Bad("name", `is "${o.name}", but the file is ${base}.json; they must be the same`);
-	const repo = words("repo", o.repo);
-	if (!path.isAbsolute(repo)) throw new Bad("repo", "must be the full path of the repo's folder");
-	const subject = words("subject", o.subject);
-	if (subject.length > 1e3) throw new Bad("subject", `must be at most ${MAX_EXPERT_SUBJECT_LENGTH} characters`);
-	const model = words("model", o.model);
-	if (model.startsWith("-")) throw new Bad("model", "must be a model name, not starting with -");
-	const caps = o.caps === void 0 ? {} : o.caps;
-	if (!isObject(caps)) throw new Bad("caps", "must be an object");
-	if (o.proof === void 0) throw new Bad("proof", "is required");
-	if (!isObject(o.proof)) throw new Bad("proof", "must be an object with a question and its answer");
-	if (o.areas !== void 0 && !(Array.isArray(o.areas) && o.areas.every((a) => typeof a === "string"))) throw new Bad("areas", "must be a list of globs");
-	return {
-		ok: true,
-		expert: {
-			version: 1,
-			name: o.name,
-			repo,
-			subject,
-			model,
-			promoteAtTokens: whole("promoteAtTokens", o.promoteAtTokens, 1),
-			forkTimeLimitMinutes: whole("forkTimeLimitMinutes", o.forkTimeLimitMinutes, 1, EXPERT_DEFAULTS.forkTimeLimitMinutes),
-			groundingTimeLimitMinutes: whole("groundingTimeLimitMinutes", o.groundingTimeLimitMinutes, 1, EXPERT_DEFAULTS.groundingTimeLimitMinutes),
-			fetchSeconds: whole("fetchSeconds", o.fetchSeconds, 0, EXPERT_DEFAULTS.fetchSeconds),
-			maxForks: whole("maxForks", o.maxForks, 1, EXPERT_DEFAULTS.maxForks),
-			caps: {
-				perAskerPerDay: whole("caps.perAskerPerDay", caps.perAskerPerDay, 1, EXPERT_DEFAULTS.caps.perAskerPerDay),
-				openPerAsker: whole("caps.openPerAsker", caps.openPerAsker, 1, EXPERT_DEFAULTS.caps.openPerAsker),
-				tokenBudgetPerDay: whole("caps.tokenBudgetPerDay", caps.tokenBudgetPerDay, 1, EXPERT_DEFAULTS.caps.tokenBudgetPerDay)
-			},
-			proof: {
-				question: words("proof.question", o.proof.question),
-				answer: words("proof.answer", o.proof.answer)
-			},
-			...o.window !== void 0 && { window: whole("window", o.window, 1e5) },
-			areas: o.areas ?? []
-		},
-		unknown: [
-			...Object.keys(o).filter((k) => !KNOWN.includes(k)),
-			...Object.keys(caps).filter((k) => !KNOWN_CAPS.includes(k)).map((k) => `caps.${k}`),
-			...Object.keys(o.proof).filter((k) => !KNOWN_PROOF.includes(k)).map((k) => `proof.${k}`)
-		]
-	};
-}
-//#endregion
 //#region src/runner/expert-files.ts
 function watchExpertFiles({ dir, lookMs = 5e3, read = (file) => fs.readFile(file, "utf8"), log, onChange }) {
 	const known = /* @__PURE__ */ new Map();
@@ -20545,74 +21417,6 @@ function createGate() {
 	};
 }
 //#endregion
-//#region src/runner/expert-meter.ts
-const native1m = {
-	window: 1e6,
-	compactAt: 967e3
-};
-const window200k = {
-	window: 2e5,
-	compactAt: null
-};
-/** The office server's table as of 6 Nov 2026: a model id matches the longest key it starts with, at a "-" or "[" or its end. */
-const EXPERT_WINDOWS = {
-	"claude-fable-5-1": native1m,
-	"claude-opus-5-5": native1m,
-	"claude-sonnet-5-5": native1m,
-	"claude-haiku-5-5": native1m,
-	"claude-fable-5": native1m,
-	"claude-opus-5": native1m,
-	"claude-sonnet-5": native1m,
-	"claude-opus-4-8": native1m,
-	"claude-opus-4-7": native1m,
-	"claude-opus-4-6": window200k,
-	"claude-opus-4-6[1m]": native1m,
-	"claude-sonnet-4-6": window200k,
-	"claude-sonnet-4-6[1m]": native1m,
-	"claude-opus-4-5": window200k,
-	"claude-opus-4-5-20251101": window200k,
-	"claude-sonnet-4-5": window200k,
-	"claude-sonnet-4-5-20250929": window200k,
-	"claude-haiku-4-5": window200k,
-	"claude-haiku-4-5-20251001": window200k
-};
-/** How far below the compaction point a threshold has to stay. */
-const THRESHOLD_MARGIN = 1e5;
-/**
-* The window of the model the trunk resolved to: the expert file's `window` when it sets one (with
-* the table's compaction point only when the table gives that same window), else the table's entry.
-* With neither, why the generation can't run.
-*/
-function windowFor(modelId, override) {
-	const key = Object.keys(EXPERT_WINDOWS).filter((k) => modelId.startsWith(k) && (modelId.length === k.length || "-[".includes(modelId.charAt(k.length)))).sort((x, y) => y.length - x.length)[0];
-	const listed = key === void 0 ? null : EXPERT_WINDOWS[key];
-	if (override !== void 0) return {
-		ok: true,
-		window: override,
-		compactAt: listed?.window === override ? listed.compactAt : null
-	};
-	if (listed) return {
-		ok: true,
-		...listed
-	};
-	return {
-		ok: false,
-		why: `no context window is known for ${modelId}; set "window" in the expert file`
-	};
-}
-/** A trunk's meter after a turn: that turn's context. */
-const meterOf = (turn) => turn.context;
-/** Why `promoteAt` is too close to the compaction point (the table's `compactAt`, else the window), or null. */
-function thresholdProblem(promoteAt, compactAt) {
-	if (promoteAt <= compactAt - 1e5) return null;
-	return `promoteAtTokens ${promoteAt} is within ${THRESHOLD_MARGIN.toLocaleString("en")} tokens of the compaction point at ${compactAt}; set it lower in the expert file`;
-}
-/** Why a junior grounded at `grounded` tokens leaves too little room below `promoteAt` for learned notes, or null. */
-function notesRoomProblem(promoteAt, grounded) {
-	if (promoteAt - grounded >= 1e4) return null;
-	return `room for fewer than 20 learned notes: grounded at ${grounded} tokens, promoteAtTokens ${promoteAt}; raise promoteAtTokens in the expert file`;
-}
-//#endregion
 //#region src/runner/expert-reply.ts
 /** The longest learned note appended to a trunk; one longer is cut. */
 const LEARNED_MAX = 3e3;
@@ -20703,71 +21507,6 @@ function answerText(body, block) {
 	const room = block ? MAX_EXPERT_ANSWER_LENGTH - block.length - 2 : MAX_EXPERT_ANSWER_LENGTH;
 	const cut = body.length <= room ? body : body.slice(0, room - 1) + "…";
 	return block ? `${cut}\n\n${block}` : cut;
-}
-//#endregion
-//#region src/runner/expert-state.ts
-const statePath = (dir) => path.join(dir, "state.json");
-const indexPath = (dir, n) => path.join(dir, `index-${n}.json`);
-const STATES = [
-	"grounding",
-	"junior",
-	"senior",
-	"retired",
-	"failed"
-];
-const isGeneration = (g) => {
-	const o = g;
-	return !!o && Number.isInteger(o.n) && typeof o.trunk === "string" && typeof o.model === "string" && typeof o.commit === "string" && Number.isFinite(o.groundedAt) && Number.isFinite(o.meter) && Number.isInteger(o.notes) && STATES.includes(o.state) && (o.last === void 0 || o.last === null || typeof o.last === "string");
-};
-async function readJson(file) {
-	try {
-		return JSON.parse(await fs.readFile(file, "utf8"));
-	} catch {
-		return null;
-	}
-}
-async function writeJson(file, value) {
-	await fs.mkdir(path.dirname(file), { recursive: true });
-	const temp = `${file}.${process.pid}.tmp`;
-	await fs.writeFile(temp, JSON.stringify(value, null, 2) + "\n");
-	for (let tries = 0;; tries++) try {
-		return await fs.rename(temp, file);
-	} catch (err) {
-		if (tries >= 5 || ![
-			"EPERM",
-			"EBUSY",
-			"EACCES"
-		].includes(err.code ?? "")) throw err;
-		await new Promise((r) => setTimeout(r, 50 * (tries + 1)));
-	}
-}
-/** The expert's state.json, or null when there is none it can use. */
-async function readState(dir) {
-	const o = await readJson(statePath(dir));
-	if (!o || o.version !== 1 || typeof o.fingerprint !== "string" || typeof o.repo !== "string" || typeof o.branch !== "string" || !Array.isArray(o.generations) || !o.generations.every(isGeneration)) return null;
-	return o;
-}
-const writeState = (dir, s) => writeJson(statePath(dir), s);
-/** Generation n's file → commit index; empty when it has none. */
-async function readIndex(dir, n) {
-	const files = (await readJson(indexPath(dir, n)))?.files;
-	if (!files || typeof files !== "object" || Array.isArray(files)) return {};
-	return Object.fromEntries(Object.entries(files).filter((e) => typeof e[1] === "string"));
-}
-const writeIndex = (dir, n, index) => writeJson(indexPath(dir, n), {
-	version: 1,
-	files: index
-});
-/** The expert file fields a new generation is grounded for: a change to any of them starts one. */
-function fingerprint(file) {
-	return createHash("sha256").update(JSON.stringify([
-		file.repo,
-		file.subject,
-		file.model,
-		file.proof.question,
-		file.proof.answer,
-		file.window ?? null
-	])).digest("hex");
 }
 //#endregion
 //#region src/runner/expert.ts
@@ -20908,7 +21647,8 @@ function createExpert(o) {
 		repo: file.repo,
 		subject: file.subject,
 		state: state(),
-		senior: !!gen("junior") && !!gen("senior")
+		senior: !!gen("junior") && !!gen("senior"),
+		...file.areas.length && { areas: [...file.areas] }
 	});
 	function changed() {
 		for (const wake of [...waiters]) wake();
@@ -22082,6 +22822,7 @@ async function listingFor(hosted, home, scan, log) {
 			log(`expert ${h.name} isn't listed: its subject matches the secret pattern "${matched}"`);
 			continue;
 		}
+		const areas = (h.areas ?? []).filter((a) => AreaPathSchema.safeParse(a).success).slice(0, 20);
 		const listing = {
 			name: h.name,
 			project: {
@@ -22090,7 +22831,8 @@ async function listingFor(hosted, home, scan, log) {
 			},
 			subject: h.subject,
 			state: h.state,
-			...h.senior && { senior: true }
+			...h.senior && { senior: true },
+			...areas.length && { areas }
 		};
 		const parsed = ExpertListingSchema.safeParse(listing);
 		if (!parsed.success) {
@@ -22788,10 +23530,11 @@ async function worker() {
 	const scanText = async (text) => scan(text, await loadPatterns(path.join(appDir, "secret-patterns.json"), path.join(isoplanDir, "secret-patterns.json"), log));
 	let rehook = (_session) => {};
 	let closeFor = async (_close, _remove) => false;
+	let offers = null;
 	const pipe = await createPipeServer({
 		claudeDir,
 		log,
-		onChange: (session) => rehook(session),
+		onChange: (session) => (rehook(session), offers?.rehooked(session)),
 		ask: (request) => askFromMachine({
 			...request,
 			appDir,
@@ -22828,6 +23571,10 @@ async function worker() {
 			said.say(hooks ? `the runner reports this session for its hooks module, in ${cwd}` : `the runner reports this session, in ${cwd}`);
 			const shares = (office) => shared.get(office.server) ?? null;
 			const titled = (title) => void titles.set(sessionId, title);
+			const offering = {
+				areas: (s) => offers?.seen(s),
+				corrected: (key, text, reply) => offers?.corrected(key, text, reply) ?? null
+			};
 			try {
 				if (hooks) return await reportSession({
 					sessionId,
@@ -22847,7 +23594,8 @@ async function worker() {
 					},
 					closed: Promise.race([closed, hooks.closed.then(() => "its hooks module's link to the runner closed")]),
 					shared: shares,
-					titled
+					titled,
+					...offering
 				}).finally(() => pairLinks.ended(sessionId, hooks.send));
 				return await reportSession({
 					sessionId,
@@ -22859,7 +23607,8 @@ async function worker() {
 					notWanted,
 					isOff: () => isOff(cwd),
 					shared: shares,
-					titled
+					titled,
+					...offering
 				});
 			} catch (err) {
 				said.say(`stopping: something went wrong: ${String(err?.stack ?? err)}`);
@@ -22891,10 +23640,17 @@ async function worker() {
 		system: () => fs.readFile(path.join(appDir, "prompts", "naming.md"), "utf8"),
 		log
 	});
+	const offerModel = createOfferModel({
+		binary,
+		prompt: (name) => fs.readFile(path.join(appDir, "prompts", name), "utf8"),
+		log
+	});
 	let driver = null;
 	process.on("exit", () => {
 		answerer.close();
 		namer.close();
+		offerModel.close();
+		offers?.close();
 		driver?.close();
 		experts?.close();
 	});
@@ -22954,6 +23710,7 @@ async function worker() {
 	let live = (_index) => (_message) => false;
 	const isDir = (p) => fs.stat(p).then((s) => s.isDirectory(), () => false);
 	const drives = [];
+	const repoLists = [];
 	const transcriptFolders = /* @__PURE__ */ new Map();
 	const checkouts = createCheckouts({
 		file: path.join(isoplanDir, "runner", "checkouts.json"),
@@ -22979,6 +23736,28 @@ async function worker() {
 			return (await approvedHome(folder, homeIo, approved.repos()))?.id.toLowerCase() ?? null;
 		};
 		const foldersLeftOut = /* @__PURE__ */ new Set();
+		const offerFoldersLeftOut = /* @__PURE__ */ new Set();
+		const listRepos = async (withBranches) => {
+			const since = Date.now() - (await settings()).cloneSearchDays * 864e5;
+			const seen = await sessionFolders(io, path.join(claudeDir, "projects"), since, transcriptFolders, { gone: true });
+			for (const r of registry.list()) if (r.kind === "driven" && r.folder) seen.push({
+				folder: r.folder,
+				at: Date.parse(r.lastActivity) || 0
+			});
+			const repos = await repoFolders(seen, {
+				claudeDir,
+				clonesFolders: clones.folders,
+				checkout: checkouts.of,
+				home,
+				branches: async (checkout, project) => withBranches && !project.startsWith("local:") && await homeIo.resolve(checkout) ? remoteBranches(checkout) : null,
+				scan: scanText,
+				log,
+				leftOut: withBranches ? foldersLeftOut : offerFoldersLeftOut
+			});
+			await checkouts.keep(seen.map((s) => s.folder)).catch((err) => log(`couldn't save which checkout each worktree belongs to: ${err.message}`));
+			return repos;
+		};
+		repoLists[index] = listRepos;
 		drives[index] = {
 			server,
 			send: (message) => live(index)(message),
@@ -22991,26 +23770,7 @@ async function worker() {
 				}
 				return null;
 			},
-			repoFolders: async () => {
-				const since = Date.now() - (await settings()).cloneSearchDays * 864e5;
-				const seen = await sessionFolders(io, path.join(claudeDir, "projects"), since, transcriptFolders, { gone: true });
-				for (const r of registry.list()) if (r.kind === "driven" && r.folder) seen.push({
-					folder: r.folder,
-					at: Date.parse(r.lastActivity) || 0
-				});
-				const repos = await repoFolders(seen, {
-					claudeDir,
-					clonesFolders: clones.folders,
-					checkout: checkouts.of,
-					home,
-					branches: async (checkout, project) => !project.startsWith("local:") && await homeIo.resolve(checkout) ? remoteBranches(checkout) : null,
-					scan: scanText,
-					log,
-					leftOut: foldersLeftOut
-				});
-				await checkouts.keep(seen.map((s) => s.folder)).catch((err) => log(`couldn't save which checkout each worktree belongs to: ${err.message}`));
-				return repos;
-			},
+			repoFolders: () => listRepos(true),
 			home,
 			branchFolder: async (folder, branch) => branchFolder(git, folder, branch, await gitMs())
 		};
@@ -23186,6 +23946,26 @@ async function worker() {
 		}
 	};
 	await listSessions();
+	const offering = createOffers({
+		isoplanDir,
+		settings,
+		offices: answering.map((office, index) => ({
+			server: office.server,
+			label: office.label,
+			send: (m) => live(index)(m)
+		})),
+		account,
+		scan: scanText,
+		draft: (input, t) => offerModel.draft(input, t),
+		corrects: (text, reply, t) => offerModel.corrects(text, reply, t),
+		experts: () => hosted.hosted(),
+		projectOf: async (folder) => (await homeIo.projectOf(await homeIo.resolve(folder), folder)).id.toLowerCase(),
+		checkout: async (index, project) => (await repoLists[index](false)).find((r) => r.project === project.id.toLowerCase())?.folders[0] ?? null,
+		hooked: (bare) => pipe?.hooked(bare) ?? null,
+		log
+	});
+	await offering.start();
+	offers = offering;
 	const links = answerOffices({
 		offices: answering,
 		name: (office) => office.server,
@@ -23201,13 +23981,15 @@ async function worker() {
 				onMessage: (message) => runner.take(message),
 				onDrive: (message) => drive.take(office.server, message),
 				onHosting: host.onHosting,
+				onOffers: (message) => offering.take(answering.indexOf(office), message),
 				onOpen: () => {
 					status.opened(office.server);
 					drive.linked(office.server);
 					host.onOpen();
+					offering.linked(answering.indexOf(office));
 					readPairing(pairingPath(claudeDir)).then((all) => status.email(office.server, pairingEntry(all, office.server, account.id)?.email));
 				},
-				onClose: () => (status.closed(office.server), drive.unlinked(office.server), host.onClose()),
+				onClose: () => (status.closed(office.server), drive.unlinked(office.server), host.onClose(), offering.linked(answering.indexOf(office))),
 				onNotWanted: () => (status.stopped(office.server, "not-wanted"), said.notWanted()),
 				onPairingEnded: () => (status.stopped(office.server, "unpaired"), said.unpaired()),
 				hello: {
@@ -23221,12 +24003,13 @@ async function worker() {
 					experts: true,
 					claude: claude.state(),
 					starts: startPlaces(process.platform, hasOrca, hasDesktop),
-					hiddenStarts: true
+					hiddenStarts: true,
+					offers: true
 				}
 			});
 		},
 		paired: async (office) => !!pairingEntry(await readPairing(pairingPath(claudeDir)), office.server, account.id)?.credential,
-		idle: () => answerers.every((a) => a.runner.idle()) && reporting.reporting().length === 0 && !pipe?.all().length && hosted.idle(),
+		idle: () => answerers.every((a) => a.runner.idle()) && reporting.reporting().length === 0 && !pipe?.all().length && hosted.idle() && offering.idle(),
 		lit: async () => anyRoomSince(io, path.join(claudeDir, "projects"), Date.now() - askableMs(await config().catch(() => first))),
 		keep: async () => drive.held() > 0 || hosted.hosted().length > 0 || (await settings()).startAtLogin,
 		gone: new Promise((resolve) => process.stdin.on("end", resolve).on("error", resolve).resume()),

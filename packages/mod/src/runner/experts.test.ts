@@ -190,3 +190,13 @@ test("listed: an office that starts listing an expert it didn't is logged, with 
     t.experts.close();
   }
 });
+
+test("listingFor: an expert's areas are listed as its file names them, those the protocol doesn't take left out", async () => {
+  const home = async (folder: string) => ({ id: `github.com/acme/${path.basename(folder)}`, name: path.basename(folder) });
+  const hosted = [hostedExpert("pairing", { areas: ["packages/mod/src/data-layer/pairing*", "../outside", "C:\abs"] }), hostedExpert("none", { areas: ["../outside"] })];
+  const listing = (await listingFor(hosted, home, async () => null, () => {}))!;
+  expect(listing.map((l) => [l.name, l.areas])).toEqual([
+    ["none", undefined],
+    ["pairing", ["packages/mod/src/data-layer/pairing*"]],
+  ]);
+});

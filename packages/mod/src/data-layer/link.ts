@@ -35,6 +35,9 @@
 // to `onHosting`), and sends its listing (`experts`) through `sendLive` as well: it is live-only, as
 // is `expert-senior` (protocol 0.14.0), sent only to a server whose hosting says it reads it.
 // A session's link passes the experts it may ask (`expert-rights`) on as a line, as `ask-rights`.
+// A runner that offers experts (protocol 0.15.0) is given the server's `offer-dismissals`,
+// `draft-offer`, `make-expert` and `expert-offer-ended` (`onOffers`), and sends its `expert-offer`,
+// `expert-offer-ended` and `expert-making` live as well (runner/offers.ts).
 //
 // Given `onError`, a throw in the link's socket handlers or its pacing timer (in `filter`, say) goes
 // to it, and that handler sends nothing more; without it, the throw reaches the process as before.
@@ -43,12 +46,19 @@ import {
   parseOfficeServerMessage,
   PROTOCOL_VERSION,
   type DataLayerMessage,
+  type DraftOfferMessage,
   type DriveMessage,
   type DrivenMessage,
   type DrivePolicyMessage,
+  type ExpertMakingMessage,
+  type ExpertOfferMessage,
   type ExpertSeniorMessage,
   type ExpertsMessage,
   type Facts,
+  type MakeExpertMessage,
+  type OfferDismissalsMessage,
+  type RunnerExpertOfferEndedMessage,
+  type ServerExpertOfferEndedMessage,
   type HostingMessage,
   type DropMessage,
   type HandoffMessage,
@@ -96,6 +106,8 @@ export interface LinkOptions {
   onDrive?: (message: DriveMessage | DrivePolicyMessage) => void;
   /** Takes the server's word on which of this runner's experts it lists; without it, logged as not handled. */
   onHosting?: (message: HostingMessage) => void;
+  /** Takes the server's offer messages; without it, logged as not handled. */
+  onOffers?: (message: ServerOfferMessage) => void;
   /** Told after every hello, once what waited in the outbox has gone. */
   onOpen?: () => void;
   /** Told each time the connection drops or is closed, before any reconnect. */
@@ -122,13 +134,19 @@ type Outgoing = ReplyMessage | RefusalMessage | TakenMessage;
 /** What the server asks of a machine, rather than of a session's facts. */
 export type ServerAsk = RequestMessage | ReleaseMessage | HandoffMessage | DropMessage;
 
+/** What the server tells a runner that offers experts (protocol 0.15.0). */
+export type ServerOfferMessage = OfferDismissalsMessage | DraftOfferMessage | MakeExpertMessage | ServerExpertOfferEndedMessage;
+
+/** What a runner that offers experts sends, live. */
+export type RunnerOfferMessage = ExpertOfferMessage | RunnerExpertOfferEndedMessage | ExpertMakingMessage;
+
 export interface Link {
   /** The session's facts now; what differs from what the server has goes out when the pace allows. */
   update(facts: Facts): void;
   /** A reply, refusal or taken, first sent at `at` (now, unless it waited elsewhere first). One sent while the link is down goes out after the next hello, unless it is older than OUTBOX_MAX_AGE_MS by then. */
   send(message: Outgoing, at?: number): void;
-  /** A driven message or an expert listing, sent now if the link is up; false when it is down, and the message is dropped. */
-  sendLive(message: DrivenMessage | ExpertsMessage | ExpertSeniorMessage): boolean;
+  /** A driven message, an expert listing or an offer's, sent now if the link is up; false when it is down, and the message is dropped. */
+  sendLive(message: DrivenMessage | ExpertsMessage | ExpertSeniorMessage | RunnerOfferMessage): boolean;
   /**
    * The projects the office holds, from this connection's welcome; null before one, and from a
    * server too old to send one, which would read another repo's files as the session's own (#74).
@@ -151,6 +169,7 @@ export function createLink({
   onMessage,
   onDrive,
   onHosting,
+  onOffers,
   onOpen,
   onClose,
   filter = (facts) => facts,
@@ -389,6 +408,8 @@ export function createLink({
       onDrive(message);
     } else if (onHosting && message.type === "hosting") {
       onHosting(message);
+    } else if (onOffers && (message.type === "offer-dismissals" || message.type === "draft-offer" || message.type === "make-expert" || message.type === "expert-offer-ended")) {
+      onOffers(message);
     } else {
       emit({ type: "log", text: `the office server sent a ${message.type} message, which this data layer doesn't handle yet` });
     }

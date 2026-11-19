@@ -7349,12 +7349,18 @@ function officeNamed(offices, name) {
 	const n = name.trim();
 	return offices.find((o) => o.label.toLowerCase() === n.toLowerCase()) ?? offices.find((o) => o.server === n || new URL(o.server).host === n.toLowerCase());
 }
-/** The same per-key override for any settings file of the mod's, such as the runner's runner.json. */
+/**
+* The same per-key override for any settings file of the mod's, such as the runner's runner.json. A
+* block of settings (an object, such as runner.json's `expertOffers`) is overridden per key inside it.
+*/
 async function loadSettings(io, defaultsPath, userPath) {
-	const defaults = await readJson(io, defaultsPath);
-	const user = await readJson(io, userPath, true);
+	return overridden(await readJson(io, defaultsPath), await readJson(io, userPath, true));
+}
+const isBlock = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+function overridden(defaults, user) {
 	const config = {};
-	for (const [key, fallback] of Object.entries(defaults)) config[key] = fits(key, user[key], fallback) ? user[key] : fallback;
+	for (const [key, fallback] of Object.entries(defaults)) if (isBlock(fallback)) config[key] = overridden(fallback, isBlock(user[key]) ? user[key] : {});
+	else config[key] = fits(key, user[key], fallback) ? user[key] : fallback;
 	return config;
 }
 const BYTE_KEYS = /* @__PURE__ */ new Set(["tailBytes"]);

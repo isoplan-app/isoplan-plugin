@@ -94,12 +94,18 @@ function officesOf(config) {
 	if (!offices.length) add(config.plainRefused ?? config.server, new URL(config.plainRefused ?? config.server).host, !!config.plainRefused);
 	return offices;
 }
-/** The same per-key override for any settings file of the mod's, such as the runner's runner.json. */
+/**
+* The same per-key override for any settings file of the mod's, such as the runner's runner.json. A
+* block of settings (an object, such as runner.json's `expertOffers`) is overridden per key inside it.
+*/
 async function loadSettings(io, defaultsPath, userPath) {
-	const defaults = await readJson$1(io, defaultsPath);
-	const user = await readJson$1(io, userPath, true);
+	return overridden(await readJson$1(io, defaultsPath), await readJson$1(io, userPath, true));
+}
+const isBlock = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+function overridden(defaults, user) {
 	const config = {};
-	for (const [key, fallback] of Object.entries(defaults)) config[key] = fits(key, user[key], fallback) ? user[key] : fallback;
+	for (const [key, fallback] of Object.entries(defaults)) if (isBlock(fallback)) config[key] = overridden(fallback, isBlock(user[key]) ? user[key] : {});
+	else config[key] = fits(key, user[key], fallback) ? user[key] : fallback;
 	return config;
 }
 const BYTE_KEYS = /* @__PURE__ */ new Set(["tailBytes"]);
@@ -1541,6 +1547,8 @@ const RUNNER_FILES = [
 	"prompts/expert-senior-answer.md",
 	"prompts/expert-note.md",
 	"prompts/expert-judge.md",
+	"prompts/correction.md",
+	"prompts/expert-draft.md",
 	"dist/connect.js",
 	"dist/runner.js"
 ];

@@ -17,13 +17,15 @@
 //   EXPERT_UNKNOWN, and so is one from an office that doesn't take the expert's repo (`forOffice`).
 //   Releases and drops go to the expert that owns the request.
 // - What each office server is told (`listingFor`, expert-link.ts), with `senior` when the expert
-//   has a senior its junior can ask: only experts whose repo that office takes, never one whose
-//   project has no remote (its id would name a path on this machine), never a subject that matches
-//   a secret pattern, at most MAX_EXPERTS, the first by name.
+//   has a senior its junior can ask, and `areas`, its file's folders and globs that fit the
+//   protocol (at most MAX_AREA_PATHS), so the office offers no expert on a folder it covers: only
+//   experts whose repo that office takes, never one whose project has no remote (its id would name
+//   a path on this machine), never a subject that matches a secret pattern, at most MAX_EXPERTS, the
+//   first by name.
 
 import fs from "node:fs";
 import path from "node:path";
-import { ExpertListingSchema, MAX_EXPERTS, PROTOCOL_VERSION, type ExpertListing, type Project, type RefusalMessage, type ReplyMessage } from "@isoplan/protocol";
+import { AreaPathSchema, ExpertListingSchema, MAX_AREA_PATHS, MAX_EXPERTS, PROTOCOL_VERSION, type ExpertListing, type Project, type RefusalMessage, type ReplyMessage } from "@isoplan/protocol";
 import type { Spawn, Track } from "./claude.js";
 import { inside } from "./expert-claude.js";
 import { parseExpertFile } from "./expert-file.js";
@@ -247,7 +249,8 @@ export async function listingFor(hosted: HostedExpert[], home: (folder: string) 
       log(`expert ${h.name} isn't listed: its subject matches the secret pattern "${matched}"`);
       continue;
     }
-    const listing = { name: h.name, project: { id: project.id, name: project.name }, subject: h.subject, state: h.state, ...(h.senior && { senior: true }) };
+    const areas = (h.areas ?? []).filter((a) => AreaPathSchema.safeParse(a).success).slice(0, MAX_AREA_PATHS);
+    const listing = { name: h.name, project: { id: project.id, name: project.name }, subject: h.subject, state: h.state, ...(h.senior && { senior: true }), ...(areas.length && { areas }) };
     const parsed = ExpertListingSchema.safeParse(listing);
     if (!parsed.success) {
       log(`expert ${h.name} isn't listed: its listing doesn't fit the protocol: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
