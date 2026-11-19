@@ -319,7 +319,7 @@ export function createOffers(o: OffersOptions): Offers {
   // What the session's hooks module is told of an offer open in one office.
   const lineOf = (r: OfferRecord, server: string): ExpertOfferLine => {
     const label = o.offices[indexOf(server)]?.label;
-    return { type: "expert-offer", server, ...(label && { label }), id: r.id, key: r.key, name: expertDisplayName(r.key), folder: r.folder, url: reviewUrl(server, r.id) };
+    return { type: "expert-offer", server, ...(label && { label }), id: r.id, key: r.key, name: expertDisplayName(r.key), folder: r.folder, url: reviewUrl(server, r.id), why: r.message.why };
   };
   const tell = (r: OfferRecord, line: DataLayerLine) => (r.bare ? o.hooked(r.bare)?.send(line) : undefined);
 

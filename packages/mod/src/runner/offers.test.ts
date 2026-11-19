@@ -143,7 +143,7 @@ test("the session's hooks module is told of an open offer in each office, again 
   h.offers.seen(h.seen([area("src/parser", 35000)], { server: B }));
   await until(() => h.offered().length === 2);
   const id = (h.offered()[0]!.message as { id: string }).id;
-  const line = (server: string, label: string) => ({ type: "expert-offer", server, label, id, key: "parser", name: "Parser Expert", folder: "src/parser", url: reviewUrl(server, id) });
+  const line = (server: string, label: string) => ({ type: "expert-offer", server, label, id, key: "parser", name: "Parser Expert", folder: "src/parser", url: reviewUrl(server, id), why: { share: 0.175, tokens: 35000, minutes: 0, corrections: 0 } });
   expect(h.lines.map((l) => l.line)).toEqual([line(A, "dev"), line(B, "team")]);
   const file = path.join(h.isoplanDir, "offers", "s1.json");
   await until(() => fs.existsSync(file) && JSON.parse(fs.readFileSync(file, "utf8")).offers.length === 2);

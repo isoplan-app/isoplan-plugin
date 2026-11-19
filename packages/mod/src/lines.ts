@@ -4,7 +4,7 @@
 // anything it sends back goes through a file the line names, which the runner reads. "The data
 // layer" below is the runner reporting the session (src/data-layer/report-session.ts).
 
-import type { AskedMessage, AskRightsMessage, ConflictMessage, ErrorMessage, ExpertRightsMessage } from "@isoplan/protocol";
+import type { AskedMessage, AskRightsMessage, ConflictMessage, ErrorMessage, ExpertOfferMessage, ExpertRightsMessage } from "@isoplan/protocol";
 
 /**
  * The link to the office server. `waiting`: nothing to report yet, so not connected.
@@ -181,8 +181,9 @@ export interface RunnerLine {
  * `/?offer=<id>`). Sent by the runner itself, not the data layer, once the offer has reached the
  * office, and again each time a hooks module connects for the session while it is open: one line per
  * office it is open in. `server` is the office's data-layer address, `label` its short name, as on
- * its status line. The hooks module shows it until an ExpertOfferEndedLine for the same `id` and
- * `server` comes (the status line's link, and one transcript line, once per id).
+ * its status line. `why` is the folder's signals, as the offer gives them. The hooks module shows
+ * it until an ExpertOfferEndedLine for the same `id` and `server` comes (the status line's link, and
+ * one transcript line, once per id).
  */
 export interface ExpertOfferLine {
   type: "expert-offer";
@@ -193,6 +194,7 @@ export interface ExpertOfferLine {
   name: string;
   folder: string;
   url: string;
+  why: ExpertOfferMessage["why"];
 }
 
 /**

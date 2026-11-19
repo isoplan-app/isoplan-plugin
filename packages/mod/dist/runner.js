@@ -16701,7 +16701,8 @@ function createOffers(o) {
 			key: r.key,
 			name: expertDisplayName(r.key),
 			folder: r.folder,
-			url: reviewUrl(server, r.id)
+			url: reviewUrl(server, r.id),
+			why: r.message.why
 		};
 	};
 	const tell = (r, line) => r.bare ? o.hooked(r.bare)?.send(line) : void 0;

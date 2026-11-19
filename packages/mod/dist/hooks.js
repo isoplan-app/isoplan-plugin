@@ -60,6 +60,31 @@ function lateExpertText(m) {
 	return `Isoplan: expert ${m.expert} won't answer your question ${m.question}. ${asked}${expertText(m.code ?? "EXPERT_DROPPED", about)}`;
 }
 //#endregion
+//#region src/expert-offer/text.ts
+const article = (name) => /^[aeiou]/i.test(name) ? "An" : "A";
+/** A folder as the copy names it: "." is the repo's top folder. */
+const folderWords = (folder) => folder === "." ? "the repo's top folder" : folder;
+const times = (n) => n === 1 ? "once" : n === 2 ? "twice" : `${n} times`;
+function tokens(n) {
+	const one = (x) => String(Math.round(x * 10) / 10);
+	if (n < 1e3) return String(n);
+	if (n < 9950) return one(n / 1e3) + "k";
+	if (n < 999500) return Math.round(n / 1e3) + "k";
+	return one(n / 1e6) + "M";
+}
+/** The offer's part of the status line, after its office's part. */
+const offerStatusText = (line) => `${article(line.name)} ${line.name} could help · review: ${line.url}`;
+/** The one transcript line of an offer: why it was made, and where to review it. */
+function offerTranscriptText(line) {
+	const where = folderWords(line.folder);
+	const { minutes, share, tokens: used, corrections } = line.why;
+	const m = Math.round(minutes);
+	const spent = [m >= 1 ? `about ${m} minute${m === 1 ? "" : "s"}` : null, share >= .01 ? `${Math.round(share * 100)}% of its context` : used > 0 ? `about ${tokens(used)} tokens` : null].filter((x) => x !== null);
+	return `Isoplan: ${spent.length ? `this session has spent ${spent.join(" and ")} on ${where}${corrections > 0 ? `, and you corrected it ${times(corrections)} there` : ""}` : corrections > 0 ? `you corrected this session ${times(corrections)} while it worked in ${where}` : `this session has searched ${where}`}. ${article(line.name)} ${line.name} would answer the next question in seconds. Review it: ${line.url} (or type /isoplan:expert)`;
+}
+/** The note on a later tool result once the expert made from the session's offer is ready. */
+const readyNoteText = (line) => `Isoplan: the ${line.name} is ready. Ask it (ask_expert, key ${line.key}) before you search ${folderWords(line.folder)} again.`;
+//#endregion
 //#region src/lines.ts
 /** How long after a `superseded` line its hooks module tries again (src/hooks/register.ts). */
 const SUPERSEDED_RECHECK_MS = 6e4;
@@ -110,6 +135,9 @@ let lastError = null;
 const pairings = /* @__PURE__ */ new Map();
 const pairSaid = /* @__PURE__ */ new Set();
 const offices = /* @__PURE__ */ new Map();
+const offers = /* @__PURE__ */ new Map();
+const offersSaid = /* @__PURE__ */ new Set();
+const readyTold = /* @__PURE__ */ new Set();
 const floorWaits = /* @__PURE__ */ new Map();
 const questionCalls = /* @__PURE__ */ new Set();
 let waitsDir = null;
@@ -411,6 +439,7 @@ async function run($) {
 			expertFailures = 0;
 		}
 		offices.clear();
+		offers.clear();
 		running = session;
 		lead = `claude-code:${session}:lead`;
 		let switched = false;
@@ -511,6 +540,7 @@ function handle($, text) {
 		case "runner":
 			offices.clear();
 			pairings.clear();
+			offers.clear();
 			show($, line.state === "down" ? RUNNER_DOWN_TEXT[line.held ?? "starting"] : statusText());
 			break;
 		case "title-ask":
@@ -528,6 +558,16 @@ function handle($, text) {
 			break;
 		case "conflict":
 			addNote(line);
+			break;
+		case "expert-offer":
+			addOffer($, line);
+			break;
+		case "expert-offer-ended":
+			offers.get(line.server)?.delete(line.id);
+			show($, statusText());
+			break;
+		case "expert-ready":
+			expertReady($, line);
 			break;
 		case "asked":
 			addReply($, line);
@@ -576,8 +616,32 @@ const RUNNER_DOWN_TEXT = {
 };
 const EARLIER_TEXT = "Isoplan: an earlier copy of Isoplan reports this session until this window reloads: type /reload-plugins";
 function statusText() {
-	const parts = [...offices.values()].filter(Boolean);
+	const parts = [];
+	const linked = /* @__PURE__ */ new Set();
+	for (const [server, part] of offices) {
+		if (!part) continue;
+		parts.push(part);
+		const offer = [...offers.get(server)?.values() ?? []].reverse().find((o) => !linked.has(o.id));
+		if (!offer) continue;
+		linked.add(offer.id);
+		parts.push(offerStatusText(offer));
+	}
 	return parts.length ? `Isoplan: ${parts.join(" · ")}` : void 0;
+}
+function addOffer($, line) {
+	let open = offers.get(line.server);
+	if (!open) offers.set(line.server, open = /* @__PURE__ */ new Map());
+	open.set(line.id, line);
+	if (!offersSaid.has(line.id)) $.ui.log(offerTranscriptText(line));
+	offersSaid.add(line.id);
+	show($, statusText());
+}
+function expertReady($, line) {
+	for (const open of offers.values()) open.delete(line.id);
+	show($, statusText());
+	if (!lead || readyTold.has(line.id)) return;
+	readyTold.add(line.id);
+	notes.set(lead, [...notes.get(lead) ?? [], readyNoteText(line)]);
 }
 function officeText(line) {
 	const label = line.label ?? line.server;
