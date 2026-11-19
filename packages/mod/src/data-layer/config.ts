@@ -104,7 +104,7 @@ export function officeNamed(offices: readonly Office[], name: string): Office | 
 
 /**
  * The same per-key override for any settings file of the mod's, such as the runner's runner.json. A
- * block of settings (an object, such as runner.json's `expertOffers`) is overridden per key inside it.
+ * block of settings (an object, such as runner.json's `expertCreationSuggestions`) is overridden per key inside it.
  */
 export async function loadSettings<T>(io: ConfigIo, defaultsPath: string, userPath: string): Promise<T> {
   return overridden(await readJson(io, defaultsPath), await readJson(io, userPath, true)) as T;

@@ -18,7 +18,7 @@
 //   Releases and drops go to the expert that owns the request.
 // - What each office server is told (`listingFor`, expert-link.ts), with `senior` when the expert
 //   has a senior its junior can ask, and `areas`, its file's folders and globs that fit the
-//   protocol (at most MAX_AREA_PATHS), so the office offers no expert on a folder it covers: only
+//   protocol (at most MAX_AREA_PATHS), so the office suggests no expert on a folder it covers: only
 //   experts whose repo that office takes, never one whose project has no remote (its id would name
 //   a path on this machine), never a subject that matches a secret pattern, at most MAX_EXPERTS, the
 //   first by name.

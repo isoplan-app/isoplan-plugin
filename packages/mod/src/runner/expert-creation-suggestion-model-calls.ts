@@ -1,4 +1,4 @@
-// The `claude -p` calls behind expert offers (offers.ts): whether a person's message corrected the
+// The `claude -p` calls behind expert creation suggestions (expert-creation-suggestions.ts): whether a person's message corrected the
 // agent, and an expert's draft. Each runs as the naming call does (naming.ts):
 //
 //   claude -p --no-session-persistence --tools "" --setting-sources "" NO_HOOKS --strict-mcp-config
@@ -6,7 +6,7 @@
 //
 // with its input on stdin: no tools, no MCP servers, no settings file (so no plugin loads in it), no
 // hook (NO_HOOKS), never saved, hidden, in the OS's temp folder, so no project's CLAUDE.md loads.
-// One that takes longer than runner.json's `expertOffers.timeoutSeconds` is ended with its process
+// One that takes longer than runner.json's `expertCreationSuggestions.timeoutSeconds` is ended with its process
 // tree. It runs on the person's own Claude account, so what the draft and the correction check are
 // given goes only to that account, never to the office (ADR 0004 counts that as staying on the
 // machine); the caller scans the draft for secrets before anything of it is sent to the office.
@@ -44,8 +44,8 @@ export interface DraftInput {
   said: string[];
 }
 
-/** What the calls need of runner.json's `expertOffers`. */
-export interface OfferModelSettings {
+/** What the calls need of runner.json's `expertCreationSuggestions`. */
+export interface ExpertCreationSuggestionModelCallSettings {
   draftModel: string;
   timeoutSeconds: number;
 }
@@ -54,7 +54,7 @@ export interface OfferModelSettings {
 const STDERR_CHARS = 500;
 
 /** Every flag of a call's command line, after the binary. */
-export function offerModelArgs(model: string, system: string): string[] {
+export function expertCreationSuggestionModelCallArgs(model: string, system: string): string[] {
   return ["-p", "--no-session-persistence", "--tools", "", "--setting-sources", "", ...NO_HOOKS, "--strict-mcp-config", "--model", model, "--system-prompt", system, "--output-format", "json"];
 }
 
@@ -117,16 +117,16 @@ export function draftInput(d: DraftInput): string {
   ].join("\n");
 }
 
-export interface OfferModel {
+export interface ExpertCreationSuggestionModelCalls {
   /** Whether `text`, after the agent's `reply`, tells the agent it was wrong; null when no word came. */
-  corrects(text: string, reply: string | null, settings: OfferModelSettings): Promise<boolean | null>;
+  corrects(text: string, reply: string | null, settings: ExpertCreationSuggestionModelCallSettings): Promise<boolean | null>;
   /** The draft of an expert on the input's folder; null when none usable came. */
-  draft(input: DraftInput, settings: OfferModelSettings): Promise<Draft | null>;
+  draft(input: DraftInput, settings: ExpertCreationSuggestionModelCallSettings): Promise<Draft | null>;
   /** Ends every call still running, as the worker exits. */
   close(): void;
 }
 
-export interface OfferModelOptions {
+export interface ExpertCreationSuggestionModelCallsOptions {
   /** The `claude` binary, or null when none can be found. */
   binary: () => Promise<string | null>;
   /** A system prompt from prompts/, by its file name. */
@@ -138,20 +138,20 @@ export interface OfferModelOptions {
   platform?: NodeJS.Platform;
 }
 
-export function createOfferModel(o: OfferModelOptions): OfferModel {
+export function createExpertCreationSuggestionModelCalls(o: ExpertCreationSuggestionModelCallsOptions): ExpertCreationSuggestionModelCalls {
   const spawn = o.spawn ?? hiddenSpawn;
   const env = o.env ?? process.env;
   const platform = o.platform ?? process.platform;
   const running = new Set<ChildProcessWithoutNullStreams>();
 
   // The result's text, or null with why in the log.
-  async function ask(what: string, prompt: "correction.md" | "expert-draft.md", input: string, s: OfferModelSettings): Promise<string | null> {
+  async function ask(what: string, prompt: "correction.md" | "expert-draft.md", input: string, s: ExpertCreationSuggestionModelCallSettings): Promise<string | null> {
     const bin = await o.binary();
     if (!bin) return null;
     const system = (await o.prompt(prompt)).trim();
     let child: ChildProcessWithoutNullStreams;
     try {
-      child = spawn([...claudeCommand(bin), ...offerModelArgs(s.draftModel, system)], { cwd: o.cwd ?? os.tmpdir(), env: forkEnv(env) });
+      child = spawn([...claudeCommand(bin), ...expertCreationSuggestionModelCallArgs(s.draftModel, system)], { cwd: o.cwd ?? os.tmpdir(), env: forkEnv(env) });
     } catch (err) {
       o.log(`couldn't start claude to ${what}: ${(err as Error).message}`);
       return null;

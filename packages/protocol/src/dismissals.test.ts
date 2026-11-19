@@ -1,9 +1,9 @@
 import { expect, test } from "vitest";
-import { isDismissed, type OfferDismissal } from "./index.js";
+import { isDismissed, type ExpertCreationSuggestionDismissal } from "./index.js";
 
 const project = "github.com/isoplan-app/isoplan-plugin";
 const now = Date.parse("2026-11-19T12:00:00Z");
-const forever = (folder: string): OfferDismissal => ({ project, folder, forever: true });
+const forever = (folder: string): ExpertCreationSuggestionDismissal => ({ project, folder, forever: true });
 
 test.each([
   ["packages/mod", "packages/mod/src", true],
@@ -21,7 +21,7 @@ test("the project must match, whatever its letter case", () => {
 });
 
 test("a dismissal until a time holds only while that time is later than now", () => {
-  const until = (at: string): OfferDismissal[] => [{ project, folder: "docs", until: at }];
+  const until = (at: string): ExpertCreationSuggestionDismissal[] => [{ project, folder: "docs", until: at }];
   expect(isDismissed(until("2026-11-19T12:00:01Z"), project, "docs", now)).toBe(true);
   expect(isDismissed(until("2026-11-19T12:00:00Z"), project, "docs", now)).toBe(false);
   expect(isDismissed(until("2026-11-18T12:00:00Z"), project, "docs", now)).toBe(false);

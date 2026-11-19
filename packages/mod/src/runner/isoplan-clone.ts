@@ -24,7 +24,7 @@
 //   New session, nor taken for the clone a take works beside (repo-folders.ts isoplanFolder).
 // - The person's checkout is only read: its origin and where its objects are. One make or fetch at
 //   a time for each project, so two starts at once don't both clone.
-// - Make expert on a computer with no checkout of the repo (runner/offers.ts) asks for it from an
+// - Make expert on a computer with no checkout of the repo (runner/expert-creation-suggestions.ts) asks for it from an
 //   address instead, for the expert alone: cloned from it borrowing nothing, or one already there
 //   fetched with its own origin left as it is. When git fails its own words come back as `reason`.
 

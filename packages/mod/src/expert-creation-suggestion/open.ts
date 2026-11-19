@@ -1,15 +1,15 @@
-// /isoplan:expert's script (commands/expert.md):
+// /isoplan:review-expert-suggestion's script (commands/review-expert-suggestion.md):
 //
-//   node dist/expert-offer.js
+//   node dist/review-expert-creation-suggestion.js
 //
-// Opens the person's default browser on the review of this session's open expert offer
+// Opens the person's default browser on the review of this session's open expert creation suggestion
 // (isoplan-app#328), on the office's floor, or says plainly there is none. The runner keeps each
-// session's open offers in <claude dir>/isoplan/offers/<session id>.json, `{ "offers":
-// ExpertOfferLine[] }`, one entry per office an offer is open in, rewritten whole on each change and
-// gone once none is open (runner/offers.ts). The session id is Claude Code's own,
+// session's open suggestions in <claude dir>/isoplan/expert-creation-suggestions/<session id>.json, `{ "expertCreationSuggestions":
+// ExpertCreationSuggestionLine[] }`, one entry per office a suggestion is open in, rewritten whole on each change and
+// gone once none is open (runner/expert-creation-suggestions.ts). The session id is Claude Code's own,
 // $CLAUDE_CODE_SESSION_ID, which the hooks module's pipe and the runner go by too. This reads that
 // file rather than the pipe: the session's end of the pipe belongs to its hooks module, and this
-// runs apart from it, in the Bash tool. With several offers open it opens the newest, at the first
+// runs apart from it, in the Bash tool. With several suggestions open it opens the newest, at the first
 // office it is open in, and gives the others' links.
 //
 // Opening the browser is the person's own action, so the browser's window is expected; nothing else
@@ -20,14 +20,14 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { ExpertOfferLine } from "../lines.js";
+import type { ExpertCreationSuggestionLine } from "../lines.js";
 import { folderWords } from "./text.js";
 
-/** The file of a session's open offers. */
-export const offersPath = (claudeDir: string, session: string) => path.join(claudeDir, "isoplan", "offers", `${session}.json`);
+/** The file of a session's open expert creation suggestions. */
+export const openExpertCreationSuggestionsPath = (claudeDir: string, session: string) => path.join(claudeDir, "isoplan", "expert-creation-suggestions", `${session}.json`);
 
-/** The open offers in the file, in its order; none when it isn't there; why not when it couldn't be read as the runner writes it. */
-export async function readOffers(file: string): Promise<ExpertOfferLine[] | { problem: string }> {
+/** The open expert creation suggestions in the file, in its order; none when it isn't there; why not when it couldn't be read as the runner writes it. */
+export async function readOpenExpertCreationSuggestions(file: string): Promise<ExpertCreationSuggestionLine[] | { problem: string }> {
   let text: string;
   try {
     text = await fs.readFile(file, "utf8");
@@ -41,9 +41,9 @@ export async function readOffers(file: string): Promise<ExpertOfferLine[] | { pr
   } catch {
     return { problem: "it isn't JSON" };
   }
-  const offers = (value as { offers?: unknown })?.offers;
-  if (!Array.isArray(offers)) return { problem: "it has no list of offers" };
-  return offers.filter((o): o is ExpertOfferLine => !!o && typeof o === "object" && ["id", "name", "folder", "url"].every((k) => typeof (o as Record<string, unknown>)[k] === "string"));
+  const suggestions = (value as { expertCreationSuggestions?: unknown })?.expertCreationSuggestions;
+  if (!Array.isArray(suggestions)) return { problem: "it has no list of expert creation suggestions" };
+  return suggestions.filter((o): o is ExpertCreationSuggestionLine => !!o && typeof o === "object" && ["id", "name", "folder", "url"].every((k) => typeof (o as Record<string, unknown>)[k] === "string"));
 }
 
 // An http(s) link with nothing a shell or cmd reads as more than the link.
@@ -70,18 +70,18 @@ export function openUrl(platform: NodeJS.Platform, url: string, run: typeof spaw
   });
 }
 
-const what = (o: ExpertOfferLine) => `the ${o.name}, offered for ${folderWords(o.folder)}`;
+const what = (o: ExpertCreationSuggestionLine) => `the ${o.name}, suggested for ${folderWords(o.folder)}`;
 
-/** What /isoplan:expert prints: the newest open offer opened, or why not, and the other offers' links. */
-export async function expertOffer(o: { claudeDir: string; session: string | undefined; open: (url: string) => Promise<void> }): Promise<string> {
-  if (!o.session || !/^[\w-]{1,200}$/.test(o.session)) return "This runs inside a Claude Code session, which sets CLAUDE_CODE_SESSION_ID; it isn't set here, so this session's expert offer can't be found. Use the review link in Isoplan's status line.";
-  const file = offersPath(o.claudeDir, o.session);
-  const all = await readOffers(file);
-  if (!Array.isArray(all)) return `This session's open expert offers couldn't be read from ${file} (${all.problem}). Use the review link in Isoplan's status line.`;
-  // One per offer, at the first office it is open in, newest first.
-  const offers = all.filter((x, i) => all.findIndex((y) => y.id === x.id) === i).reverse();
-  const [newest, ...others] = offers;
-  if (!newest) return "This session has no open expert offer.";
+/** What /isoplan:review-expert-suggestion prints: the newest open expert creation suggestion's review opened, or why not, and the other suggestions' links. */
+export async function openReviewOfNewestExpertCreationSuggestion(o: { claudeDir: string; session: string | undefined; open: (url: string) => Promise<void> }): Promise<string> {
+  if (!o.session || !/^[\w-]{1,200}$/.test(o.session)) return "This runs inside a Claude Code session, which sets CLAUDE_CODE_SESSION_ID; it isn't set here, so this session's expert creation suggestion can't be found. Use the review link in Isoplan's status line.";
+  const file = openExpertCreationSuggestionsPath(o.claudeDir, o.session);
+  const all = await readOpenExpertCreationSuggestions(file);
+  if (!Array.isArray(all)) return `This session's open expert creation suggestions couldn't be read from ${file} (${all.problem}). Use the review link in Isoplan's status line.`;
+  // One per suggestion, at the first office it is open in, newest first.
+  const suggestions = all.filter((x, i) => all.findIndex((y) => y.id === x.id) === i).reverse();
+  const [newest, ...others] = suggestions;
+  if (!newest) return "This session has no open expert creation suggestion.";
   let text: string;
   try {
     await o.open(newest.url);
@@ -90,5 +90,5 @@ export async function expertOffer(o: { claudeDir: string; session: string | unde
     text = `Your browser couldn't be opened (${(err as Error).message}). Open this link to review ${what(newest)}: ${newest.url}`;
   }
   if (!others.length) return text;
-  return [text, `This session has ${others.length === 1 ? "another open offer" : `${others.length} more open offers`}:`, ...others.map((x) => `- ${what(x)}: ${x.url}`)].join("\n");
+  return [text, `This session has ${others.length === 1 ? "another open expert creation suggestion" : `${others.length} more open expert creation suggestions`}:`, ...others.map((x) => `- ${what(x)}: ${x.url}`)].join("\n");
 }

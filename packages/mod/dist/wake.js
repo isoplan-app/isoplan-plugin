@@ -18,7 +18,7 @@ async function loadConfig(io, defaultsPath, userPath) {
 }
 /**
 * The same per-key override for any settings file of the mod's, such as the runner's runner.json. A
-* block of settings (an object, such as runner.json's `expertOffers`) is overridden per key inside it.
+* block of settings (an object, such as runner.json's `expertCreationSuggestions`) is overridden per key inside it.
 */
 async function loadSettings(io, defaultsPath, userPath) {
 	return overridden(await readJson$1(io, defaultsPath), await readJson$1(io, userPath, true));

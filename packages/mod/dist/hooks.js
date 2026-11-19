@@ -60,7 +60,7 @@ function lateExpertText(m) {
 	return `Isoplan: expert ${m.expert} won't answer your question ${m.question}. ${asked}${expertText(m.code ?? "EXPERT_DROPPED", about)}`;
 }
 //#endregion
-//#region src/expert-offer/text.ts
+//#region src/expert-creation-suggestion/text.ts
 const article = (name) => /^[aeiou]/i.test(name) ? "An" : "A";
 /** A folder as the copy names it: "." is the repo's top folder. */
 const folderWords = (folder) => folder === "." ? "the repo's top folder" : folder;
@@ -72,17 +72,17 @@ function tokens(n) {
 	if (n < 999500) return Math.round(n / 1e3) + "k";
 	return one(n / 1e6) + "M";
 }
-/** The offer's part of the status line, after its office's part. */
-const offerStatusText = (line) => `${article(line.name)} ${line.name} could help · review: ${line.url}`;
-/** The one transcript line of an offer: why it was made, and where to review it. */
-function offerTranscriptText(line) {
+/** The suggestion's part of the status line, after its office's part. */
+const expertCreationSuggestionStatusLineText = (line) => `${article(line.name)} ${line.name} could help · review: ${line.url}`;
+/** The one transcript line of a suggestion: why it was made, and where to review it. */
+function expertCreationSuggestionTranscriptText(line) {
 	const where = folderWords(line.folder);
 	const { minutes, share, tokens: used, corrections } = line.why;
 	const m = Math.round(minutes);
 	const spent = [m >= 1 ? `about ${m} minute${m === 1 ? "" : "s"}` : null, share >= .01 ? `${Math.round(share * 100)}% of its context` : used > 0 ? `about ${tokens(used)} tokens` : null].filter((x) => x !== null);
-	return `Isoplan: ${spent.length ? `this session has spent ${spent.join(" and ")} on ${where}${corrections > 0 ? `, and you corrected it ${times(corrections)} there` : ""}` : corrections > 0 ? `you corrected this session ${times(corrections)} while it worked in ${where}` : `this session has searched ${where}`}. ${article(line.name)} ${line.name} could answer questions about ${where} without searching it again. Review it: ${line.url} (or type /isoplan:expert)`;
+	return `Isoplan: ${spent.length ? `this session has spent ${spent.join(" and ")} on ${where}${corrections > 0 ? `, and you corrected it ${times(corrections)} there` : ""}` : corrections > 0 ? `you corrected this session ${times(corrections)} while it worked in ${where}` : `this session has searched ${where}`}. ${article(line.name)} ${line.name} could answer questions about ${where} without searching it again. Review it: ${line.url} (or type /isoplan:review-expert-suggestion)`;
 }
-/** The note on a later tool result once the expert made from the session's offer is ready. */
+/** The note on a later tool result once the expert created from the session's suggestion is ready. */
 const readyNoteText = (line) => `Isoplan: the ${line.name} is ready. Ask it with ask_expert, expert "${line.key}", before you search ${folderWords(line.folder)} again.`;
 //#endregion
 //#region src/lines.ts
@@ -135,8 +135,8 @@ let lastError = null;
 const pairings = /* @__PURE__ */ new Map();
 const pairSaid = /* @__PURE__ */ new Set();
 const offices = /* @__PURE__ */ new Map();
-const offers = /* @__PURE__ */ new Map();
-const offersSaid = /* @__PURE__ */ new Set();
+const openExpertCreationSuggestionsByOffice = /* @__PURE__ */ new Map();
+const expertCreationSuggestionsPutInTranscript = /* @__PURE__ */ new Set();
 const readyTold = /* @__PURE__ */ new Set();
 const floorWaits = /* @__PURE__ */ new Map();
 const questionCalls = /* @__PURE__ */ new Set();
@@ -439,7 +439,7 @@ async function run($) {
 			expertFailures = 0;
 		}
 		offices.clear();
-		offers.clear();
+		openExpertCreationSuggestionsByOffice.clear();
 		running = session;
 		lead = `claude-code:${session}:lead`;
 		let switched = false;
@@ -540,7 +540,7 @@ function handle($, text) {
 		case "runner":
 			offices.clear();
 			pairings.clear();
-			offers.clear();
+			openExpertCreationSuggestionsByOffice.clear();
 			show($, line.state === "down" ? RUNNER_DOWN_TEXT[line.held ?? "starting"] : statusText());
 			break;
 		case "title-ask":
@@ -559,11 +559,11 @@ function handle($, text) {
 		case "conflict":
 			addNote(line);
 			break;
-		case "expert-offer":
-			addOffer($, line);
+		case "expert-creation-suggestion":
+			addExpertCreationSuggestion($, line);
 			break;
-		case "expert-offer-ended":
-			offers.get(line.server)?.delete(line.id);
+		case "expert-creation-suggestion-ended":
+			openExpertCreationSuggestionsByOffice.get(line.server)?.delete(line.id);
 			show($, statusText());
 			break;
 		case "expert-ready":
@@ -621,23 +621,23 @@ function statusText() {
 	for (const [server, part] of offices) {
 		if (!part) continue;
 		parts.push(part);
-		const offer = [...offers.get(server)?.values() ?? []].reverse().find((o) => !linked.has(o.id));
-		if (!offer) continue;
-		linked.add(offer.id);
-		parts.push(offerStatusText(offer));
+		const suggestion = [...openExpertCreationSuggestionsByOffice.get(server)?.values() ?? []].reverse().find((o) => !linked.has(o.id));
+		if (!suggestion) continue;
+		linked.add(suggestion.id);
+		parts.push(expertCreationSuggestionStatusLineText(suggestion));
 	}
 	return parts.length ? `Isoplan: ${parts.join(" · ")}` : void 0;
 }
-function addOffer($, line) {
-	let open = offers.get(line.server);
-	if (!open) offers.set(line.server, open = /* @__PURE__ */ new Map());
+function addExpertCreationSuggestion($, line) {
+	let open = openExpertCreationSuggestionsByOffice.get(line.server);
+	if (!open) openExpertCreationSuggestionsByOffice.set(line.server, open = /* @__PURE__ */ new Map());
 	open.set(line.id, line);
-	if (!offersSaid.has(line.id)) $.ui.log(offerTranscriptText(line));
-	offersSaid.add(line.id);
+	if (!expertCreationSuggestionsPutInTranscript.has(line.id)) $.ui.log(expertCreationSuggestionTranscriptText(line));
+	expertCreationSuggestionsPutInTranscript.add(line.id);
 	show($, statusText());
 }
 function expertReady($, line) {
-	for (const open of offers.values()) open.delete(line.id);
+	for (const open of openExpertCreationSuggestionsByOffice.values()) open.delete(line.id);
 	show($, statusText());
 	if (!lead || readyTold.has(line.id)) return;
 	readyTold.add(line.id);

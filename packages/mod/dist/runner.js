@@ -5832,7 +5832,7 @@ const AreaPathSchema = string().min(1).max(1e3).refine((path) => !path.includes(
 const Count = number().int().nonnegative();
 /**
 * How much a session's agents worked in one folder of a repo (protocol 0.15.0), so the server can
-* offer an expert on it (isoplan-app ADR 0013). Counts only: never file contents, search patterns or
+* suggest creating an expert on it (isoplan-app ADR 0013). Counts only: never file contents, search patterns or
 * results. `folder` is relative to its repo's root (AreaPathSchema). `reads`: files read in it;
 * `searches`: searches in it (Grep, Glob and the like); `tokens`: what their results took, estimated
 * as characters / 4; `ms`: the time from those calls to their results; `corrections`: the person's
@@ -6111,10 +6111,13 @@ const HelloMessageSchema = object({
 * hidden (a start's `hidden`), in a clone Isoplan keeps for itself. The server sends `hidden` only to
 * a runner that says it: a runner from before 0.14.0 drops the field it doesn't know and would start
 * the session in the person's own checkout.
-* `offers` (protocol 0.15.0, isoplan-app#328): this runner offers experts where a session would have
-* been helped by one (see `expert-offer`). It sends `expert-offer`, `expert-offer-ended` and
-* `expert-making`, and takes `offer-dismissals`, `draft-offer`, `make-expert` and
-* `expert-offer-ended`; the server sends none of these to a runner that didn't say it.
+* `canCreateExpertsFromSuggestions` (protocol 0.15.0, isoplan-app#328): this runner suggests creating
+* an expert where a session would have been helped by one, and creates it when a person confirms
+* (see `expert-creation-suggestion`). It sends `expert-creation-suggestion`,
+* `expert-creation-suggestion-ended` and `expert-creation-progress`, and takes
+* `expert-creation-suggestion-dismissals`, `draft-office-wide-expert-creation-suggestion`,
+* `create-expert-from-suggestion` and `expert-creation-suggestion-ended`; the server sends none of
+* these to a runner that didn't say it.
 */
 const RunnerHelloMessageSchema = object({
 	type: literal$1("runner"),
@@ -6129,7 +6132,7 @@ const RunnerHelloMessageSchema = object({
 	starts: array(StartModeSchema).max(4).optional(),
 	experts: literal$1(true).optional(),
 	hiddenStarts: literal$1(true).optional(),
-	offers: literal$1(true).optional()
+	canCreateExpertsFromSuggestions: literal$1(true).optional()
 });
 /** All of the session's facts. Sent on connect and on repair. */
 const FullMessageSchema = object({
@@ -6209,7 +6212,7 @@ const expertDisplayName = (key) => [...key.split("-").filter(Boolean).map((word)
 * One expert a runner hosts, as it lists it to an office server whose list takes its repo. `senior`
 * (protocol 0.14.0): it has a senior generation, which its junior can ask (see `expert-senior`);
 * absent from an older runner. `areas` (protocol 0.15.0): the folders and globs of its repo it
-* covers, from its file, so the office never offers an expert on a folder one already covers;
+* covers, from its file, so the office never suggests creating an expert on a folder one already covers;
 * absent from an older runner, or when its file names none. An older server ignores both.
 */
 const ExpertListingSchema = object({
@@ -6469,14 +6472,15 @@ const AskExpertMessageSchema = object({
 	blocking: boolean(),
 	key: string().min(1).max(100)
 });
-/** The most dismissed areas an `offer-dismissals` lists. */
-const MAX_OFFER_DISMISSALS = 1e3;
+/** The most dismissed areas an `expert-creation-suggestion-dismissals` lists. */
+const MAX_EXPERT_CREATION_SUGGESTION_DISMISSALS = 1e3;
 /**
-* An offer's id, which the floor's link names (`/?offer=<id>`), so it keeps to letters, digits, `_`
-* and `-`: the runner's own random id for a session's offer, or the `draft-offer`'s `request` for an
-* office-wide one.
+* An expert creation suggestion's id, which the floor's link names
+* (`/?expert-creation-suggestion=<id>`), so it keeps to letters, digits, `_` and `-`: the runner's own
+* random id for a session's suggestion, or the `draft-office-wide-expert-creation-suggestion`'s
+* `request` for an office-wide one.
 */
-const OfferId = string().regex(/^[A-Za-z0-9_-]{1,100}$/, "letters, digits, `_` and `-`, at most 100");
+const ExpertCreationSuggestionId = string().regex(/^[A-Za-z0-9_-]{1,100}$/, "letters, digits, `_` and `-`, at most 100");
 /**
 * The model an expert grounds with, as Claude Code's `--model` takes it (`sonnet`,
 * `claude-opus-5-5`, `claude-sonnet-4-5[1m]`): kept to characters no shell reads, starting with a
@@ -6491,23 +6495,23 @@ const Proof = object({
 /** What an expert covers: folders and globs in its repo (AreaPathSchema). */
 const Area = array(AreaPathSchema).min(1).max(20);
 /**
-* A runner offers an expert (protocol 0.15.0), once per session and folder, for a session in a repo
-* the office takes. `session` is the session that showed the need (for an office-wide one, the
-* latest that searched the area), `project` its repo, and `folder` the folder whose signals passed
+* A runner suggests creating an expert (protocol 0.15.0), once per session and folder, for a session
+* in a repo the office takes. `session` is the session that showed the need (for an office-wide one,
+* the latest that searched the area), `project` its repo, and `folder` the folder whose signals passed
 * their threshold, which dismissals name. `scope`: `session`, from that session's own signals, or
-* `office`, in answer to a `draft-offer`, whose `request` is then its `id`. The draft: `key`, the
-* expert's name (shown as `expertDisplayName(key)`), `subject`, `area` and `proof`, as the runner's
-* local model wrote them and the secret check passed them. `why`, the signals that passed their
-* thresholds, each other one 0: `share`, the share of the session's context spent reading and
-* searching the folder (0 to 1), and `tokens`, those tokens, which are one signal; `minutes`, the time
-* spent there; `corrections`, the person's corrections there. `at`:
-* when it was offered. Of its text, only these leave the machine, under ADR 0004's case for an expert
-* offer's draft.
+* `office`, in answer to a `draft-office-wide-expert-creation-suggestion`, whose `request` is then its
+* `id`. The draft: `key`, the expert's name (shown as `expertDisplayName(key)`), `subject`, `area`
+* and `proof`, as the runner's local model wrote them and the secret check passed them. `why`, the
+* signals that passed their thresholds, each other one 0: `share`, the share of the session's context
+* spent reading and searching the folder (0 to 1), and `tokens`, those tokens, which are one signal;
+* `minutes`, the time spent there; `corrections`, the person's corrections there. `at`: when it was
+* suggested. Of its text, only these leave the machine, under ADR 0004's case for an expert creation
+* suggestion's draft.
 */
-const ExpertOfferMessageSchema = object({
-	type: literal$1("expert-offer"),
+const ExpertCreationSuggestionMessageSchema = object({
+	type: literal$1("expert-creation-suggestion"),
 	v: Version,
-	id: OfferId,
+	id: ExpertCreationSuggestionId,
 	session: string().min(1),
 	project: ProjectSchema,
 	folder: AreaPathSchema,
@@ -6525,37 +6529,39 @@ const ExpertOfferMessageSchema = object({
 	at: datetime({ offset: true })
 });
 /**
-* A runner ends its offer `id` itself (protocol 0.15.0): `withdrawn`, it took the offer back before
-* anyone made or dismissed it; `no-draft`, it couldn't draft the office-wide offer the `draft-offer`
-* of that id asked for (the secret check matched, or its model gave no usable draft).
+* A runner ends its expert creation suggestion `id` itself (protocol 0.15.0): `withdrawn`, it took the
+* suggestion back before anyone created the expert or dismissed it; `no-draft`, it couldn't draft the
+* office-wide suggestion the `draft-office-wide-expert-creation-suggestion` of that id asked for (the
+* secret check matched, or its model gave no usable draft).
 */
-const RunnerExpertOfferEndedMessageSchema = object({
-	type: literal$1("expert-offer-ended"),
+const RunnerExpertCreationSuggestionEndedMessageSchema = object({
+	type: literal$1("expert-creation-suggestion-ended"),
 	v: Version,
-	id: OfferId,
+	id: ExpertCreationSuggestionId,
 	why: _enum(["withdrawn", "no-draft"])
 });
 /**
-* Where making an expert stands on the runner that took the `make-expert` request `request`, for the
-* offer `offer` (protocol 0.15.0), sent as each state is reached: `cloning`, it prepares the
-* expert's own clone of the repo; `grounding`, the expert reads what its subject rests on, as any
-* expert grounds (its area decides only which folders it covers, for offers); `proof`, it answers its
+* Where creating an expert stands on the runner that took the `create-expert-from-suggestion` request
+* `request`, for the expert creation suggestion `expertCreationSuggestionId` (protocol 0.15.0), sent
+* as each state is reached: `cloning`, it prepares the expert's own clone of the repo; `grounding`,
+* the expert reads what its subject rests on, as any expert grounds (its area decides only which
+* folders it covers, for expert creation suggestions); `proof`, it answers its
 * proof question; `ready`, it answers questions; `failed`, it stopped, with `detail` in the runner's
 * own words (no checkout of the repo on this machine, a key already used here, a failed proof).
 */
-const ExpertMakingStateSchema = _enum([
+const ExpertCreationProgressStateSchema = _enum([
 	"cloning",
 	"grounding",
 	"proof",
 	"ready",
 	"failed"
 ]);
-const ExpertMakingMessageSchema = object({
-	type: literal$1("expert-making"),
+const ExpertCreationProgressMessageSchema = object({
+	type: literal$1("expert-creation-progress"),
 	v: Version,
 	request: RequestId,
-	offer: OfferId,
-	state: ExpertMakingStateSchema,
+	expertCreationSuggestionId: ExpertCreationSuggestionId,
+	state: ExpertCreationProgressStateSchema,
 	detail: Detail.optional()
 });
 const driven$2 = {
@@ -6818,9 +6824,9 @@ discriminatedUnion("type", [
 	ExpertsMessageSchema,
 	AskExpertMessageSchema,
 	ExpertSeniorMessageSchema,
-	ExpertOfferMessageSchema,
-	RunnerExpertOfferEndedMessageSchema,
-	ExpertMakingMessageSchema
+	ExpertCreationSuggestionMessageSchema,
+	RunnerExpertCreationSuggestionEndedMessageSchema,
+	ExpertCreationProgressMessageSchema
 ]);
 /** Asks the data layer to send its facts in full. */
 const RepairMessageSchema = object({
@@ -7215,17 +7221,18 @@ const DrivePolicyMessageSchema = object({
 	bypassAllowed: array(string().min(1)).max(1e3)
 });
 /**
-* Make the expert an offer drafted (protocol 0.15.0), as the person who confirmed it (`by`) set it on
-* the floor, sent to the runner of the computer they chose, one of their own, which checks `by` is its
-* own person. The runner finds its checkout of `project`, writes the expert file `key` with `subject`,
-* `model`, `area` and `proof`, and answers with `expert-making` under `request`. Nothing is queued:
-* the server refuses at once when that runner isn't linked.
+* Create the expert the expert creation suggestion `expertCreationSuggestionId` drafted (protocol
+* 0.15.0), as the person who confirmed it (`by`) set it on the floor, sent to the runner of the
+* computer they chose, one of their own, which checks `by` is its own person. The runner finds its
+* checkout of `project`, writes the expert file `key` with `subject`, `model`, `area` and `proof`, and
+* answers with `expert-creation-progress` under `request`. Nothing is queued: the server refuses at
+* once when that runner isn't linked.
 */
-const MakeExpertMessageSchema = object({
-	type: literal$1("make-expert"),
+const CreateExpertFromSuggestionMessageSchema = object({
+	type: literal$1("create-expert-from-suggestion"),
 	v: Version,
 	request: RequestId,
-	offer: OfferId,
+	expertCreationSuggestionId: ExpertCreationSuggestionId,
 	key: ExpertNameSchema,
 	subject: Subject,
 	model: Model,
@@ -7235,26 +7242,26 @@ const MakeExpertMessageSchema = object({
 	by: Account
 });
 /**
-* Draft an office-wide offer on `folder` of `project` (protocol 0.15.0), which several sessions
-* searched within the period: sent to the runner of the latest of them. `sessions`: those on this
-* runner's machine, newest first, whose work in the folder the draft is made from; the first is the
-* offer's `session`. The runner answers with `expert-offer`, scope `office`, whose `id` is `request`,
-* or with `expert-offer-ended` `no-draft`.
+* Draft an office-wide expert creation suggestion on `folder` of `project` (protocol 0.15.0), which
+* several sessions searched within the period: sent to the runner of the latest of them. `sessions`:
+* those on this runner's machine, newest first, whose work in the folder the draft is made from; the
+* first is the suggestion's `session`. The runner answers with `expert-creation-suggestion`, scope
+* `office`, whose `id` is `request`, or with `expert-creation-suggestion-ended` `no-draft`.
 */
-const DraftOfferMessageSchema = object({
-	type: literal$1("draft-offer"),
+const DraftOfficeWideExpertCreationSuggestionMessageSchema = object({
+	type: literal$1("draft-office-wide-expert-creation-suggestion"),
 	v: Version,
-	request: OfferId,
+	request: ExpertCreationSuggestionId,
 	project: ProjectSchema,
 	folder: AreaPathSchema,
 	sessions: array(string().min(1)).min(1).max(20)
 });
 /**
 * One area this runner's person dismissed: a folder of a project, by its id, lower-cased. "Not now"
-* lasts `until` a time, after which the same area may be offered again; "Don't offer this again"
+* lasts `until` a time, after which the same area may be suggested again; "Don't suggest this again"
 * lasts `forever`. Exactly one of the two.
 */
-const OfferDismissalSchema = object({
+const ExpertCreationSuggestionDismissalSchema = object({
 	project: string().min(1),
 	folder: AreaPathSchema,
 	until: datetime({ offset: true }).optional(),
@@ -7268,19 +7275,20 @@ const OfferDismissalSchema = object({
 });
 /**
 * The areas this runner's person dismissed (protocol 0.15.0), the whole list each time: sent to a
-* runner that said `offers` once its hello is let in, even an empty one, and whenever the list
-* changes. The runner makes no offer on an area it lists, and sends none of its offer messages on a
-* connection before the connection's first one (see `expert-offer`).
+* runner that said `canCreateExpertsFromSuggestions` once its hello is let in, even an empty one, and
+* whenever the list changes. The runner suggests no expert on an area it lists, and sends none of its
+* expert creation suggestion messages on a connection before the connection's first one (see
+* `expert-creation-suggestion`).
 */
-const OfferDismissalsMessageSchema = object({
-	type: literal$1("offer-dismissals"),
+const ExpertCreationSuggestionDismissalsMessageSchema = object({
+	type: literal$1("expert-creation-suggestion-dismissals"),
 	v: Version,
-	dismissals: array(OfferDismissalSchema).max(MAX_OFFER_DISMISSALS)
+	dismissals: array(ExpertCreationSuggestionDismissalSchema).max(MAX_EXPERT_CREATION_SUGGESTION_DISMISSALS)
 });
-const offerEnded = {
-	type: literal$1("expert-offer-ended"),
+const expertCreationSuggestionEnded = {
+	type: literal$1("expert-creation-suggestion-ended"),
 	v: Version,
-	id: OfferId
+	id: ExpertCreationSuggestionId
 };
 const OfficeServerMessageSchema = discriminatedUnion("type", [
 	RepairMessageSchema,
@@ -7299,15 +7307,15 @@ const OfficeServerMessageSchema = discriminatedUnion("type", [
 	DrivePolicyMessageSchema,
 	ExpertRightsMessageSchema,
 	HostingMessageSchema,
-	MakeExpertMessageSchema,
-	DraftOfferMessageSchema,
-	OfferDismissalsMessageSchema,
+	CreateExpertFromSuggestionMessageSchema,
+	DraftOfficeWideExpertCreationSuggestionMessageSchema,
+	ExpertCreationSuggestionDismissalsMessageSchema,
 	discriminatedUnion("why", [object({
-		...offerEnded,
+		...expertCreationSuggestionEnded,
 		why: literal$1("made"),
 		key: ExpertNameSchema
 	}), object({
-		...offerEnded,
+		...expertCreationSuggestionEnded,
 		why: _enum([
 			"dismissed",
 			"refused",
@@ -7417,7 +7425,7 @@ function officesOf(config) {
 }
 /**
 * The same per-key override for any settings file of the mod's, such as the runner's runner.json. A
-* block of settings (an object, such as runner.json's `expertOffers`) is overridden per key inside it.
+* block of settings (an object, such as runner.json's `expertCreationSuggestions`) is overridden per key inside it.
 */
 async function loadSettings(io, defaultsPath, userPath) {
 	return overridden(await readJson$2(io, defaultsPath), await readJson$2(io, userPath, true));
@@ -8942,7 +8950,7 @@ const same = (a, b) => a !== void 0 && JSON.stringify(a) === JSON.stringify(b);
 const STABLE_MS$1 = 3e4;
 const OUTBOX_MAX$1 = 100;
 const OUTBOX_MAX_AGE_MS$1 = 36e5;
-function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, retryCapMs = 3e4, notWantedRetryMs = 36e5, takenRetryMs = 36e5, onNotWanted, onPairingEnded, onMessage, onDrive, onHosting, onOffers, onOpen, onClose, filter = (facts) => facts, answered, pairing, pairPollMs = 5e3, admit, random = Math.random, onError }) {
+function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, retryCapMs = 3e4, notWantedRetryMs = 36e5, takenRetryMs = 36e5, onNotWanted, onPairingEnded, onMessage, onDrive, onHosting, onExpertCreationSuggestionMessages, onOpen, onClose, filter = (facts) => facts, answered, pairing, pairPollMs = 5e3, admit, random = Math.random, onError }) {
 	const outbox = [];
 	let latest = null;
 	let socket = null;
@@ -9196,7 +9204,7 @@ function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, 
 		} else if (onMessage && (message.type === "request" || message.type === "release" || message.type === "handoff" || message.type === "drop")) onMessage(message);
 		else if (onDrive && (message.type === "drive" || message.type === "drive-policy")) onDrive(message);
 		else if (onHosting && message.type === "hosting") onHosting(message);
-		else if (onOffers && (message.type === "offer-dismissals" || message.type === "draft-offer" || message.type === "make-expert" || message.type === "expert-offer-ended")) onOffers(message);
+		else if (onExpertCreationSuggestionMessages && (message.type === "expert-creation-suggestion-dismissals" || message.type === "draft-office-wide-expert-creation-suggestion" || message.type === "create-expert-from-suggestion" || message.type === "expert-creation-suggestion-ended")) onExpertCreationSuggestionMessages(message);
 		else emit({
 			type: "log",
 			text: `the office server sent a ${message.type} message, which this data layer doesn't handle yet`
@@ -16267,9 +16275,9 @@ function createNamer(o) {
 	};
 }
 //#endregion
-//#region src/runner/offer-model.ts
+//#region src/runner/expert-creation-suggestion-model-calls.ts
 /** Every flag of a call's command line, after the binary. */
-function offerModelArgs(model, system) {
+function expertCreationSuggestionModelCallArgs(model, system) {
 	return [
 		"-p",
 		"--no-session-persistence",
@@ -16348,7 +16356,7 @@ function draftInput(d) {
 		d.said.length ? d.said.join("\n---\n") : "(nothing kept)"
 	].join("\n");
 }
-function createOfferModel(o) {
+function createExpertCreationSuggestionModelCalls(o) {
 	const spawn = o.spawn ?? hiddenSpawn;
 	const env = o.env ?? process.env;
 	const platform = o.platform ?? process.platform;
@@ -16359,7 +16367,7 @@ function createOfferModel(o) {
 		const system = (await o.prompt(prompt)).trim();
 		let child;
 		try {
-			child = spawn([...claudeCommand(bin), ...offerModelArgs(s.draftModel, system)], {
+			child = spawn([...claudeCommand(bin), ...expertCreationSuggestionModelCallArgs(s.draftModel, system)], {
 				cwd: o.cwd ?? os.tmpdir(),
 				env: forkEnv(env)
 			});
@@ -16680,8 +16688,8 @@ function fingerprint(file) {
 	])).digest("hex");
 }
 const EXCERPT_CHARS = 3e3;
-/** How long making an expert may take before it is said to have failed. */
-const MAKING_LIMIT_MS = 36e5;
+/** How long creating an expert may take before it is said to have failed. */
+const EXPERT_CREATION_LIMIT_MS = 36e5;
 /** How long a folder whose draft couldn't be made waits, for that session, before it is tried again. */
 const RETRY_MS = 36e5;
 const MAX_CHECKS_WAITING = 50;
@@ -16692,12 +16700,12 @@ const SETTINGS_MS = 5e3;
 const HOUR_MS = 36e5;
 const DAY_MS$1 = 864e5;
 const FILE_VERSION = 1;
-/** The address of an offer's review on the office's floor: its http address, with `/?offer=<id>`. */
+/** The address of a suggestion's review on the office's floor: its http address, with `/?expert-creation-suggestion=<id>`. */
 function reviewUrl(server, id) {
 	const url = new URL(server);
 	url.protocol = url.protocol === "wss:" ? "https:" : "http:";
 	url.pathname = url.pathname.replace(/\/data-layer\/?$/, "") + "/";
-	url.search = `offer=${id}`;
+	url.search = `expert-creation-suggestion=${id}`;
 	url.hash = "";
 	return url.toString();
 }
@@ -16712,7 +16720,7 @@ function signalsOf(area, window) {
 }
 /** Whether a folder's signals pass any of their thresholds. */
 const passes = (why, t) => why.share >= t.contextShare || why.tokens >= t.tokens || why.minutes >= t.minutes || why.corrections >= t.corrections;
-/** The signals an offer gives (ADR 0004): those that passed their thresholds, each other one 0. Share and tokens are one signal, what reading and searching there took. */
+/** The signals a suggestion gives (ADR 0004): those that passed their thresholds, each other one 0. Share and tokens are one signal, what reading and searching there took. */
 function passed(why, t) {
 	const spent = why.share >= t.contextShare || why.tokens >= t.tokens;
 	return {
@@ -16782,12 +16790,12 @@ async function writeWhole$1(file, text) {
 		await new Promise((r) => setTimeout(r, 50 * (tries + 1)));
 	}
 }
-function createOffers(o) {
+function createExpertCreationSuggestions(o) {
 	const now = o.now ?? Date.now;
 	const pollMs = o.pollMs ?? 2e3;
 	const keptMs = o.keptMs ?? 5e3;
-	const file = path.join(o.isoplanDir, "runner", "offers.json");
-	const sessionFile = (bare) => path.join(o.isoplanDir, "offers", `${bare}.json`);
+	const file = path.join(o.isoplanDir, "runner", "expert-creation-suggestions.json");
+	const sessionFile = (bare) => path.join(o.isoplanDir, "expert-creation-suggestions", `${bare}.json`);
 	const expertFile = (key) => path.join(o.isoplanDir, "experts", `${key}.json`);
 	const offices = o.offices.map(() => ({
 		ready: false,
@@ -16797,19 +16805,19 @@ function createOffers(o) {
 	}));
 	let saved = {
 		version: FILE_VERSION,
-		offered: [],
-		offers: [],
-		makings: [],
+		foldersAlreadySuggested: [],
+		expertCreationSuggestions: [],
+		expertCreations: [],
 		held: []
 	};
 	let started = false;
 	let closed = false;
 	const latest = /* @__PURE__ */ new Map();
 	const busy = /* @__PURE__ */ new Set();
-	const draftingOffers = /* @__PURE__ */ new Set();
+	const officeWideSuggestionRequestsBeingDrafted = /* @__PURE__ */ new Set();
 	const cleared = /* @__PURE__ */ new Set();
 	const keeping = /* @__PURE__ */ new Map();
-	const makings = /* @__PURE__ */ new Map();
+	const expertCreations = /* @__PURE__ */ new Map();
 	const verdicts = /* @__PURE__ */ new Map();
 	const waiting = [];
 	const checked = [];
@@ -16821,7 +16829,7 @@ function createOffers(o) {
 	const settings = () => {
 		if (!read || now() - read.at > SETTINGS_MS) read = {
 			at: now(),
-			settings: o.settings().then((s) => (checkOn = s.expertOffers.correctionCheck === true, s.expertOffers))
+			settings: o.settings().then((s) => (checkOn = s.expertCreationSuggestions.correctionCheck === true, s.expertCreationSuggestions))
 		};
 		const mine = read;
 		return mine.settings.catch((err) => (read === mine && (read = null), Promise.reject(err)));
@@ -16831,13 +16839,13 @@ function createOffers(o) {
 	const done = (m) => m.state === "ready" || m.state === "failed";
 	const save = () => {
 		const copy = JSON.stringify(saved, null, 2) + "\n";
-		saving = saving.then(() => writeWhole$1(file, copy)).catch((err) => say(`couldn't save the expert offers: ${err.message}`));
+		saving = saving.then(() => writeWhole$1(file, copy)).catch((err) => say(`couldn't save the expert creation suggestions: ${err.message}`));
 		return saving;
 	};
 	const lineOf = (r, server) => {
 		const label = o.offices[indexOf(server)]?.label;
 		return {
-			type: "expert-offer",
+			type: "expert-creation-suggestion",
 			server,
 			...label && { label },
 			id: r.id,
@@ -16853,11 +16861,11 @@ function createOffers(o) {
 	function writeSessionFile(bare) {
 		if (!bare || !/^[\w-]{1,200}$/.test(bare)) return;
 		const write = async () => {
-			const open = saved.offers.filter((r) => r.bare === bare).flatMap((r) => Object.entries(r.offices).filter(([, s]) => s === "open").map(([server]) => lineOf(r, server)));
-			if (open.length) await writeWhole$1(sessionFile(bare), JSON.stringify({ offers: open }, null, 2) + "\n");
+			const open = saved.expertCreationSuggestions.filter((r) => r.bare === bare).flatMap((r) => Object.entries(r.offices).filter(([, s]) => s === "open").map(([server]) => lineOf(r, server)));
+			if (open.length) await writeWhole$1(sessionFile(bare), JSON.stringify({ expertCreationSuggestions: open }, null, 2) + "\n");
 			else await fs.rm(sessionFile(bare), { force: true });
 		};
-		const next = (sessionWrites.get(bare) ?? Promise.resolve()).then(write).catch((err) => say(`couldn't write the open expert offers of session ${bare}: ${err.message}`)).finally(() => sessionWrites.get(bare) === next && sessionWrites.delete(bare));
+		const next = (sessionWrites.get(bare) ?? Promise.resolve()).then(write).catch((err) => say(`couldn't write the open expert creation suggestions of session ${bare}: ${err.message}`)).finally(() => sessionWrites.get(bare) === next && sessionWrites.delete(bare));
 		sessionWrites.set(bare, next);
 	}
 	function flush(index) {
@@ -16867,15 +16875,15 @@ function createOffers(o) {
 		while (st.queue.length && office.send(st.queue[0])) st.queue.shift();
 		if (st.fresh) {
 			st.fresh = false;
-			for (const r of saved.offers) if (r.offices[office.server] === "open") office.send(r.message);
+			for (const r of saved.expertCreationSuggestions) if (r.offices[office.server] === "open") office.send(r.message);
 		}
 		let changed = false;
-		for (const r of saved.offers) {
+		for (const r of saved.expertCreationSuggestions) {
 			if (r.offices[office.server] !== "pending") continue;
 			if (isDismissed(st.dismissals, r.project.id, r.folder, now())) {
 				r.offices[office.server] = "ended";
 				changed = true;
-				say(`the expert offer ${r.id} on ${r.folder} of ${r.project.name} isn't sent to ${office.server}, where its person dismissed that folder, and is withdrawn wherever else it went`);
+				say(`the expert creation suggestion ${r.id} on ${r.folder} of ${r.project.name} isn't sent to ${office.server}, where its person dismissed that folder, and is withdrawn wherever else it went`);
 				withdraw(r);
 				writeSessionFile(r.bare);
 				continue;
@@ -16883,11 +16891,11 @@ function createOffers(o) {
 			if (!office.send(r.message)) continue;
 			r.offices[office.server] = "sent";
 			changed = true;
-			say(`offered an expert on ${r.folder} of ${r.project.name} (${r.key}) to ${office.server}, as ${r.id}`);
+			say(`suggested an expert on ${r.folder} of ${r.project.name} (${r.key}) to ${office.server}, as ${r.id}`);
 			keep(r, office.server);
 		}
 		if (changed) save();
-		for (const m of makings.values()) if (m.index === index) sendMaking(m);
+		for (const m of expertCreations.values()) if (m.index === index) sendExpertCreationProgress(m);
 	}
 	function keep(r, server) {
 		const k = `${r.id}\n${server}`;
@@ -16910,13 +16918,13 @@ function createOffers(o) {
 			const i = indexOf(other);
 			if (state === "pending" || i < 0) continue;
 			sendOrQueue(i, {
-				type: "expert-offer-ended",
+				type: "expert-creation-suggestion-ended",
 				v: 1,
 				id: r.id,
 				why: "withdrawn"
 			});
 			if (state === "open") tell(r, {
-				type: "expert-offer-ended",
+				type: "expert-creation-suggestion-ended",
 				server: other,
 				id: r.id,
 				why: "withdrawn"
@@ -16941,19 +16949,19 @@ function createOffers(o) {
 		return false;
 	}
 	const retryable = (r, at) => !!r?.refusedAt && at - r.refusedAt >= 36e5 && Object.values(r.offices).every((s) => s === "refused");
-	const offeredNear = (session, project, folder, at) => saved.offered.some((x) => x.session === session && x.project === project && near(folder, x.folder) && !(x.offer && retryable(saved.offers.find((r) => r.id === x.offer), at)));
+	const alreadySuggestedNear = (session, project, folder, at) => saved.foldersAlreadySuggested.some((x) => x.session === session && x.project === project && near(folder, x.folder) && !(x.expertCreationSuggestionId && retryable(saved.expertCreationSuggestions.find((r) => r.id === x.expertCreationSuggestionId), at)));
 	const heldNear = (session, project, folder, at) => (saved.held = saved.held.filter((x) => x.until > at)).some((x) => x.session === session && x.project === project && near(folder, x.folder));
 	const names = (s) => new Set([s.project, ...s.areas.map((a) => a.project ?? s.project)].map((p) => p.id.toLowerCase()));
 	const mayTell = (session, project) => [...latest.get(session)?.values() ?? []].filter((p) => names(p).has(project)).map((p) => p.server);
-	const offerable = (bare) => [...latest.values()].some((byOffice) => [...byOffice.values()].some((p) => p.bare === bare && !!offices[indexOf(p.server)]?.ready));
+	const couldBeSuggested = (bare) => [...latest.values()].some((byOffice) => [...byOffice.values()].some((p) => p.bare === bare && !!offices[indexOf(p.server)]?.ready));
 	function forget(t, at) {
 		const keep = t.rememberDays * DAY_MS$1;
-		saved.offered = saved.offered.filter((x) => at - x.at < keep);
-		saved.offers = saved.offers.filter((r) => at - r.at < keep);
-		const old = saved.makings.filter((k) => k.state && at - k.since >= keep);
+		saved.foldersAlreadySuggested = saved.foldersAlreadySuggested.filter((x) => at - x.at < keep);
+		saved.expertCreationSuggestions = saved.expertCreationSuggestions.filter((r) => at - r.at < keep);
+		const old = saved.expertCreations.filter((k) => k.state && at - k.since >= keep);
 		if (!old.length) return;
-		for (const k of old) makings.delete(k.request);
-		saved.makings = saved.makings.filter((k) => !old.includes(k));
+		for (const k of old) expertCreations.delete(k.request);
+		saved.expertCreations = saved.expertCreations.filter((k) => !old.includes(k));
 		save();
 	}
 	const windowOf = (s) => {
@@ -16964,18 +16972,18 @@ function createOffers(o) {
 	async function drafted(a, t) {
 		const where = `${a.folder} of ${a.project.name}`;
 		if (!a.checkout) {
-			say(`no expert is offered on ${where}: this computer has no checkout of the repo to draft it from`);
+			say(`no expert is suggested on ${where}: this computer has no checkout of the repo to draft it from`);
 			return null;
 		}
 		const named = await o.scan(a.folder);
 		if (named) {
-			say(`no expert is offered on a folder of ${a.project.name}: its path matches the secret pattern "${named}"`);
+			say(`no expert is suggested on a folder of ${a.project.name}: its path matches the secret pattern "${named}"`);
 			return null;
 		}
 		const files = await folderFiles(a.checkout, a.folder);
 		const excerpts = await folderExcerpts(a.checkout, files);
 		if (!excerpts.length) {
-			say(`no expert is offered on ${where}: none of its files could be read to draft it from`);
+			say(`no expert is suggested on ${where}: none of its files could be read to draft it from`);
 			return null;
 		}
 		const draft = await o.draft({
@@ -16986,7 +16994,7 @@ function createOffers(o) {
 			said: a.said
 		}, t);
 		if (!draft) {
-			say(`no expert is offered on ${where}: no usable draft came`);
+			say(`no expert is suggested on ${where}: no usable draft came`);
 			return null;
 		}
 		const matched = await o.scan([
@@ -16997,11 +17005,11 @@ function createOffers(o) {
 			draft.proof.answer
 		].join("\n"));
 		if (matched) {
-			say(`no expert is offered on ${where}: its draft matches the secret pattern "${matched}"`);
+			say(`no expert is suggested on ${where}: its draft matches the secret pattern "${matched}"`);
 			return null;
 		}
 		const message = {
-			type: "expert-offer",
+			type: "expert-creation-suggestion",
 			v: 1,
 			id: a.id,
 			session: a.session,
@@ -17018,9 +17026,9 @@ function createOffers(o) {
 			why: passed(a.why, t),
 			at: new Date(now()).toISOString()
 		};
-		const parsed = ExpertOfferMessageSchema.safeParse(message);
+		const parsed = ExpertCreationSuggestionMessageSchema.safeParse(message);
 		if (!parsed.success) {
-			say(`no expert is offered on ${where}: its offer doesn't fit the protocol: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
+			say(`no expert is suggested on ${where}: its suggestion doesn't fit the protocol: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
 			return null;
 		}
 		return parsed.data;
@@ -17049,7 +17057,7 @@ function createOffers(o) {
 			const project = area.project ?? s.project;
 			const id = project.id.toLowerCase();
 			const why = signalsOf(area, window);
-			if (!passes(why, t) || offeredNear(s.session, id, area.folder, at) || heldNear(s.session, id, area.folder, at)) continue;
+			if (!passes(why, t) || alreadySuggestedNear(s.session, id, area.folder, at) || heldNear(s.session, id, area.folder, at)) continue;
 			if (offices.some((f) => isDismissed(f.dismissals, id, area.folder, at))) continue;
 			if (await coveredHere(id, area.folder)) continue;
 			candidates.push({
@@ -17086,21 +17094,21 @@ function createOffers(o) {
 			save();
 			return;
 		}
-		saved.offered.push({
+		saved.foldersAlreadySuggested.push({
 			session: s.session,
 			project: id,
 			folder: area.folder,
 			at,
-			offer: message.id
+			expertCreationSuggestionId: message.id
 		});
-		saved.offers.push(record(message, s.bare, /* @__PURE__ */ new Set([s.server, ...mayTell(s.session, id)])));
+		saved.expertCreationSuggestions.push(record(message, s.bare, /* @__PURE__ */ new Set([s.server, ...mayTell(s.session, id)])));
 		await save();
 		o.offices.forEach((_, i) => flush(i));
 	}
-	async function draftOffer(index, m) {
+	async function draftOfficeWideExpertCreationSuggestion(index, m) {
 		const server = o.offices[index].server;
-		if (draftingOffers.has(m.request) || saved.offers.some((r) => r.id === m.request)) return;
-		draftingOffers.add(m.request);
+		if (officeWideSuggestionRequestsBeingDrafted.has(m.request) || saved.expertCreationSuggestions.some((r) => r.id === m.request)) return;
+		officeWideSuggestionRequestsBeingDrafted.add(m.request);
 		try {
 			const project = m.project.id.toLowerCase();
 			let message = null;
@@ -17128,44 +17136,44 @@ function createOffers(o) {
 					why
 				}, t);
 			} catch (err) {
-				say(`no office-wide expert is offered on ${m.folder} of ${m.project.name} (${m.request}): drafting it failed: ${err.message}`);
+				say(`no office-wide expert is suggested on ${m.folder} of ${m.project.name} (${m.request}): drafting it failed: ${err.message}`);
 			}
 			if (closed) return;
 			if (!message) return sendOrQueue(index, {
-				type: "expert-offer-ended",
+				type: "expert-creation-suggestion-ended",
 				v: 1,
 				id: m.request,
 				why: "no-draft"
 			});
 			const first = m.sessions[0];
-			saved.offered.push({
+			saved.foldersAlreadySuggested.push({
 				session: first,
 				project,
 				folder: m.folder,
 				at: now(),
-				offer: m.request
+				expertCreationSuggestionId: m.request
 			});
-			saved.offers.push(record(message, first.startsWith("claude-code:") ? first.slice(12) : null, [server]));
+			saved.expertCreationSuggestions.push(record(message, first.startsWith("claude-code:") ? first.slice(12) : null, [server]));
 			await save();
 			flush(index);
 		} finally {
-			draftingOffers.delete(m.request);
+			officeWideSuggestionRequestsBeingDrafted.delete(m.request);
 		}
 	}
 	function ended(index, m) {
 		const server = o.offices[index].server;
-		const r = saved.offers.find((x) => x.id === m.id);
-		if (!r || r.offices[server] === void 0) return say(`${server} says the expert offer ${m.id} ended, but this runner didn't offer it there`);
+		const r = saved.expertCreationSuggestions.find((x) => x.id === m.id);
+		if (!r || r.offices[server] === void 0) return say(`${server} says the expert creation suggestion ${m.id} ended, but this runner didn't suggest it there`);
 		const was = r.offices[server];
 		r.offices[server] = m.why === "refused" ? "refused" : "ended";
 		if (Object.values(r.offices).every((s) => s === "refused")) r.refusedAt = now();
 		if (was === "open") tell(r, {
-			type: "expert-offer-ended",
+			type: "expert-creation-suggestion-ended",
 			server,
 			id: r.id,
 			why: m.why
 		});
-		say(`the expert offer ${r.id} on ${r.folder} of ${r.project.name} ended in ${server}: ${m.why}`);
+		say(`the expert creation suggestion ${r.id} on ${r.folder} of ${r.project.name} ended in ${server}: ${m.why}`);
 		if (m.why === "made") {
 			r.made = {
 				key: m.key,
@@ -17191,26 +17199,26 @@ function createOffers(o) {
 		r.told = true;
 		save();
 	}
-	function sendMaking(m) {
+	function sendExpertCreationProgress(m) {
 		const text = `${m.state}\n${m.detail ?? ""}`;
 		if (m.sent !== text && offices[m.index].ready && o.offices[m.index].send({
-			type: "expert-making",
+			type: "expert-creation-progress",
 			v: 1,
 			request: m.request,
-			offer: m.offer,
+			expertCreationSuggestionId: m.expertCreationSuggestionId,
 			state: m.state,
 			...m.detail && { detail: m.detail }
 		})) m.sent = text;
 	}
-	function setMaking(m, state, detail) {
+	function setExpertCreationProgress(m, state, detail) {
 		const changed = m.state !== state || m.detail !== detail;
 		m.state = state;
 		m.detail = detail;
 		if (changed && done(m)) {
-			say(`expert ${m.key}, made from offer ${m.offer}: ${state}${detail ? `: ${detail}` : ""}`);
+			say(`expert ${m.key}, created from suggestion ${m.expertCreationSuggestionId}: ${state}${detail ? `: ${detail}` : ""}`);
 			if (m.timer) clearTimeout(m.timer);
 			m.timer = null;
-			const kept = saved.makings.find((k) => k.request === m.request);
+			const kept = saved.expertCreations.find((k) => k.request === m.request);
 			if (kept) {
 				Object.assign(kept, {
 					state,
@@ -17220,20 +17228,20 @@ function createOffers(o) {
 			}
 			if (state === "failed" && m.wrote) clear(m);
 		}
-		sendMaking(m);
+		sendExpertCreationProgress(m);
 	}
 	async function clear(m) {
 		const key = m.key;
 		cleared.add(key);
 		try {
 			await fs.rm(expertFile(key), { force: true });
-			say(`removed the expert file of ${key}, whose making failed, so this computer stops hosting it`);
+			say(`removed the expert file of ${key}, whose creation failed, so this computer stops hosting it`);
 			m.wrote = false;
-			const kept = saved.makings.find((k) => k.request === m.request);
+			const kept = saved.expertCreations.find((k) => k.request === m.request);
 			if (kept) kept.wrote = false;
 			save();
 		} catch (err) {
-			say(`couldn't remove the expert file ${expertFile(key)}, whose making failed: ${err.message}`);
+			say(`couldn't remove the expert file ${expertFile(key)}, whose creation failed: ${err.message}`);
 		}
 	}
 	async function stopped(key) {
@@ -17254,30 +17262,30 @@ function createOffers(o) {
 			const hosted = o.experts().find((e) => e.name === m.key);
 			const g = st?.generations.filter((x) => x.groundedAt >= m.since).reduce((a, b) => !a || b.n > a.n ? b : a, null) ?? null;
 			delete m.problem;
-			if (g?.state === "junior" || g?.state === "senior") return setMaking(m, "ready");
-			if (g?.state === "failed") return setMaking(m, "failed", g.proof?.passed === false ? "its answer to the proof question didn't match the answer expected" : "its grounding failed; its health log on that computer says why");
-			if (!g && hosted?.state === "failed") return setMaking(m, "failed", "its own copy of the repo couldn't be made");
+			if (g?.state === "junior" || g?.state === "senior") return setExpertCreationProgress(m, "ready");
+			if (g?.state === "failed") return setExpertCreationProgress(m, "failed", g.proof?.passed === false ? "its answer to the proof question didn't match the answer expected" : "its grounding failed; its health log on that computer says why");
+			if (!g && hosted?.state === "failed") return setExpertCreationProgress(m, "failed", "its own copy of the repo couldn't be made");
 			step = !g ? "cloning" : g.commit ? "proof" : "grounding";
 		} catch (err) {
 			const problem = err.message;
-			if (m.problem !== problem) say(`couldn't look at how expert ${m.key}, made from offer ${m.offer}, is coming along (${problem}); it is looked at again`);
+			if (m.problem !== problem) say(`couldn't look at how expert ${m.key}, created from suggestion ${m.expertCreationSuggestionId}, is coming along (${problem}); it is looked at again`);
 			m.problem = problem;
 		} finally {
 			m.working = false;
 		}
 		if (closed || done(m)) return;
-		if (now() - m.since > 36e5) return setMaking(m, "failed", `it wasn't ready within ${MAKING_LIMIT_MS / 6e4} minutes${m.problem ? `; the last look at it failed: ${m.problem}` : ""}`);
-		if (step) setMaking(m, step);
+		if (now() - m.since > 36e5) return setExpertCreationProgress(m, "failed", `it wasn't ready within ${EXPERT_CREATION_LIMIT_MS / 6e4} minutes${m.problem ? `; the last look at it failed: ${m.problem}` : ""}`);
+		if (step) setExpertCreationProgress(m, step);
 		m.timer = setTimeout(() => void follow(m).catch(orLog(`follow expert ${m.key}`)), pollMs);
 		m.timer.unref?.();
 	}
-	async function make(index, m) {
-		if (makings.has(m.request)) return;
+	async function createExpertFromSuggestion(index, m) {
+		if (expertCreations.has(m.request)) return;
 		const server = o.offices[index].server;
-		const same = m.by.id === o.account.id ? [...makings.values()].find((x) => x.offer === m.offer && x.key === m.key && x.state !== "failed") : void 0;
+		const same = m.by.id === o.account.id ? [...expertCreations.values()].find((x) => x.expertCreationSuggestionId === m.expertCreationSuggestionId && x.key === m.key && x.state !== "failed") : void 0;
 		if (same) {
-			makings.delete(same.request);
-			const kept = saved.makings.find((k) => k.request === same.request);
+			expertCreations.delete(same.request);
+			const kept = saved.expertCreations.find((k) => k.request === same.request);
 			if (kept) Object.assign(kept, {
 				request: m.request,
 				server
@@ -17287,15 +17295,15 @@ function createOffers(o) {
 				index,
 				sent: null
 			});
-			makings.set(m.request, same);
-			say(`expert ${m.key}, made from offer ${m.offer}, is asked for again as ${m.request}: its making goes on`);
+			expertCreations.set(m.request, same);
+			say(`expert ${m.key}, created from suggestion ${m.expertCreationSuggestionId}, is asked for again as ${m.request}: its creation goes on`);
 			save();
-			return sendMaking(same);
+			return sendExpertCreationProgress(same);
 		}
-		const making = {
+		const expertCreation = {
 			index,
 			request: m.request,
-			offer: m.offer,
+			expertCreationSuggestionId: m.expertCreationSuggestionId,
 			key: m.key,
 			since: now(),
 			state: "cloning",
@@ -17304,27 +17312,27 @@ function createOffers(o) {
 			working: true,
 			timer: null
 		};
-		makings.set(m.request, making);
+		expertCreations.set(m.request, expertCreation);
 		const kept = {
 			request: m.request,
-			offer: m.offer,
+			expertCreationSuggestionId: m.expertCreationSuggestionId,
 			key: m.key,
-			since: making.since,
+			since: expertCreation.since,
 			server,
 			wrote: false
 		};
-		saved.makings.push(kept);
+		saved.expertCreations.push(kept);
 		save();
-		const fail = (detail) => setMaking(making, "failed", detail);
+		const fail = (detail) => setExpertCreationProgress(expertCreation, "failed", detail);
 		try {
 			if (m.by.id !== o.account.id) return fail("this computer's runner is someone else's, so it makes experts only for them");
-			if (cleared.has(m.key) && !await stopped(m.key)) return fail(`the expert named ${m.key}, whose making failed, is still stopping on this computer; try again in a minute`);
+			if (cleared.has(m.key) && !await stopped(m.key)) return fail(`the expert named ${m.key}, whose creation failed, is still stopping on this computer; try again in a minute`);
 			if (o.experts().some((e) => e.name === m.key) || await fs.stat(expertFile(m.key)).then(() => true, () => false)) return fail(`an expert named ${m.key} is already on this computer`);
 			let checkout = await o.checkout(index, m.project).catch(() => null);
 			if (!checkout) {
 				const urls = cloneUrls(m.project.id);
 				if (!urls.length) return fail(`this computer has no checkout of ${m.project.name}, and its repo has no remote to clone it from`);
-				sendMaking(making);
+				sendExpertCreationProgress(expertCreation);
 				const reasons = [];
 				for (const url of urls) {
 					const clone = await o.clone(url, m.project.id);
@@ -17357,20 +17365,20 @@ function createOffers(o) {
 				say(`couldn't write the expert file ${expertFile(m.key)}: ${err.message}`);
 				return fail("its expert file couldn't be written on that computer");
 			}
-			making.wrote = kept.wrote = true;
-			say(`wrote the expert file for ${m.key}, made from offer ${m.offer} by ${m.by.name || m.by.id}, for ${checkout}`);
+			expertCreation.wrote = kept.wrote = true;
+			say(`wrote the expert file for ${m.key}, created from suggestion ${m.expertCreationSuggestionId} by ${m.by.name || m.by.id}, for ${checkout}`);
 			save();
 		} catch (err) {
-			if (!closed) fail(`making it stopped on that computer: ${err.message}`);
+			if (!closed) fail(`creating it stopped on that computer: ${err.message}`);
 			return;
 		} finally {
-			making.working = false;
+			expertCreation.working = false;
 		}
-		await follow(making);
+		await follow(expertCreation);
 	}
 	async function check() {
 		if (checking || closed) return;
-		while (waiting.length && !offerable(waiting[0].bare)) waiting.shift();
+		while (waiting.length && !couldBeSuggested(waiting[0].bare)) waiting.shift();
 		if (!waiting.length) return;
 		checking = true;
 		let again = false;
@@ -17407,7 +17415,7 @@ function createOffers(o) {
 	return {
 		async start() {
 			const text = await fs.readFile(file, "utf8").catch((err) => {
-				if (err.code !== "ENOENT") say(`EXPERT OFFERS: couldn't read ${file} (${err.message}), so what was offered before isn't known and may be offered again`);
+				if (err.code !== "ENOENT") say(`EXPERT CREATION SUGGESTIONS: couldn't read ${file} (${err.message}), so what was suggested before isn't known and may be suggested again`);
 				return null;
 			});
 			if (text !== null) {
@@ -17415,30 +17423,30 @@ function createOffers(o) {
 				try {
 					value = JSON.parse(text);
 				} catch {}
-				if (value?.version === FILE_VERSION && Array.isArray(value.offered) && Array.isArray(value.offers)) {
+				if (value?.version === FILE_VERSION && Array.isArray(value.foldersAlreadySuggested) && Array.isArray(value.expertCreationSuggestions)) {
 					saved = {
 						...value,
-						makings: Array.isArray(value.makings) ? value.makings : [],
+						expertCreations: Array.isArray(value.expertCreations) ? value.expertCreations : [],
 						held: Array.isArray(value.held) ? value.held : []
 					};
 					if (Array.isArray(value.verdicts)) for (const [key, verdict] of value.verdicts) verdicts.set(key, verdict);
 				} else {
 					const aside = `${file}.unreadable-${now()}`;
 					const moved = await fs.rename(file, aside).then(() => `moved to ${aside}`, (err) => `left where it is (${err.message})`);
-					say(`EXPERT OFFERS: ${file} isn't offers.json as this runner writes it, so it was ${moved}, and expert offers start again from nothing: folders offered before may be offered again`);
+					say(`EXPERT CREATION SUGGESTIONS: ${file} isn't expert-creation-suggestions.json as this runner writes it, so it was ${moved}, and expert creation suggestions start again from nothing: folders suggested before may be suggested again`);
 				}
 			}
-			for (const r of saved.offers) for (const [server, state] of Object.entries(r.offices)) if (state === "sent") r.offices[server] = "pending";
-			await settings().then((t) => forget(t, now()), (err) => say(`couldn't read runner.json's expertOffers as the expert offers started (${err.message}); it is read again on the next session's pass`));
+			for (const r of saved.expertCreationSuggestions) for (const [server, state] of Object.entries(r.offices)) if (state === "sent") r.offices[server] = "pending";
+			await settings().then((t) => forget(t, now()), (err) => say(`couldn't read runner.json's expertCreationSuggestions as the expert creation suggestions started (${err.message}); it is read again on the next session's pass`));
 			started = true;
-			saved.makings = saved.makings.filter((k) => indexOf(k.server) >= 0);
-			for (const k of saved.makings) {
+			saved.expertCreations = saved.expertCreations.filter((k) => indexOf(k.server) >= 0);
+			for (const k of saved.expertCreations) {
 				const index = indexOf(k.server);
-				if (makings.has(k.request)) continue;
+				if (expertCreations.has(k.request)) continue;
 				const m = {
 					index,
 					request: k.request,
-					offer: k.offer,
+					expertCreationSuggestionId: k.expertCreationSuggestionId,
 					key: k.key,
 					since: k.since,
 					state: k.state ?? "cloning",
@@ -17448,11 +17456,11 @@ function createOffers(o) {
 					working: false,
 					timer: null
 				};
-				makings.set(m.request, m);
-				if (k.state === "failed" && m.wrote && !saved.makings.some((x) => x.key === k.key && x.since > k.since)) clear(m);
+				expertCreations.set(m.request, m);
+				if (k.state === "failed" && m.wrote && !saved.expertCreations.some((x) => x.key === k.key && x.since > k.since)) clear(m);
 				if (k.state) continue;
 				if (m.wrote) follow(m).catch(orLog(`follow expert ${m.key}`));
-				else setMaking(m, "failed", "the runner on that computer stopped before its expert file was written; make it again");
+				else setExpertCreationProgress(m, "failed", "the runner on that computer stopped before its expert file was written; make it again");
 			}
 		},
 		seen(s) {
@@ -17463,7 +17471,7 @@ function createOffers(o) {
 			if (latest.size > MAX_SESSIONS) latest.delete(latest.keys().next().value);
 			const may = names(s);
 			let added = false;
-			for (const r of saved.offers) {
+			for (const r of saved.expertCreationSuggestions) {
 				if (r.session !== s.session || r.scope !== "session" || r.offices[s.server] !== void 0 || !may.has(r.project.id.toLowerCase()) || Object.values(r.offices).includes("ended") || retryable(r, now())) continue;
 				r.offices[s.server] = "pending";
 				added = true;
@@ -17474,12 +17482,12 @@ function createOffers(o) {
 			}
 			if (busy.has(s.session)) return;
 			busy.add(s.session);
-			consider(s).catch(orLog(`look at session ${s.bare}'s areas for an expert offer`)).finally(() => busy.delete(s.session));
+			consider(s).catch(orLog(`look at session ${s.bare}'s areas for an expert creation suggestion`)).finally(() => busy.delete(s.session));
 		},
 		corrected(bare, key, text, reply) {
 			const verdict = checkOn ? verdicts.get(key) : void 0;
 			if (verdict !== void 0) return verdict;
-			if (closed || !offerable(bare)) return null;
+			if (closed || !couldBeSuggested(bare)) return null;
 			if (!waiting.some((w) => w.key === key) && waiting.length < MAX_CHECKS_WAITING) waiting.push({
 				bare,
 				key,
@@ -17491,36 +17499,36 @@ function createOffers(o) {
 		},
 		take(index, message) {
 			if (closed) return;
-			if (message.type === "offer-dismissals") {
+			if (message.type === "expert-creation-suggestion-dismissals") {
 				offices[index].dismissals = message.dismissals;
 				offices[index].ready = true;
 				return flush(index);
 			}
-			if (message.type === "draft-offer") return void draftOffer(index, message).catch(orLog(`draft the office-wide expert offer ${message.request}`));
-			if (message.type === "make-expert") return void make(index, message).catch(orLog(`make the expert ${message.key}`));
+			if (message.type === "draft-office-wide-expert-creation-suggestion") return void draftOfficeWideExpertCreationSuggestion(index, message).catch(orLog(`draft the office-wide expert creation suggestion ${message.request}`));
+			if (message.type === "create-expert-from-suggestion") return void createExpertFromSuggestion(index, message).catch(orLog(`make the expert ${message.key}`));
 			ended(index, message);
 		},
 		linked(index) {
 			offices[index].ready = false;
 			offices[index].fresh = true;
-			for (const m of makings.values()) if (m.index === index) m.sent = null;
+			for (const m of expertCreations.values()) if (m.index === index) m.sent = null;
 			const server = o.offices[index].server;
-			for (const r of saved.offers) if (r.offices[server] === "sent") r.offices[server] = "pending";
+			for (const r of saved.expertCreationSuggestions) if (r.offices[server] === "sent") r.offices[server] = "pending";
 		},
 		rehooked(bare) {
 			const hooks = o.hooked(bare);
 			if (!hooks) return;
-			for (const r of saved.offers) {
+			for (const r of saved.expertCreationSuggestions) {
 				if (r.bare !== bare) continue;
 				for (const [server, state] of Object.entries(r.offices)) if (state === "open") hooks.send(lineOf(r, server));
 				tellReady(r);
 			}
 		},
-		idle: () => draftingOffers.size === 0 && !checking && busy.size === 0 && keeping.size === 0 && [...makings.values()].every((m) => done(m) || !m.working && !m.timer),
+		idle: () => officeWideSuggestionRequestsBeingDrafted.size === 0 && !checking && busy.size === 0 && keeping.size === 0 && [...expertCreations.values()].every((m) => done(m) || !m.working && !m.timer),
 		close() {
 			closed = true;
 			if (checkTimer) clearTimeout(checkTimer);
-			for (const m of makings.values()) if (m.timer) clearTimeout(m.timer);
+			for (const m of expertCreations.values()) if (m.timer) clearTimeout(m.timer);
 			for (const timer of keeping.values()) clearTimeout(timer);
 		}
 	};
@@ -20556,7 +20564,7 @@ async function reporting(o, c) {
 				} catch (err) {
 					emit({
 						type: "log",
-						text: `couldn't look at this session's areas for an expert offer: ${String(err?.message ?? err)}`
+						text: `couldn't look at this session's areas for an expert creation suggestion: ${String(err?.message ?? err)}`
 					});
 				}
 			}
@@ -23901,11 +23909,11 @@ async function worker() {
 	const scanText = async (text) => scan(text, await loadPatterns(path.join(appDir, "secret-patterns.json"), path.join(isoplanDir, "secret-patterns.json"), log));
 	let rehook = (_session) => {};
 	let closeFor = async (_close, _remove) => false;
-	let offers = null;
+	let expertCreationSuggestionsOnceStarted = null;
 	const pipe = await createPipeServer({
 		claudeDir,
 		log,
-		onChange: (session) => (rehook(session), offers?.rehooked(session)),
+		onChange: (session) => (rehook(session), expertCreationSuggestionsOnceStarted?.rehooked(session)),
 		ask: (request) => askFromMachine({
 			...request,
 			appDir,
@@ -23942,9 +23950,9 @@ async function worker() {
 			said.say(hooks ? `the runner reports this session for its hooks module, in ${cwd}` : `the runner reports this session, in ${cwd}`);
 			const shares = (office) => shared.get(office.server) ?? null;
 			const titled = (title) => void titles.set(sessionId, title);
-			const offering = {
-				areas: (s) => offers?.seen(s),
-				corrected: (key, text, reply) => offers?.corrected(sessionId, key, text, reply) ?? null
+			const expertCreationSuggestionSignals = {
+				areas: (s) => expertCreationSuggestionsOnceStarted?.seen(s),
+				corrected: (key, text, reply) => expertCreationSuggestionsOnceStarted?.corrected(sessionId, key, text, reply) ?? null
 			};
 			try {
 				if (hooks) return await reportSession({
@@ -23966,7 +23974,7 @@ async function worker() {
 					closed: Promise.race([closed, hooks.closed.then(() => "its hooks module's link to the runner closed")]),
 					shared: shares,
 					titled,
-					...offering
+					...expertCreationSuggestionSignals
 				}).finally(() => pairLinks.ended(sessionId, hooks.send));
 				return await reportSession({
 					sessionId,
@@ -23979,7 +23987,7 @@ async function worker() {
 					isOff: () => isOff(cwd),
 					shared: shares,
 					titled,
-					...offering
+					...expertCreationSuggestionSignals
 				});
 			} catch (err) {
 				said.say(`stopping: something went wrong: ${String(err?.stack ?? err)}`);
@@ -24011,7 +24019,7 @@ async function worker() {
 		system: () => fs.readFile(path.join(appDir, "prompts", "naming.md"), "utf8"),
 		log
 	});
-	const offerModel = createOfferModel({
+	const expertCreationSuggestionModelCalls = createExpertCreationSuggestionModelCalls({
 		binary,
 		prompt: (name) => fs.readFile(path.join(appDir, "prompts", name), "utf8"),
 		log
@@ -24020,8 +24028,8 @@ async function worker() {
 	process.on("exit", () => {
 		answerer.close();
 		namer.close();
-		offerModel.close();
-		offers?.close();
+		expertCreationSuggestionModelCalls.close();
+		expertCreationSuggestionsOnceStarted?.close();
 		driver?.close();
 		experts?.close();
 	});
@@ -24107,7 +24115,7 @@ async function worker() {
 			return (await approvedHome(folder, homeIo, approved.repos()))?.id.toLowerCase() ?? null;
 		};
 		const foldersLeftOut = /* @__PURE__ */ new Set();
-		const offerFoldersLeftOut = /* @__PURE__ */ new Set();
+		const expertCreationSuggestionFoldersLeftOut = /* @__PURE__ */ new Set();
 		const listRepos = async (withBranches) => {
 			const since = Date.now() - (await settings()).cloneSearchDays * 864e5;
 			const seen = await sessionFolders(io, path.join(claudeDir, "projects"), since, transcriptFolders, { gone: true });
@@ -24123,7 +24131,7 @@ async function worker() {
 				branches: async (checkout, project) => withBranches && !project.startsWith("local:") && await homeIo.resolve(checkout) ? remoteBranches(checkout) : null,
 				scan: scanText,
 				log,
-				leftOut: withBranches ? foldersLeftOut : offerFoldersLeftOut
+				leftOut: withBranches ? foldersLeftOut : expertCreationSuggestionFoldersLeftOut
 			});
 			await checkouts.keep(seen.map((s) => s.folder)).catch((err) => log(`couldn't save which checkout each worktree belongs to: ${err.message}`));
 			return repos;
@@ -24318,7 +24326,7 @@ async function worker() {
 		}
 	};
 	await listSessions();
-	const offering = createOffers({
+	const expertCreationSuggestions = createExpertCreationSuggestions({
 		isoplanDir,
 		settings,
 		offices: answering.map((office, index) => ({
@@ -24328,8 +24336,8 @@ async function worker() {
 		})),
 		account,
 		scan: scanText,
-		draft: (input, t) => offerModel.draft(input, t),
-		corrects: (text, reply, t) => offerModel.corrects(text, reply, t),
+		draft: (input, t) => expertCreationSuggestionModelCalls.draft(input, t),
+		corrects: (text, reply, t) => expertCreationSuggestionModelCalls.corrects(text, reply, t),
 		experts: () => hosted.hosted(),
 		projectOf: async (folder) => (await homeIo.projectOf(await homeIo.resolve(folder), folder)).id.toLowerCase(),
 		checkout: async (index, project) => (await repoLists[index](false)).find((r) => r.project === project.id.toLowerCase())?.folders[0] ?? null,
@@ -24337,8 +24345,8 @@ async function worker() {
 		hooked: (bare) => pipe?.hooked(bare) ?? null,
 		log
 	});
-	await offering.start();
-	offers = offering;
+	await expertCreationSuggestions.start();
+	expertCreationSuggestionsOnceStarted = expertCreationSuggestions;
 	const links = answerOffices({
 		offices: answering,
 		name: (office) => office.server,
@@ -24354,15 +24362,15 @@ async function worker() {
 				onMessage: (message) => runner.take(message),
 				onDrive: (message) => drive.take(office.server, message),
 				onHosting: host.onHosting,
-				onOffers: (message) => offering.take(answering.indexOf(office), message),
+				onExpertCreationSuggestionMessages: (message) => expertCreationSuggestions.take(answering.indexOf(office), message),
 				onOpen: () => {
 					status.opened(office.server);
 					drive.linked(office.server);
 					host.onOpen();
-					offering.linked(answering.indexOf(office));
+					expertCreationSuggestions.linked(answering.indexOf(office));
 					readPairing(pairingPath(claudeDir)).then((all) => status.email(office.server, pairingEntry(all, office.server, account.id)?.email));
 				},
-				onClose: () => (status.closed(office.server), drive.unlinked(office.server), host.onClose(), offering.linked(answering.indexOf(office))),
+				onClose: () => (status.closed(office.server), drive.unlinked(office.server), host.onClose(), expertCreationSuggestions.linked(answering.indexOf(office))),
 				onNotWanted: () => (status.stopped(office.server, "not-wanted"), said.notWanted()),
 				onPairingEnded: () => (status.stopped(office.server, "unpaired"), said.unpaired()),
 				hello: {
@@ -24377,12 +24385,12 @@ async function worker() {
 					claude: claude.state(),
 					starts: startPlaces(process.platform, hasOrca, hasDesktop),
 					hiddenStarts: true,
-					offers: true
+					canCreateExpertsFromSuggestions: true
 				}
 			});
 		},
 		paired: async (office) => !!pairingEntry(await readPairing(pairingPath(claudeDir)), office.server, account.id)?.credential,
-		idle: () => answerers.every((a) => a.runner.idle()) && reporting.reporting().length === 0 && !pipe?.all().length && hosted.idle() && offering.idle(),
+		idle: () => answerers.every((a) => a.runner.idle()) && reporting.reporting().length === 0 && !pipe?.all().length && hosted.idle() && expertCreationSuggestions.idle(),
 		lit: async () => anyRoomSince(io, path.join(claudeDir, "projects"), Date.now() - askableMs(await config().catch(() => first))),
 		keep: async () => drive.held() > 0 || hosted.hosted().length > 0 || (await settings()).startAtLogin,
 		gone: new Promise((resolve) => process.stdin.on("end", resolve).on("error", resolve).resume()),

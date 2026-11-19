@@ -95,9 +95,9 @@ test("settings: a block is overridden key by key, each key that doesn't fit keep
   const root = tempRoot();
   const mod = path.join(root, "runner.json");
   const user = path.join(root, "user.json");
-  fs.writeFileSync(mod, JSON.stringify({ maxForks: 2, expertOffers: { tokens: 30000, minutes: 10, draftModel: "haiku" } }));
-  fs.writeFileSync(user, JSON.stringify({ expertOffers: { tokens: 50000, minutes: -1, extra: true } }));
-  expect(await loadSettings(nodeIo(), mod, user)).toEqual({ maxForks: 2, expertOffers: { tokens: 50000, minutes: 10, draftModel: "haiku" } });
-  fs.writeFileSync(user, JSON.stringify({ expertOffers: "off" }));
-  expect(await loadSettings(nodeIo(), mod, user)).toEqual({ maxForks: 2, expertOffers: { tokens: 30000, minutes: 10, draftModel: "haiku" } });
+  fs.writeFileSync(mod, JSON.stringify({ maxForks: 2, expertCreationSuggestions: { tokens: 30000, minutes: 10, draftModel: "haiku" } }));
+  fs.writeFileSync(user, JSON.stringify({ expertCreationSuggestions: { tokens: 50000, minutes: -1, extra: true } }));
+  expect(await loadSettings(nodeIo(), mod, user)).toEqual({ maxForks: 2, expertCreationSuggestions: { tokens: 50000, minutes: 10, draftModel: "haiku" } });
+  fs.writeFileSync(user, JSON.stringify({ expertCreationSuggestions: "off" }));
+  expect(await loadSettings(nodeIo(), mod, user)).toEqual({ maxForks: 2, expertCreationSuggestions: { tokens: 30000, minutes: 10, draftModel: "haiku" } });
 });

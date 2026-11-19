@@ -187,7 +187,7 @@ const Count = z.number().int().nonnegative();
 
 /**
  * How much a session's agents worked in one folder of a repo (protocol 0.15.0), so the server can
- * offer an expert on it (isoplan-app ADR 0013). Counts only: never file contents, search patterns or
+ * suggest creating an expert on it (isoplan-app ADR 0013). Counts only: never file contents, search patterns or
  * results. `folder` is relative to its repo's root (AreaPathSchema). `reads`: files read in it;
  * `searches`: searches in it (Grep, Glob and the like); `tokens`: what their results took, estimated
  * as characters / 4; `ms`: the time from those calls to their results; `corrections`: the person's

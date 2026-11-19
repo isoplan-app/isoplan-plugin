@@ -37,15 +37,15 @@
 // `expert` and takes ask_earlier_session's path: kept for the agent that asked, shown on one of its
 // next tool results, then acked through dist/ask.js.
 //
-// While the runner has an expert offer open for this session (an `expert-offer` line, isoplan-app#328),
+// While the runner has an expert creation suggestion open for this session (an `expert-creation-suggestion` line, isoplan-app#328),
 // the status line carries "A Parser Expert could help · review: <url>" after the part of the office
 // it is open in, the newest of each office's; one open in several offices shows once, after the
-// first of them. The transcript has one line on it, once per offer while this module runs, saying
-// why it was offered and that /isoplan:expert opens it too. The link goes when the offer ends (an
-// `expert-offer-ended` line). The offers come again whenever the pipe's end connects, so a pipe's
-// end that starts, or a runner that comes back, clears them. Once an expert made from the offer is
+// first of them. The transcript has one line on it, once per suggestion while this module runs, saying
+// why it was suggested and that /isoplan:review-expert-suggestion opens it too. The link goes when the suggestion ends (an
+// `expert-creation-suggestion-ended` line). The suggestions come again whenever the pipe's end connects, so a pipe's
+// end that starts, or a runner that comes back, clears them. Once an expert created from the suggestion is
 // ready (an `expert-ready` line), the lead is told on its next tool result, as a conflict note is,
-// to ask it before searching that folder again (expert-offer/text.ts has the words).
+// to ask it before searching that folder again (expert-creation-suggestion/text.ts has the words).
 //
 // An agent's question to its owner (AskUserQuestion) is in the terminal and on the floor at once,
 // and the first answer wins (#50): the call goes ahead at once, so its dialog shows, while the hook
@@ -94,8 +94,8 @@
 import type { AskedMessage, ConflictMessage, ExpertRight } from "@isoplan/protocol";
 import { expertText, lateExpertText, mayBeAskedText } from "../ask/expert-text.js";
 import { endText, MAX_WAIT_MS } from "../ask/text.js";
-import { offerStatusText, offerTranscriptText, readyNoteText } from "../expert-offer/text.js";
-import { SUPERSEDED_RECHECK_MS, type AnswerTaken, type ContextWindow, type DataLayerLine, type ExpertOfferLine, type ExpertReadyLine, type FromOffice, type MessageTaken, type OwnerAnswerLine, type OwnerMessageLine, type PairLine, type StatusLine, type TitleAskLine, type WaitMark } from "../lines.js";
+import { expertCreationSuggestionStatusLineText, expertCreationSuggestionTranscriptText, readyNoteText } from "../expert-creation-suggestion/text.js";
+import { SUPERSEDED_RECHECK_MS, type AnswerTaken, type ContextWindow, type DataLayerLine, type ExpertCreationSuggestionLine, type ExpertReadyLine, type FromOffice, type MessageTaken, type OwnerAnswerLine, type OwnerMessageLine, type PairLine, type StatusLine, type TitleAskLine, type WaitMark } from "../lines.js";
 import type { Host, On, ToolCallInput, ToolCallResult } from "./host.js";
 
 const RETRY_CAP_MS = 30000;
@@ -162,10 +162,10 @@ const pairSaid = new Set<string>(); // the offices whose link was put in the tra
 // Each office's part of the status line, by its address, in the order the data layer first named them;
 // undefined for one that shows nothing.
 const offices = new Map<string, string | undefined>();
-// Each office's expert offers open for this session, by its address, then by the offer's id, in the order they came.
-const offers = new Map<string, Map<string, ExpertOfferLine>>();
-const offersSaid = new Set<string>(); // the offers put in the transcript, by id
-const readyTold = new Set<string>(); // the offers whose ready expert the lead was told of, by id
+// Each office's expert creation suggestions open for this session, by its address, then by the suggestion's id, in the order they came.
+const openExpertCreationSuggestionsByOffice = new Map<string, Map<string, ExpertCreationSuggestionLine>>();
+const expertCreationSuggestionsPutInTranscript = new Set<string>(); // the suggestions put in the transcript, by id
+const readyTold = new Set<string>(); // the suggestions whose ready expert the lead was told of, by id
 // The questions waiting for an answer from the floor too, by their call's id: each ends its call.
 const floorWaits = new Map<string, (answer: OwnerAnswerLine) => void>();
 // The id of each question's call this module has run, waiting or done.
@@ -471,9 +471,9 @@ async function run($: Host): Promise<void> {
       if (expertListed !== null) expertListed = "";
       expertFailures = 0;
     }
-    // A pipe's end that starts has its offices named again, and the session's open offers.
+    // A pipe's end that starts has its offices named again, and the session's open expert creation suggestions.
     offices.clear();
-    offers.clear();
+    openExpertCreationSuggestionsByOffice.clear();
     running = session;
     lead = `claude-code:${session}:lead`;
     let switched = false;
@@ -567,10 +567,10 @@ function handle($: Host, text: string): void {
       superseded = line.reason;
       break;
     case "runner":
-      // Each office's part comes again once the runner reports the session afresh, and its open offers.
+      // Each office's part comes again once the runner reports the session afresh, and its open expert creation suggestions.
       offices.clear();
       pairings.clear();
-      offers.clear();
+      openExpertCreationSuggestionsByOffice.clear();
       show($, line.state === "down" ? RUNNER_DOWN_TEXT[line.held ?? "starting"] : statusText());
       break;
     case "title-ask":
@@ -590,11 +590,11 @@ function handle($: Host, text: string): void {
     case "conflict":
       addNote(line);
       break;
-    case "expert-offer":
-      addOffer($, line);
+    case "expert-creation-suggestion":
+      addExpertCreationSuggestion($, line);
       break;
-    case "expert-offer-ended":
-      offers.get(line.server)?.delete(line.id);
+    case "expert-creation-suggestion-ended":
+      openExpertCreationSuggestionsByOffice.get(line.server)?.delete(line.id);
       show($, statusText());
       break;
     case "expert-ready":
@@ -656,7 +656,7 @@ const RUNNER_DOWN_TEXT = {
 };
 const EARLIER_TEXT = "Isoplan: an earlier copy of Isoplan reports this session until this window reloads: type /reload-plugins";
 
-// The status line: each office's part that shows anything, each followed by its newest open offer
+// The status line: each office's part that shows anything, each followed by its newest open expert creation suggestion
 // not already shown after an office before it; or nothing at all.
 function statusText(): string | undefined {
   const parts: string[] = [];
@@ -664,27 +664,27 @@ function statusText(): string | undefined {
   for (const [server, part] of offices) {
     if (!part) continue;
     parts.push(part);
-    const offer = [...(offers.get(server)?.values() ?? [])].reverse().find((o) => !linked.has(o.id));
-    if (!offer) continue;
-    linked.add(offer.id);
-    parts.push(offerStatusText(offer));
+    const suggestion = [...(openExpertCreationSuggestionsByOffice.get(server)?.values() ?? [])].reverse().find((o) => !linked.has(o.id));
+    if (!suggestion) continue;
+    linked.add(suggestion.id);
+    parts.push(expertCreationSuggestionStatusLineText(suggestion));
   }
   return parts.length ? `Isoplan: ${parts.join(" · ")}` : undefined;
 }
 
-// An offer open in one office: in the status line until it ends, and in the transcript once.
-function addOffer($: Host, line: ExpertOfferLine): void {
-  let open = offers.get(line.server);
-  if (!open) offers.set(line.server, (open = new Map()));
+// A suggestion open in one office: in the status line until it ends, and in the transcript once.
+function addExpertCreationSuggestion($: Host, line: ExpertCreationSuggestionLine): void {
+  let open = openExpertCreationSuggestionsByOffice.get(line.server);
+  if (!open) openExpertCreationSuggestionsByOffice.set(line.server, (open = new Map()));
   open.set(line.id, line);
-  if (!offersSaid.has(line.id)) $.ui.log(offerTranscriptText(line));
-  offersSaid.add(line.id);
+  if (!expertCreationSuggestionsPutInTranscript.has(line.id)) $.ui.log(expertCreationSuggestionTranscriptText(line));
+  expertCreationSuggestionsPutInTranscript.add(line.id);
   show($, statusText());
 }
 
-// The expert made from the session's offer is ready: its link goes, and the lead is told once, on its next tool result.
+// The expert created from the session's suggestion is ready: its link goes, and the lead is told once, on its next tool result.
 function expertReady($: Host, line: ExpertReadyLine): void {
-  for (const open of offers.values()) open.delete(line.id);
+  for (const open of openExpertCreationSuggestionsByOffice.values()) open.delete(line.id);
   show($, statusText());
   if (!lead || readyTold.has(line.id)) return;
   readyTold.add(line.id);

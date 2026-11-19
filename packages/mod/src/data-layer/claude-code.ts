@@ -11,7 +11,7 @@
 // id>:lead, and a subagent claude-code:<agent id>.
 //
 // The session's areas (protocol 0.15.0, isoplan-app#328) say how much its agents worked in each
-// folder of a repo, so the runner can offer an expert on one (runner/offers.ts). Every Read, Grep and
+// folder of a repo, so the runner can suggest an expert on one (runner/expert-creation-suggestions.ts). Every Read, Grep and
 // Glob call, the lead's and any subagent's folded here, counts in the folder it names and in each
 // folder above it up to the repo's root (the root itself aside), so the deepest folder that passes
 // a threshold can be picked. A Grep or Glob at the root (most name no path) counts instead in the
@@ -128,7 +128,7 @@ export interface SourceRead {
   /**
    * What the session said in its latest turns that worked in `folder` of `project` (null for the
    * session's own), oldest first: each turn's prompt and reply, cut short. Never sent: it is what a
-   * local model drafts an expert from (runner/offers.ts).
+   * local model drafts an expert from (runner/expert-creation-suggestions.ts).
    */
   said?: (project: string | null, folder: string) => Promise<string[]>;
 }
@@ -1226,7 +1226,7 @@ const ASK_CHARS = 2000;
 const SAID_MAX = 8;
 /** The most areas a session's facts carry: those that took the most tokens, then the most time. */
 export const MAX_AREAS = 100;
-// A folder no expert is offered on, nor anything inside it: what a package manager or git keeps.
+// A folder no expert is suggested on, nor anything inside it: what a package manager or git keeps.
 const NOT_AREAS = new Set(["node_modules", ".git"]);
 
 const capped = <K, V>(map: Map<K, V>, max: number) => {

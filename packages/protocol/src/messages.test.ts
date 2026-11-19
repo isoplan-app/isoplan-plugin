@@ -13,8 +13,8 @@ import {
   MAX_FOLDER_REPOS,
   MAX_HOLDING,
   MAX_INSTRUCTION_LENGTH,
-  MAX_OFFER_DISMISSALS,
-  MAX_OFFER_SESSIONS,
+  MAX_EXPERT_CREATION_SUGGESTION_DISMISSALS,
+  MAX_EXPERT_CREATION_SUGGESTION_SESSIONS,
   MAX_OWNER_MESSAGE_LENGTH,
   MAX_OUTPUT_LENGTH,
   MAX_PROMPT_LENGTH,
@@ -137,8 +137,8 @@ const driving = "claude-code:0b5c4d3e-0000-4000-8000-000000000001";
 const isoplan = { id: "github.com/isoplan-app/isoplan", name: "isoplan" };
 const commit = "0123456789abcdef0123456789abcdef01234567";
 const expertListing = { name: "adr-0004", project: isoplan, subject: "What session text may leave a machine (ADR 0004). Ask before you send data off one.", state: "ready" };
-const offer = {
-  type: "expert-offer",
+const expertCreationSuggestion = {
+  type: "expert-creation-suggestion",
   v,
   id: "o-4f9c2a",
   session: "claude-code:s1",
@@ -152,7 +152,7 @@ const offer = {
   why: { share: 0.18, tokens: 36000, minutes: 12.5, corrections: 1 },
   at,
 };
-const makeExpert = { type: "make-expert", v, request: "make-x-0123456789", offer: "o-4f9c2a", key: "pairing-tokens", subject: offer.subject, model: "sonnet", project: isoplan, area: ["packages/server/src/pairing", "docs/adr/0004-*.md"], proof: offer.proof, by: sam };
+const createExpertFromSuggestion = { type: "create-expert-from-suggestion", v, request: "make-x-0123456789", expertCreationSuggestionId: "o-4f9c2a", key: "pairing-tokens", subject: expertCreationSuggestion.subject, model: "sonnet", project: isoplan, area: ["packages/server/src/pairing", "docs/adr/0004-*.md"], proof: expertCreationSuggestion.proof, by: sam };
 const area = { folder: "packages/server/src/pairing", reads: 14, searches: 9, tokens: 36000, ms: 750000, corrections: 1 };
 
 const valid = {
@@ -286,18 +286,18 @@ const valid = {
   "expert-senior": { type: "expert-senior", v, id: "expert-x-0123456789-a1b2c3" },
   "runner that starts hidden sessions": { type: "runner", v, account: adam, machine: { name: "sevengill" }, drive: true, hiddenStarts: true },
   "drive start hidden": { type: "drive", v, kind: "start", id: "d13", by: adam, folder: "/Users/sam/code/isoplan", branch: "feat/dark-mode", project: isoplan, instruction: "Add a dark mode.", permissions: "auto", hidden: true },
-  "runner that offers experts": { type: "runner", v, account: adam, machine: { name: "sevengill" }, experts: true, offers: true },
-  "expert-offer": offer,
-  "expert-offer office-wide": { ...offer, id: "draft-x-0123456789", scope: "office" },
-  "expert-offer-ended from the runner": { type: "expert-offer-ended", v, id: "o-4f9c2a", why: "withdrawn" },
-  "expert-making": { type: "expert-making", v, request: "make-x-0123456789", offer: "o-4f9c2a", state: "grounding" },
-  "expert-making failed": { type: "expert-making", v, request: "make-x-0123456789", offer: "o-4f9c2a", state: "failed", detail: "This computer has no checkout of isoplan." },
-  "make-expert": makeExpert,
-  "draft-offer": { type: "draft-offer", v, request: "draft-x-0123456789", project: isoplan, folder: "packages/client/src/view", sessions: ["claude-code:s3", "claude-code:s1"] },
-  "offer-dismissals": { type: "offer-dismissals", v, dismissals: [{ project: isoplan.id, folder: "packages/server/src/pairing", until: "2026-12-19T09:00:00.000Z" }, { project: isoplan.id, folder: "docs", forever: true }] },
-  "expert-offer-ended made": { type: "expert-offer-ended", v, id: "o-4f9c2a", why: "made", key: "pairing-tokens" },
-  "expert-offer-ended expired": { type: "expert-offer-ended", v, id: "o-4f9c2a", why: "expired" },
-  "expert-offer-ended refused": { type: "expert-offer-ended", v, id: "o-4f9c2a", why: "refused" },
+  "runner that can create experts from suggestions": { type: "runner", v, account: adam, machine: { name: "sevengill" }, experts: true, canCreateExpertsFromSuggestions: true },
+  "expert-creation-suggestion": expertCreationSuggestion,
+  "expert-creation-suggestion office-wide": { ...expertCreationSuggestion, id: "draft-x-0123456789", scope: "office" },
+  "expert-creation-suggestion-ended from the runner": { type: "expert-creation-suggestion-ended", v, id: "o-4f9c2a", why: "withdrawn" },
+  "expert-creation-progress": { type: "expert-creation-progress", v, request: "make-x-0123456789", expertCreationSuggestionId: "o-4f9c2a", state: "grounding" },
+  "expert-creation-progress failed": { type: "expert-creation-progress", v, request: "make-x-0123456789", expertCreationSuggestionId: "o-4f9c2a", state: "failed", detail: "This computer has no checkout of isoplan." },
+  "create-expert-from-suggestion": createExpertFromSuggestion,
+  "draft-office-wide-expert-creation-suggestion": { type: "draft-office-wide-expert-creation-suggestion", v, request: "draft-x-0123456789", project: isoplan, folder: "packages/client/src/view", sessions: ["claude-code:s3", "claude-code:s1"] },
+  "expert-creation-suggestion-dismissals": { type: "expert-creation-suggestion-dismissals", v, dismissals: [{ project: isoplan.id, folder: "packages/server/src/pairing", until: "2026-12-19T09:00:00.000Z" }, { project: isoplan.id, folder: "docs", forever: true }] },
+  "expert-creation-suggestion-ended made": { type: "expert-creation-suggestion-ended", v, id: "o-4f9c2a", why: "made", key: "pairing-tokens" },
+  "expert-creation-suggestion-ended expired": { type: "expert-creation-suggestion-ended", v, id: "o-4f9c2a", why: "expired" },
+  "expert-creation-suggestion-ended refused": { type: "expert-creation-suggestion-ended", v, id: "o-4f9c2a", why: "refused" },
   "experts with areas": { type: "experts", v, experts: [{ ...expertListing, areas: ["docs/adr", "CONTEXT.md"] }] },
 };
 
@@ -407,18 +407,18 @@ const parsers = {
   "expert-senior": parseDataLayerMessage,
   "runner that starts hidden sessions": parseDataLayerMessage,
   "drive start hidden": parseOfficeServerMessage,
-  "runner that offers experts": parseDataLayerMessage,
-  "expert-offer": parseDataLayerMessage,
-  "expert-offer office-wide": parseDataLayerMessage,
-  "expert-offer-ended from the runner": parseDataLayerMessage,
-  "expert-making": parseDataLayerMessage,
-  "expert-making failed": parseDataLayerMessage,
-  "make-expert": parseOfficeServerMessage,
-  "draft-offer": parseOfficeServerMessage,
-  "offer-dismissals": parseOfficeServerMessage,
-  "expert-offer-ended made": parseOfficeServerMessage,
-  "expert-offer-ended expired": parseOfficeServerMessage,
-  "expert-offer-ended refused": parseOfficeServerMessage,
+  "runner that can create experts from suggestions": parseDataLayerMessage,
+  "expert-creation-suggestion": parseDataLayerMessage,
+  "expert-creation-suggestion office-wide": parseDataLayerMessage,
+  "expert-creation-suggestion-ended from the runner": parseDataLayerMessage,
+  "expert-creation-progress": parseDataLayerMessage,
+  "expert-creation-progress failed": parseDataLayerMessage,
+  "create-expert-from-suggestion": parseOfficeServerMessage,
+  "draft-office-wide-expert-creation-suggestion": parseOfficeServerMessage,
+  "expert-creation-suggestion-dismissals": parseOfficeServerMessage,
+  "expert-creation-suggestion-ended made": parseOfficeServerMessage,
+  "expert-creation-suggestion-ended expired": parseOfficeServerMessage,
+  "expert-creation-suggestion-ended refused": parseOfficeServerMessage,
   "experts with areas": parseDataLayerMessage,
 } satisfies Record<keyof typeof valid, (value: unknown) => ParseResult<unknown>>;
 
@@ -529,18 +529,18 @@ const broken: Record<keyof typeof valid, [unknown, string]> = {
   "expert-senior": [{ ...valid["expert-senior"], id: "" }, "id"],
   "runner that starts hidden sessions": [{ ...valid["runner that starts hidden sessions"], hiddenStarts: false }, "hiddenStarts"],
   "drive start hidden": [{ ...valid["drive start hidden"], hidden: "yes" }, "hidden"],
-  "runner that offers experts": [{ ...valid["runner that offers experts"], offers: false }, "offers"],
-  "expert-offer": [{ ...offer, why: { ...offer.why, share: 1.5 } }, "why.share"],
-  "expert-offer office-wide": [{ ...valid["expert-offer office-wide"], scope: "team" }, "scope"],
-  "expert-offer-ended from the runner": [{ ...valid["expert-offer-ended from the runner"], why: "made" }, "why"],
-  "expert-making": [{ ...valid["expert-making"], state: "cooking" }, "state"],
-  "expert-making failed": [{ ...valid["expert-making failed"], detail: "x".repeat(MAX_DETAIL_LENGTH + 1) }, "detail"],
-  "make-expert": [{ ...makeExpert, by: { name: "Sam" } }, "by.id"],
-  "draft-offer": [{ ...valid["draft-offer"], sessions: [] }, "sessions"],
-  "offer-dismissals": [{ ...valid["offer-dismissals"], dismissals: [{ ...valid["offer-dismissals"].dismissals[0], forever: true }] }, "dismissals[0].until"],
-  "expert-offer-ended made": [{ ...valid["expert-offer-ended made"], key: undefined }, "key"],
-  "expert-offer-ended expired": [{ ...valid["expert-offer-ended expired"], why: "withdrawn" }, "why"],
-  "expert-offer-ended refused": [{ ...valid["expert-offer-ended refused"], why: "no-draft" }, "why"],
+  "runner that can create experts from suggestions": [{ ...valid["runner that can create experts from suggestions"], canCreateExpertsFromSuggestions: false }, "canCreateExpertsFromSuggestions"],
+  "expert-creation-suggestion": [{ ...expertCreationSuggestion, why: { ...expertCreationSuggestion.why, share: 1.5 } }, "why.share"],
+  "expert-creation-suggestion office-wide": [{ ...valid["expert-creation-suggestion office-wide"], scope: "team" }, "scope"],
+  "expert-creation-suggestion-ended from the runner": [{ ...valid["expert-creation-suggestion-ended from the runner"], why: "made" }, "why"],
+  "expert-creation-progress": [{ ...valid["expert-creation-progress"], state: "cooking" }, "state"],
+  "expert-creation-progress failed": [{ ...valid["expert-creation-progress failed"], detail: "x".repeat(MAX_DETAIL_LENGTH + 1) }, "detail"],
+  "create-expert-from-suggestion": [{ ...createExpertFromSuggestion, by: { name: "Sam" } }, "by.id"],
+  "draft-office-wide-expert-creation-suggestion": [{ ...valid["draft-office-wide-expert-creation-suggestion"], sessions: [] }, "sessions"],
+  "expert-creation-suggestion-dismissals": [{ ...valid["expert-creation-suggestion-dismissals"], dismissals: [{ ...valid["expert-creation-suggestion-dismissals"].dismissals[0], forever: true }] }, "dismissals[0].until"],
+  "expert-creation-suggestion-ended made": [{ ...valid["expert-creation-suggestion-ended made"], key: undefined }, "key"],
+  "expert-creation-suggestion-ended expired": [{ ...valid["expert-creation-suggestion-ended expired"], why: "withdrawn" }, "why"],
+  "expert-creation-suggestion-ended refused": [{ ...valid["expert-creation-suggestion-ended refused"], why: "no-draft" }, "why"],
   "experts with areas": [{ ...valid["experts with areas"], experts: [{ ...expertListing, areas: ["../x"] }] }, "experts[0].areas[0]"],
 };
 
@@ -1080,7 +1080,7 @@ describe("experts", () => {
   });
 });
 
-describe("expert offers", () => {
+describe("expert creation suggestions", () => {
   const long = (length: number) => "x".repeat(length);
 
   test("a session's areas parse in its facts and its changes, as whole counts of at least 0, and facts with none still parse", () => {
@@ -1097,8 +1097,8 @@ describe("expert offers", () => {
   test("an area path is `.` or a relative path of named parts with forward slashes, globs allowed, at most MAX_AREA_PATH_LENGTH", () => {
     const paths = (folder: string) => [
       parseDataLayerMessage({ ...valid.full, facts: { ...facts, areas: [{ ...area, folder }] } }),
-      parseOfficeServerMessage({ ...makeExpert, area: [folder] }),
-      parseOfficeServerMessage({ ...valid["draft-offer"], folder }),
+      parseOfficeServerMessage({ ...createExpertFromSuggestion, area: [folder] }),
+      parseOfficeServerMessage({ ...valid["draft-office-wide-expert-creation-suggestion"], folder }),
     ];
     for (const path of [".", "packages/server", "docs/adr/*.md", "packages/**/src", "CONTEXT.md", long(MAX_AREA_PATH_LENGTH)]) {
       for (const result of paths(path)) expect(result).toMatchObject({ ok: true });
@@ -1108,11 +1108,11 @@ describe("expert offers", () => {
     }
   });
 
-  test("an area names 1 to MAX_AREA_PATHS paths, in an offer and in make-expert; a listing's at most MAX_AREA_PATHS", () => {
+  test("an area names 1 to MAX_AREA_PATHS paths, in an expert creation suggestion and in create-expert-from-suggestion; a listing's at most MAX_AREA_PATHS", () => {
     const paths = (n: number) => Array.from({ length: n }, (_, i) => `packages/p${i}`);
     for (const [parse, make] of [
-      [parseDataLayerMessage, (area: string[]) => ({ ...offer, area })],
-      [parseOfficeServerMessage, (area: string[]) => ({ ...makeExpert, area })],
+      [parseDataLayerMessage, (area: string[]) => ({ ...expertCreationSuggestion, area })],
+      [parseOfficeServerMessage, (area: string[]) => ({ ...createExpertFromSuggestion, area })],
     ] as const) {
       expect(parse(make(paths(MAX_AREA_PATHS)))).toMatchObject({ ok: true });
       for (const n of [0, MAX_AREA_PATHS + 1]) expect(parse(make(paths(n)))).toMatchObject({ ok: false, kind: "invalid" });
@@ -1122,13 +1122,13 @@ describe("expert offers", () => {
     expect(listing(paths(MAX_AREA_PATHS + 1))).toMatchObject({ ok: false, kind: "invalid" });
   });
 
-  test("an offer's id keeps to what a link can carry, wherever it is named", () => {
+  test("an expert creation suggestion's id keeps to what a link can carry, wherever it is named", () => {
     const ids = (id: string) => [
-      parseDataLayerMessage({ ...offer, id }),
-      parseDataLayerMessage({ ...valid["expert-making"], offer: id }),
-      parseOfficeServerMessage({ ...makeExpert, offer: id }),
-      parseOfficeServerMessage({ ...valid["draft-offer"], request: id }),
-      parseOfficeServerMessage({ ...valid["expert-offer-ended expired"], id }),
+      parseDataLayerMessage({ ...expertCreationSuggestion, id }),
+      parseDataLayerMessage({ ...valid["expert-creation-progress"], expertCreationSuggestionId: id }),
+      parseOfficeServerMessage({ ...createExpertFromSuggestion, expertCreationSuggestionId: id }),
+      parseOfficeServerMessage({ ...valid["draft-office-wide-expert-creation-suggestion"], request: id }),
+      parseOfficeServerMessage({ ...valid["expert-creation-suggestion-ended expired"], id }),
     ];
     for (const id of ["o-4f9c2a", "draft_x-0123456789", long(100)]) for (const result of ids(id)) expect(result).toMatchObject({ ok: true });
     for (const id of ["", "a b", "a/b", "a?b=c", "a#b", long(101)]) for (const result of ids(id)) expect(result).toMatchObject({ ok: false, kind: "invalid" });
@@ -1136,49 +1136,49 @@ describe("expert offers", () => {
 
   test("a model is a name no shell reads, starting with a letter or digit", () => {
     for (const model of ["sonnet", "claude-opus-5-5", "claude-sonnet-4-5[1m]", "us.anthropic.claude-sonnet-4-5-20250929-v1:0", "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc"]) {
-      expect(parseOfficeServerMessage({ ...makeExpert, model })).toMatchObject({ ok: true });
+      expect(parseOfficeServerMessage({ ...createExpertFromSuggestion, model })).toMatchObject({ ok: true });
     }
     for (const model of ["", "-p", "--model=x", "sonnet && calc", "a b", "a&b", "a|b", 'a"b', "a%PATH%", long(201)]) {
-      expect(parseOfficeServerMessage({ ...makeExpert, model })).toMatchObject({ ok: false, kind: "invalid" });
+      expect(parseOfficeServerMessage({ ...createExpertFromSuggestion, model })).toMatchObject({ ok: false, kind: "invalid" });
     }
   });
 
   test("a proof has a question and an answer, each trimmed and within MAX_QUESTION_LENGTH and MAX_EXPERT_ANSWER_LENGTH", () => {
-    expect(parseDataLayerMessage({ ...offer, proof: { question: " Where? ", answer: "Here.\n" } })).toMatchObject({ ok: true, message: { proof: { question: "Where?", answer: "Here." } } });
+    expect(parseDataLayerMessage({ ...expertCreationSuggestion, proof: { question: " Where? ", answer: "Here.\n" } })).toMatchObject({ ok: true, message: { proof: { question: "Where?", answer: "Here." } } });
     for (const proof of [{ question: "   ", answer: "Here." }, { question: "Where?", answer: "" }, { question: long(MAX_QUESTION_LENGTH + 1), answer: "Here." }, { question: "Where?", answer: long(MAX_EXPERT_ANSWER_LENGTH + 1) }, { question: "Where?" }]) {
-      expect(parseDataLayerMessage({ ...offer, proof })).toMatchObject({ ok: false, kind: "invalid" });
-      expect(parseOfficeServerMessage({ ...makeExpert, proof })).toMatchObject({ ok: false, kind: "invalid" });
+      expect(parseDataLayerMessage({ ...expertCreationSuggestion, proof })).toMatchObject({ ok: false, kind: "invalid" });
+      expect(parseOfficeServerMessage({ ...createExpertFromSuggestion, proof })).toMatchObject({ ok: false, kind: "invalid" });
     }
   });
 
-  test("an offer's share is from 0 to 1, its tokens and corrections whole, and none of its signals below 0", () => {
-    for (const share of [0, 1]) expect(parseDataLayerMessage({ ...offer, why: { ...offer.why, share } })).toMatchObject({ ok: true });
+  test("an expert creation suggestion's share is from 0 to 1, its tokens and corrections whole, and none of its signals below 0", () => {
+    for (const share of [0, 1]) expect(parseDataLayerMessage({ ...expertCreationSuggestion, why: { ...expertCreationSuggestion.why, share } })).toMatchObject({ ok: true });
     for (const wrong of [{ share: -0.1 }, { tokens: 1.5 }, { corrections: 0.5 }, { minutes: -1 }, { tokens: undefined }]) {
-      expect(parseDataLayerMessage({ ...offer, why: { ...offer.why, ...wrong } })).toMatchObject({ ok: false, kind: "invalid" });
+      expect(parseDataLayerMessage({ ...expertCreationSuggestion, why: { ...expertCreationSuggestion.why, ...wrong } })).toMatchObject({ ok: false, kind: "invalid" });
     }
   });
 
   test("a dismissal lasts until a time, or forever, and exactly one of the two", () => {
-    const [snoozed, forever] = valid["offer-dismissals"].dismissals;
+    const [snoozed, forever] = valid["expert-creation-suggestion-dismissals"].dismissals;
     const { until: _, ...neither } = snoozed!;
     for (const dismissal of [neither, { ...snoozed, forever: true }, { ...forever, forever: false }, { ...snoozed, until: "in a month" }]) {
-      expect(parseOfficeServerMessage({ ...valid["offer-dismissals"], dismissals: [dismissal] })).toMatchObject({ ok: false, kind: "invalid" });
+      expect(parseOfficeServerMessage({ ...valid["expert-creation-suggestion-dismissals"], dismissals: [dismissal] })).toMatchObject({ ok: false, kind: "invalid" });
     }
   });
 
-  test("a draft-offer names 1 to MAX_OFFER_SESSIONS sessions; offer-dismissals lists 0 to MAX_OFFER_DISMISSALS", () => {
+  test("a draft-office-wide-expert-creation-suggestion names 1 to MAX_EXPERT_CREATION_SUGGESTION_SESSIONS sessions; expert-creation-suggestion-dismissals lists 0 to MAX_EXPERT_CREATION_SUGGESTION_DISMISSALS", () => {
     const sessions = (n: number) => Array.from({ length: n }, (_, i) => `claude-code:s${i}`);
-    expect(parseOfficeServerMessage({ ...valid["draft-offer"], sessions: sessions(MAX_OFFER_SESSIONS) })).toMatchObject({ ok: true });
-    expect(parseOfficeServerMessage({ ...valid["draft-offer"], sessions: sessions(MAX_OFFER_SESSIONS + 1) })).toMatchObject({ ok: false, kind: "invalid" });
+    expect(parseOfficeServerMessage({ ...valid["draft-office-wide-expert-creation-suggestion"], sessions: sessions(MAX_EXPERT_CREATION_SUGGESTION_SESSIONS) })).toMatchObject({ ok: true });
+    expect(parseOfficeServerMessage({ ...valid["draft-office-wide-expert-creation-suggestion"], sessions: sessions(MAX_EXPERT_CREATION_SUGGESTION_SESSIONS + 1) })).toMatchObject({ ok: false, kind: "invalid" });
     const dismissals = (n: number) => Array.from({ length: n }, (_, i) => ({ project: isoplan.id, folder: `packages/p${i}`, forever: true }));
-    for (const n of [0, MAX_OFFER_DISMISSALS]) expect(parseOfficeServerMessage({ ...valid["offer-dismissals"], dismissals: dismissals(n) })).toMatchObject({ ok: true });
-    expect(parseOfficeServerMessage({ ...valid["offer-dismissals"], dismissals: dismissals(MAX_OFFER_DISMISSALS + 1) })).toMatchObject({ ok: false, kind: "invalid" });
+    for (const n of [0, MAX_EXPERT_CREATION_SUGGESTION_DISMISSALS]) expect(parseOfficeServerMessage({ ...valid["expert-creation-suggestion-dismissals"], dismissals: dismissals(n) })).toMatchObject({ ok: true });
+    expect(parseOfficeServerMessage({ ...valid["expert-creation-suggestion-dismissals"], dismissals: dismissals(MAX_EXPERT_CREATION_SUGGESTION_DISMISSALS + 1) })).toMatchObject({ ok: false, kind: "invalid" });
   });
 
-  test("only an offer that was made names its expert's key, and it must", () => {
-    const dismissed = { ...valid["expert-offer-ended expired"], why: "dismissed" };
+  test("only an expert creation suggestion whose expert was made names its expert's key, and it must", () => {
+    const dismissed = { ...valid["expert-creation-suggestion-ended expired"], why: "dismissed" };
     expect(parseOfficeServerMessage({ ...dismissed, key: "pairing" })).toEqual({ ok: true, message: dismissed });
-    expect(parseOfficeServerMessage({ ...valid["expert-offer-ended made"], key: "Pairing" })).toMatchObject({ ok: false, kind: "invalid" });
+    expect(parseOfficeServerMessage({ ...valid["expert-creation-suggestion-ended made"], key: "Pairing" })).toMatchObject({ ok: false, kind: "invalid" });
   });
 
   test("an expert's display name is its key's words, capitalised, then Expert", () => {

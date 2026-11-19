@@ -35,9 +35,9 @@
 //
 // Each pass's areas (protocol 0.15.0), the folders its agents read and searched, go to the runner as
 // each office that takes the repo may be told of them (`areas`), with what the session said in each,
-// which stays on the machine: the runner offers an expert from them (src/runner/offers.ts). Whether
+// which stays on the machine: the runner suggests an expert from them (src/runner/expert-creation-suggestions.ts). Whether
 // a person's message corrected the agent is the runner's local model's word (`corrected`), only while runner.json
-// turns its correction check on (`expertOffers.correctionCheck`, off by default).
+// turns its correction check on (`expertCreationSuggestions.correctionCheck`, off by default).
 //
 // Its log lines go to <claude dir>/isoplan/logs/<session>.log (the runner's sessionLog), and without
 // a hooks module the other lines are dropped. Without one it reports only while the session is at work, and the
@@ -136,7 +136,7 @@ interface OfficeRun {
   home: Project | null;
 }
 
-/** One pass's areas of a session, as an office that takes its repo may be told of them, for the runner's expert offers (src/runner/offers.ts). */
+/** One pass's areas of a session, as an office that takes its repo may be told of them, for the runner's expert creation suggestions (src/runner/expert-creation-suggestions.ts). */
 export interface SessionAreas {
   /** The office's data-layer address. */
   server: string;
@@ -793,7 +793,7 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
         emit({ type: "log", text: `couldn't send this session's facts to ${run.office.server}: ${String((err as Error)?.message ?? err)}` });
       }
     }
-    // The areas each office may be told of, for the runner's expert offers: in a workspace only its
+    // The areas each office may be told of, for the runner's expert creation suggestions: in a workspace only its
     // repos', and another repo's only once this connection's welcome names it.
     if (o.areas && facts.areas?.length) {
       const model = facts.agents.find((a) => a.id === facts.session.lead)?.usage?.model ?? null;
@@ -806,7 +806,7 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
         try {
           o.areas({ server: run.office.server, session: facts.session.id, bare: sessionId, project: run.home, checkout: facts.session.checkout ?? cwd, window: contextWindow, model, areas, said: read.said ?? (async () => []) });
         } catch (err) {
-          emit({ type: "log", text: `couldn't look at this session's areas for an expert offer: ${String((err as Error)?.message ?? err)}` });
+          emit({ type: "log", text: `couldn't look at this session's areas for an expert creation suggestion: ${String((err as Error)?.message ?? err)}` });
         }
       }
     }

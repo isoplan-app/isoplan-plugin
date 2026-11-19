@@ -52,15 +52,15 @@ function claudePaths(env, home) {
 	};
 }
 //#endregion
-//#region src/expert-offer/text.ts
+//#region src/expert-creation-suggestion/text.ts
 /** A folder as the copy names it: "." is the repo's top folder. */
 const folderWords = (folder) => folder === "." ? "the repo's top folder" : folder;
 //#endregion
-//#region src/expert-offer/open.ts
-/** The file of a session's open offers. */
-const offersPath = (claudeDir, session) => path.join(claudeDir, "isoplan", "offers", `${session}.json`);
-/** The open offers in the file, in its order; none when it isn't there; why not when it couldn't be read as the runner writes it. */
-async function readOffers(file) {
+//#region src/expert-creation-suggestion/open.ts
+/** The file of a session's open expert creation suggestions. */
+const openExpertCreationSuggestionsPath = (claudeDir, session) => path.join(claudeDir, "isoplan", "expert-creation-suggestions", `${session}.json`);
+/** The open expert creation suggestions in the file, in its order; none when it isn't there; why not when it couldn't be read as the runner writes it. */
+async function readOpenExpertCreationSuggestions(file) {
 	let text;
 	try {
 		text = await fs.readFile(file, "utf8");
@@ -74,9 +74,9 @@ async function readOffers(file) {
 	} catch {
 		return { problem: "it isn't JSON" };
 	}
-	const offers = value?.offers;
-	if (!Array.isArray(offers)) return { problem: "it has no list of offers" };
-	return offers.filter((o) => !!o && typeof o === "object" && [
+	const suggestions = value?.expertCreationSuggestions;
+	if (!Array.isArray(suggestions)) return { problem: "it has no list of expert creation suggestions" };
+	return suggestions.filter((o) => !!o && typeof o === "object" && [
 		"id",
 		"name",
 		"folder",
@@ -117,15 +117,15 @@ function openUrl(platform, url, run = spawn) {
 		child.on("exit", (code) => (clearTimeout(timer), code === 0 ? resolve() : reject(/* @__PURE__ */ new Error(`${how.command} exited with code ${code}`))));
 	});
 }
-const what = (o) => `the ${o.name}, offered for ${folderWords(o.folder)}`;
-/** What /isoplan:expert prints: the newest open offer opened, or why not, and the other offers' links. */
-async function expertOffer(o) {
-	if (!o.session || !/^[\w-]{1,200}$/.test(o.session)) return "This runs inside a Claude Code session, which sets CLAUDE_CODE_SESSION_ID; it isn't set here, so this session's expert offer can't be found. Use the review link in Isoplan's status line.";
-	const file = offersPath(o.claudeDir, o.session);
-	const all = await readOffers(file);
-	if (!Array.isArray(all)) return `This session's open expert offers couldn't be read from ${file} (${all.problem}). Use the review link in Isoplan's status line.`;
+const what = (o) => `the ${o.name}, suggested for ${folderWords(o.folder)}`;
+/** What /isoplan:review-expert-suggestion prints: the newest open expert creation suggestion's review opened, or why not, and the other suggestions' links. */
+async function openReviewOfNewestExpertCreationSuggestion(o) {
+	if (!o.session || !/^[\w-]{1,200}$/.test(o.session)) return "This runs inside a Claude Code session, which sets CLAUDE_CODE_SESSION_ID; it isn't set here, so this session's expert creation suggestion can't be found. Use the review link in Isoplan's status line.";
+	const file = openExpertCreationSuggestionsPath(o.claudeDir, o.session);
+	const all = await readOpenExpertCreationSuggestions(file);
+	if (!Array.isArray(all)) return `This session's open expert creation suggestions couldn't be read from ${file} (${all.problem}). Use the review link in Isoplan's status line.`;
 	const [newest, ...others] = all.filter((x, i) => all.findIndex((y) => y.id === x.id) === i).reverse();
-	if (!newest) return "This session has no open expert offer.";
+	if (!newest) return "This session has no open expert creation suggestion.";
 	let text;
 	try {
 		await o.open(newest.url);
@@ -136,14 +136,14 @@ async function expertOffer(o) {
 	if (!others.length) return text;
 	return [
 		text,
-		`This session has ${others.length === 1 ? "another open offer" : `${others.length} more open offers`}:`,
+		`This session has ${others.length === 1 ? "another open expert creation suggestion" : `${others.length} more open expert creation suggestions`}:`,
 		...others.map((x) => `- ${what(x)}: ${x.url}`)
 	].join("\n");
 }
 //#endregion
-//#region src/expert-offer/main.ts
+//#region src/expert-creation-suggestion/main.ts
 const { dir: claudeDir } = claudePaths(process.env, os.homedir());
-process.stdout.write(await expertOffer({
+process.stdout.write(await openReviewOfNewestExpertCreationSuggestion({
 	claudeDir,
 	session: process.env.CLAUDE_CODE_SESSION_ID,
 	open: (url) => openUrl(process.platform, url)

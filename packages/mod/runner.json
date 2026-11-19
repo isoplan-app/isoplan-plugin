@@ -41,7 +41,7 @@
   "expertJudgeModel": "haiku",
   "expertWaitSeconds": 10,
   "clonesFolder": "",
-  "expertOffers": {
+  "expertCreationSuggestions": {
     "contextShare": 0.15,
     "tokens": 30000,
     "minutes": 10,
