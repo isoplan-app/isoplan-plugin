@@ -16578,6 +16578,7 @@ const MAX_CHECKS_WAITING = 50;
 const MAX_VERDICTS = 1e3;
 const MAX_SESSIONS = 200;
 const PROJECT_MS = 3e5;
+const SETTINGS_MS = 5e3;
 const HOUR_MS = 36e5;
 const DAY_MS$1 = 864e5;
 const FILE_VERSION = 1;
@@ -16673,7 +16674,15 @@ function createOffers(o) {
 	let checking = false;
 	let checkTimer = null;
 	let saving = Promise.resolve();
-	const settings = async () => (await o.settings()).expertOffers;
+	let read = null;
+	const settings = () => {
+		if (!read || now() - read.at > SETTINGS_MS) read = {
+			at: now(),
+			settings: o.settings().then((s) => s.expertOffers)
+		};
+		const mine = read;
+		return mine.settings.catch((err) => (read === mine && (read = null), Promise.reject(err)));
+	};
 	const indexOf = (server) => o.offices.findIndex((f) => f.server === server);
 	const say = (text) => o.log(text);
 	const done = (m) => m.state === "ready" || m.state === "failed";
@@ -16991,8 +17000,8 @@ function createOffers(o) {
 		if (closed || m.state === "ready" || m.state === "failed") return;
 		const st = await readState(path.join(o.isoplanDir, "experts", m.key));
 		const hosted = o.experts().find((e) => e.name === m.key);
-		const g = st?.generations.reduce((a, b) => !a || b.n > a.n ? b : a, null) ?? null;
-		if (g?.state === "junior" || g?.state === "senior" || hosted?.state === "ready") setMaking(m, "ready");
+		const g = st?.generations.filter((x) => x.groundedAt >= m.since).reduce((a, b) => !a || b.n > a.n ? b : a, null) ?? null;
+		if (g?.state === "junior" || g?.state === "senior") setMaking(m, "ready");
 		else if (g?.state === "failed") setMaking(m, "failed", g.proof?.passed === false ? "its answer to the proof question didn't match the answer expected" : "its grounding failed; its health log on that computer says why");
 		else if (!g && hosted?.state === "failed") setMaking(m, "failed", "its own copy of the repo couldn't be made");
 		else if (now() - m.since > 36e5) setMaking(m, "failed", `it wasn't ready within ${MAKING_LIMIT_MS / 6e4} minutes`);
@@ -17100,7 +17109,7 @@ function createOffers(o) {
 			servers.add(s.server);
 			let added = false;
 			for (const r of saved.offers) {
-				if (r.session !== s.session || r.scope !== "session" || r.made || r.offices[s.server] !== void 0) continue;
+				if (r.session !== s.session || r.scope !== "session" || r.offices[s.server] !== void 0 || Object.values(r.offices).includes("ended")) continue;
 				r.offices[s.server] = "pending";
 				added = true;
 			}

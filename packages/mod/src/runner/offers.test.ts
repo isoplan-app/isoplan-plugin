@@ -218,7 +218,9 @@ test("make-expert: the expert file is written whole, and making is followed from
   expect(fs.readdirSync(path.dirname(file))).toEqual(["parser.json"]);
   const stateFile = path.join(h.isoplanDir, "experts", "parser", "state.json");
   fs.mkdirSync(path.dirname(stateFile), { recursive: true });
-  const generation = (more: Record<string, unknown>) => fs.writeFileSync(stateFile, JSON.stringify({ version: 1, fingerprint: "f", repo: h.checkout, branch: "main", generations: [{ n: 1, trunk: "t1", model: "claude-sonnet-5-5", commit: "", groundedAt: 1, meter: 0, notes: 0, state: "grounding", ...more }] }));
+  // A folder an earlier expert of that name left: its junior was grounded before this making began.
+  const old = { n: 1, trunk: "t1", model: "claude-sonnet-5-5", commit: "b".repeat(40), groundedAt: 1, meter: 0, notes: 0, state: "junior" };
+  const generation = (more: Record<string, unknown>) => fs.writeFileSync(stateFile, JSON.stringify({ version: 1, fingerprint: "f", repo: h.checkout, branch: "main", generations: [old, { n: 2, trunk: "t2", model: "claude-sonnet-5-5", commit: "", groundedAt: Date.now(), meter: 0, notes: 0, state: "grounding", ...more }] }));
   generation({});
   await until(() => making(h, "m1").length === 2);
   h.offers.linked(0);
@@ -240,7 +242,7 @@ test("make-expert: a generation that failed its proof fails making, saying so", 
   await until(() => making(h, "m1").length === 1);
   const stateFile = path.join(h.isoplanDir, "experts", "parser", "state.json");
   fs.mkdirSync(path.dirname(stateFile), { recursive: true });
-  fs.writeFileSync(stateFile, JSON.stringify({ version: 1, fingerprint: "f", repo: h.checkout, branch: "main", generations: [{ n: 1, trunk: "t1", model: "m", commit: "a".repeat(40), groundedAt: 1, meter: 0, notes: 0, state: "failed", proof: { passed: false, at: 2 } }] }));
+  fs.writeFileSync(stateFile, JSON.stringify({ version: 1, fingerprint: "f", repo: h.checkout, branch: "main", generations: [{ n: 1, trunk: "t1", model: "m", commit: "a".repeat(40), groundedAt: Date.now(), meter: 0, notes: 0, state: "failed", proof: { passed: false, at: 2 } }] }));
   await until(() => making(h, "m1").length === 2);
   expect(h.sent.at(-1)!.message).toEqual({ type: "expert-making", v: PROTOCOL_VERSION, request: "m1", offer: "o1", state: "failed", detail: "its answer to the proof question didn't match the answer expected" });
 });

@@ -158,8 +158,9 @@ const MAX_CHECKS_WAITING = 50;
 const MAX_VERDICTS = 1000;
 // The most sessions whose latest pass is kept for office-wide drafts, the least recently seen going first.
 const MAX_SESSIONS = 200;
-// How long an expert's repo's project is believed.
+// How long an expert's repo's project, and runner.json's expertOffers, are believed.
 const PROJECT_MS = 5 * 60000;
+const SETTINGS_MS = 5000;
 const HOUR_MS = 3600000;
 const DAY_MS = 86400000;
 const FILE_VERSION = 1;
@@ -298,7 +299,13 @@ export function createOffers(o: OffersOptions): Offers {
   let checkTimer: ReturnType<typeof setTimeout> | null = null;
   let saving: Promise<void> = Promise.resolve();
 
-  const settings = async () => (await o.settings()).expertOffers;
+  // Read again at most every SETTINGS_MS: every session's pass looks at them.
+  let read: { at: number; settings: Promise<ExpertOfferSettings> } | null = null;
+  const settings = () => {
+    if (!read || now() - read.at > SETTINGS_MS) read = { at: now(), settings: o.settings().then((s) => s.expertOffers) };
+    const mine = read;
+    return mine.settings.catch((err: unknown) => (read === mine && (read = null), Promise.reject(err)));
+  };
   const indexOf = (server: string) => o.offices.findIndex((f) => f.server === server);
   const say = (text: string) => o.log(text);
   const done = (m: Making) => m.state === "ready" || m.state === "failed";
@@ -533,14 +540,15 @@ export function createOffers(o: OffersOptions): Offers {
     sendMaking(m);
   }
 
-  // Where the expert being made stands, from its state.json and the runner's view of it.
+  // Where the expert being made stands, from its newest generation grounded since making began (a
+  // folder an earlier expert of that name left has older ones), and the runner's view of it.
   async function follow(m: Making) {
     m.timer = null;
     if (closed || m.state === "ready" || m.state === "failed") return;
     const st = await readState(path.join(o.isoplanDir, "experts", m.key));
     const hosted = o.experts().find((e) => e.name === m.key);
-    const g = st?.generations.reduce<(typeof st.generations)[number] | null>((a, b) => (!a || b.n > a.n ? b : a), null) ?? null;
-    if (g?.state === "junior" || g?.state === "senior" || hosted?.state === "ready") setMaking(m, "ready");
+    const g = st?.generations.filter((x) => x.groundedAt >= m.since).reduce<(typeof st.generations)[number] | null>((a, b) => (!a || b.n > a.n ? b : a), null) ?? null;
+    if (g?.state === "junior" || g?.state === "senior") setMaking(m, "ready");
     else if (g?.state === "failed") setMaking(m, "failed", g.proof?.passed === false ? "its answer to the proof question didn't match the answer expected" : "its grounding failed; its health log on that computer says why");
     else if (!g && hosted?.state === "failed") setMaking(m, "failed", "its own copy of the repo couldn't be made");
     else if (now() - m.since > MAKING_LIMIT_MS) setMaking(m, "failed", `it wasn't ready within ${MAKING_LIMIT_MS / 60000} minutes`);
@@ -638,10 +646,11 @@ export function createOffers(o: OffersOptions): Offers {
       let servers = takers.get(s.session);
       if (!servers) takers.set(s.session, (servers = new Set()));
       servers.add(s.server);
-      // An offer of this session made before this office took it goes to it too, unless it was made.
+      // An offer of this session made before this office took it goes to it too, unless it has
+      // ended anywhere (made, dismissed or expired).
       let added = false;
       for (const r of saved.offers) {
-        if (r.session !== s.session || r.scope !== "session" || r.made || r.offices[s.server] !== undefined) continue;
+        if (r.session !== s.session || r.scope !== "session" || r.offices[s.server] !== undefined || Object.values(r.offices).includes("ended")) continue;
         r.offices[s.server] = "pending";
         added = true;
       }
