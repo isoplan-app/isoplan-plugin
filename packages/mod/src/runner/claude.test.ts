@@ -17,9 +17,11 @@ test("fork: the command line is pinned, flag by flag", () => {
     "--no-session-persistence",
     "--tools",
     "",
-    // Reads no settings file, so neither the plugin nor the wake hook loads in the fork.
+    // Reads no settings file, so the plugin doesn't load in the fork; and runs no hook, the person's or the wake hook.
     "--setting-sources",
     "",
+    "--settings",
+    '{"disableAllHooks":true}',
     "--strict-mcp-config",
     "--model",
     "opus",

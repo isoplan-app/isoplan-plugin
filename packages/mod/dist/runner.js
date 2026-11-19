@@ -11250,6 +11250,8 @@ const desktopPlatform = (platform, arch) => platform === "darwin" || platform ==
 //#region src/runner/claude.ts
 const PREFIX = "claude-code:";
 const EXIT_GRACE_MS$2 = 5e3;
+/** Turns off every hook in a process Isoplan runs for itself: the person's hooks read their prompts too, even with `--setting-sources ""`. */
+const NO_HOOKS = ["--settings", JSON.stringify({ disableAllHooks: true })];
 /** Every flag of the fork's command line, after the binary. */
 function forkArgs(sessionId, model) {
 	return [
@@ -11262,6 +11264,7 @@ function forkArgs(sessionId, model) {
 		"",
 		"--setting-sources",
 		"",
+		...NO_HOOKS,
 		"--strict-mcp-config",
 		"--model",
 		model,
@@ -14022,7 +14025,7 @@ function answerOffices(o) {
 		for (const { message, at } of fresh) s.link.send(message, at);
 	};
 	let orphaned = false;
-	o.gone.then(() => (orphaned = true, wake()));
+	o.gone.then(() => (o.log("the runner's supervisor has gone without stopping its worker (it was ended from outside, or the computer is shutting down), so the worker stops too"), orphaned = true, wake()));
 	async function run() {
 		o.offices.forEach((_, i) => start(i));
 		for (;;) {
@@ -14870,6 +14873,7 @@ const READ_ONLY = [
 	DISALLOWED_TOOLS.join(","),
 	"--setting-sources",
 	"",
+	...NO_HOOKS,
 	"--strict-mcp-config",
 	"--permission-mode",
 	"dontAsk",
@@ -14924,6 +14928,7 @@ const judgeArgs = (model) => [
 	"",
 	"--setting-sources",
 	"",
+	...NO_HOOKS,
 	"--strict-mcp-config",
 	"--permission-mode",
 	"dontAsk",
@@ -15554,6 +15559,7 @@ function namingArgs(model, system) {
 		"",
 		"--setting-sources",
 		"",
+		...NO_HOOKS,
 		"--strict-mcp-config",
 		"--model",
 		model,

@@ -77,7 +77,8 @@ export function answerOffices<O, M, L = never>(o: AnswerOfficesOptions<O, M, L>)
     for (const { message, at } of fresh) s.link.send(message, at);
   };
   let orphaned = false;
-  void o.gone.then(() => ((orphaned = true), wake()));
+  // The supervisor logs every way it stops by itself, so this is the one trace of it being ended from outside.
+  void o.gone.then(() => (o.log("the runner's supervisor has gone without stopping its worker (it was ended from outside, or the computer is shutting down), so the worker stops too"), (orphaned = true), wake()));
 
   async function run(): Promise<Ended> {
     o.offices.forEach((_, i) => start(i));

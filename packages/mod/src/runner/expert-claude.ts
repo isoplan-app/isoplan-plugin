@@ -11,6 +11,7 @@
 //
 // - Read-only is enforced, not asked for: only Read, Grep, Glob and Agent (the subagent tool, for
 //   Explore subagents) are offered, the rest are disallowed, no settings file or MCP server loads,
+//   no hook runs (NO_HOOKS, claude.ts: the person's hooks once sent a Haiku expert to run /verify),
 //   and nothing prompts (`dontAsk`). A disallowed tool offered in the init event, or used by the
 //   session or one of its subagents, ends the process tree at once and fails the conversation.
 // - Every trunk turn and every fork has the same tools and no MCP config, so a fork reads the trunk
@@ -29,7 +30,7 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import path from "node:path";
 import type { Usage } from "./answerer.js";
-import { killTree, userTurn } from "./claude.js";
+import { killTree, NO_HOOKS, userTurn } from "./claude.js";
 
 /** The only tools a trunk or fork is offered. */
 export const READ_TOOLS = ["Read", "Grep", "Glob", "Agent"];
@@ -38,7 +39,7 @@ export const DISALLOWED_TOOLS = ["Bash", "PowerShell", "Edit", "Write", "Noteboo
 // The tools whose use counts as exploring; Task is the subagent tool's older name.
 const EXPLORING = new Set([...READ_TOOLS, "Task"]);
 
-const READ_ONLY = ["--tools", READ_TOOLS.join(","), "--disallowedTools", DISALLOWED_TOOLS.join(","), "--setting-sources", "", "--strict-mcp-config", "--permission-mode", "dontAsk", "--autocompact", "1000000"];
+const READ_ONLY = ["--tools", READ_TOOLS.join(","), "--disallowedTools", DISALLOWED_TOOLS.join(","), "--setting-sources", "", ...NO_HOOKS, "--strict-mcp-config", "--permission-mode", "dontAsk", "--autocompact", "1000000"];
 const STREAM = ["--input-format", "stream-json", "--output-format", "stream-json", "--verbose"];
 
 // The end of a process's stderr kept for a failure's detail.
@@ -53,7 +54,7 @@ export const appendArgs = (trunk: string, model: string) => ["-p", "--resume", t
 /** A fork of a trunk for one question, never saved. */
 export const expertForkArgs = (trunk: string, model: string) => ["-p", "--resume", trunk, "--fork-session", "--no-session-persistence", "--model", model, ...READ_ONLY, ...STREAM];
 /** The proof's judge: no tools, never saved. */
-export const judgeArgs = (model: string) => ["-p", "--no-session-persistence", "--tools", "", "--setting-sources", "", "--strict-mcp-config", "--permission-mode", "dontAsk", "--model", model, ...STREAM];
+export const judgeArgs = (model: string) => ["-p", "--no-session-persistence", "--tools", "", "--setting-sources", "", ...NO_HOOKS, "--strict-mcp-config", "--permission-mode", "dontAsk", "--model", model, ...STREAM];
 
 /** One finished turn: its reply, what it cost, and the context of its last top-level call (the meter). */
 export interface TurnResult {
