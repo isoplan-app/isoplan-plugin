@@ -196,6 +196,14 @@ export interface ExpertCreationSuggestionLine {
   folder: string;
   url: string;
   why: ExpertCreationSuggestionMessage["why"];
+  /** An office-wide suggestion's: why it is office-wide, which its transcript line says. */
+  officeWideReason?: OfficeWideReason;
+}
+
+/** Why an office-wide suggestion was made: how many sessions in the office, on any machine, searched its folder within the last `searchWindowDays` days. */
+export interface OfficeWideReason {
+  searchedBySessions: number;
+  searchWindowDays: number;
 }
 
 /**

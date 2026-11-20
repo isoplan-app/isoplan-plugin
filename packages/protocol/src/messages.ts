@@ -1248,6 +1248,7 @@ export const CreateExpertFromSuggestionMessageSchema = z.object({
  * those on this runner's machine, newest first, whose work in the folder the draft is made from; the
  * first is the suggestion's `session`. The runner answers with `expert-creation-suggestion`, scope
  * `office`, whose `id` is `request`, or with `expert-creation-suggestion-ended` `no-draft`.
+ * `searchedBySessions` and `searchWindowDays` let the runner say why it is office-wide.
  */
 export const DraftOfficeWideExpertCreationSuggestionMessageSchema = z.object({
   type: z.literal("draft-office-wide-expert-creation-suggestion"),
@@ -1256,6 +1257,10 @@ export const DraftOfficeWideExpertCreationSuggestionMessageSchema = z.object({
   project: ProjectSchema,
   folder: AreaPathSchema,
   sessions: z.array(z.string().min(1)).min(1).max(MAX_EXPERT_CREATION_SUGGESTION_SESSIONS),
+  /** How many sessions in the office, on any machine, searched the folder within the window. */
+  searchedBySessions: z.number().int().positive(),
+  /** The window, in days: the office's `officeWideSuggestionWindowDays`. */
+  searchWindowDays: z.number().positive(),
 });
 
 /**

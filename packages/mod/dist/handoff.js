@@ -7182,6 +7182,7 @@ const CreateExpertFromSuggestionMessageSchema = object({
 * those on this runner's machine, newest first, whose work in the folder the draft is made from; the
 * first is the suggestion's `session`. The runner answers with `expert-creation-suggestion`, scope
 * `office`, whose `id` is `request`, or with `expert-creation-suggestion-ended` `no-draft`.
+* `searchedBySessions` and `searchWindowDays` let the runner say why it is office-wide.
 */
 const DraftOfficeWideExpertCreationSuggestionMessageSchema = object({
 	type: literal("draft-office-wide-expert-creation-suggestion"),
@@ -7189,7 +7190,11 @@ const DraftOfficeWideExpertCreationSuggestionMessageSchema = object({
 	request: ExpertCreationSuggestionId,
 	project: ProjectSchema,
 	folder: AreaPathSchema,
-	sessions: array(string().min(1)).min(1).max(20)
+	sessions: array(string().min(1)).min(1).max(20),
+	/** How many sessions in the office, on any machine, searched the folder within the window. */
+	searchedBySessions: number().int().positive(),
+	/** The window, in days: the office's `officeWideSuggestionWindowDays`. */
+	searchWindowDays: number().positive()
 });
 /**
 * One area this runner's person dismissed: a folder of a project, by its id, lower-cased. "Not now"

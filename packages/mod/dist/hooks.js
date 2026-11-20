@@ -77,6 +77,11 @@ const expertCreationSuggestionStatusLineText = (line) => `${article(line.name)} 
 /** The one transcript line of a suggestion: why it was made, and where to review it. */
 function expertCreationSuggestionTranscriptText(line) {
 	const where = folderWords(line.folder);
+	const wide = line.officeWideReason;
+	if (wide) {
+		const when = wide.searchWindowDays === 7 ? "this week" : `in the last ${wide.searchWindowDays} days`;
+		return `Isoplan: ${wide.searchedBySessions} sessions ${when} searched ${where}. ${article(line.name)} ${line.name} could answer questions about ${where} without searching it again. Review it: ${line.url} (or type /isoplan:review-expert-suggestion)`;
+	}
 	const { minutes, share, tokens: used, corrections } = line.why;
 	const m = Math.round(minutes);
 	const spent = [m >= 1 ? `about ${m} minute${m === 1 ? "" : "s"}` : null, share >= .01 ? `${Math.round(share * 100)}% of its context` : used > 0 ? `about ${tokens(used)} tokens` : null].filter((x) => x !== null);

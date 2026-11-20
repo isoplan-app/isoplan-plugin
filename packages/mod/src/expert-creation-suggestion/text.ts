@@ -4,7 +4,8 @@
 // expert by its display name, with "a" or "an" before it, and the folder as the floor does: "." is
 // the repo's top folder. Why it was suggested follows the floor's review card: about how many
 // minutes, and the share of the session's context or, without one, about how many tokens, that
-// the session spent there, and how often its person corrected the agent there.
+// the session spent there, and how often its person corrected the agent there; for an office-wide
+// suggestion, how many sessions searched the folder and over how many days.
 
 import type { ExpertCreationSuggestionLine, ExpertReadyLine } from "../lines.js";
 
@@ -27,6 +28,11 @@ export const expertCreationSuggestionStatusLineText = (line: ExpertCreationSugge
 /** The one transcript line of a suggestion: why it was made, and where to review it. */
 export function expertCreationSuggestionTranscriptText(line: ExpertCreationSuggestionLine): string {
   const where = folderWords(line.folder);
+  const wide = line.officeWideReason;
+  if (wide) {
+    const when = wide.searchWindowDays === 7 ? "this week" : `in the last ${wide.searchWindowDays} days`;
+    return `Isoplan: ${wide.searchedBySessions} sessions ${when} searched ${where}. ${article(line.name)} ${line.name} could answer questions about ${where} without searching it again. Review it: ${line.url} (or type /isoplan:review-expert-suggestion)`;
+  }
   const { minutes, share, tokens: used, corrections } = line.why;
   const m = Math.round(minutes);
   const spent = [m >= 1 ? `about ${m} minute${m === 1 ? "" : "s"}` : null, share >= 0.01 ? `${Math.round(share * 100)}% of its context` : used > 0 ? `about ${tokens(used)} tokens` : null].filter((x) => x !== null);

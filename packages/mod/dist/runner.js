@@ -7247,6 +7247,7 @@ const CreateExpertFromSuggestionMessageSchema = object({
 * those on this runner's machine, newest first, whose work in the folder the draft is made from; the
 * first is the suggestion's `session`. The runner answers with `expert-creation-suggestion`, scope
 * `office`, whose `id` is `request`, or with `expert-creation-suggestion-ended` `no-draft`.
+* `searchedBySessions` and `searchWindowDays` let the runner say why it is office-wide.
 */
 const DraftOfficeWideExpertCreationSuggestionMessageSchema = object({
 	type: literal$1("draft-office-wide-expert-creation-suggestion"),
@@ -7254,7 +7255,11 @@ const DraftOfficeWideExpertCreationSuggestionMessageSchema = object({
 	request: ExpertCreationSuggestionId,
 	project: ProjectSchema,
 	folder: AreaPathSchema,
-	sessions: array(string().min(1)).min(1).max(20)
+	sessions: array(string().min(1)).min(1).max(20),
+	/** How many sessions in the office, on any machine, searched the folder within the window. */
+	searchedBySessions: number().int().positive(),
+	/** The window, in days: the office's `officeWideSuggestionWindowDays`. */
+	searchWindowDays: number().positive()
 });
 /**
 * One area this runner's person dismissed: a folder of a project, by its id, lower-cased. "Not now"
@@ -16853,7 +16858,8 @@ function createExpertCreationSuggestions(o) {
 			name: expertDisplayName(r.key),
 			folder: r.folder,
 			url: reviewUrl(server, r.id),
-			why: r.message.why
+			why: r.message.why,
+			...r.officeWideReason && { officeWideReason: r.officeWideReason }
 		};
 	};
 	const tell = (r, line) => r.bare ? o.hooked(r.bare)?.send(line) : void 0;
@@ -17052,12 +17058,16 @@ function createExpertCreationSuggestions(o) {
 		const window = windowOf(s);
 		const at = now();
 		forget(t, at);
+		const passing = s.areas.map((area) => ({
+			area,
+			project: area.project ?? s.project,
+			why: signalsOf(area, window)
+		})).filter((c) => passes(c.why, t));
+		const deepest = passing.filter((c) => !passing.some((d) => d.project.id.toLowerCase() === c.project.id.toLowerCase() && d.area.folder !== c.area.folder && areaCovers([c.area.folder], d.area.folder)));
 		const candidates = [];
-		for (const area of s.areas) {
-			const project = area.project ?? s.project;
+		for (const { area, project, why } of deepest) {
 			const id = project.id.toLowerCase();
-			const why = signalsOf(area, window);
-			if (!passes(why, t) || alreadySuggestedNear(s.session, id, area.folder, at) || heldNear(s.session, id, area.folder, at)) continue;
+			if (alreadySuggestedNear(s.session, id, area.folder, at) || heldNear(s.session, id, area.folder, at)) continue;
 			if (offices.some((f) => isDismissed(f.dismissals, id, area.folder, at))) continue;
 			if (await coveredHere(id, area.folder)) continue;
 			candidates.push({
@@ -17153,7 +17163,13 @@ function createExpertCreationSuggestions(o) {
 				at: now(),
 				expertCreationSuggestionId: m.request
 			});
-			saved.expertCreationSuggestions.push(record(message, first.startsWith("claude-code:") ? first.slice(12) : null, [server]));
+			saved.expertCreationSuggestions.push({
+				...record(message, first.startsWith("claude-code:") ? first.slice(12) : null, [server]),
+				officeWideReason: {
+					searchedBySessions: m.searchedBySessions,
+					searchWindowDays: m.searchWindowDays
+				}
+			});
 			await save();
 			flush(index);
 		} finally {

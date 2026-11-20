@@ -192,6 +192,22 @@ test("no expert is suggested on a folder the person dismissed, whatever the lett
   expect(h.sentExpertCreationSuggestions()).toEqual([]);
 });
 
+test("a folder whose reads were all in a passing folder the person dismissed is never suggested for them", async () => {
+  const h = await harness();
+  h.expertCreationSuggestions.take(0, dismissals([{ project: PROJECT.id, folder: "src/shipping", forever: true }]));
+  h.expertCreationSuggestions.seen(h.seen([area("src", 35000), area("src/shipping", 35000)]));
+  await sleep(30);
+  expect(h.drafts).toEqual([]);
+});
+
+test("a folder whose reads are spread over folders inside it that don't pass on their own is suggested", async () => {
+  const h = await harness();
+  h.expertCreationSuggestions.take(0, dismissals());
+  h.expertCreationSuggestions.seen(h.seen([area("src", 35000), area("src/parser", 20000), area("src/lexer", 15000)]));
+  await until(() => h.drafts.length === 1);
+  expect(h.drafts[0]!.folder).toBe("src");
+});
+
 test("a folder whose draft couldn't be made waits RETRY_MS for that session, with the folders inside and above it, a restart included, then is tried again", async () => {
   let clock = Date.now();
   const h = await harness({ now: () => clock });
@@ -382,7 +398,7 @@ test("the folder of a suggestion every office it went to refused may be suggeste
   expect(idOf(again.sentExpertCreationSuggestions()[0]!)).not.toBe(id);
 });
 
-const draftOfficeWideExpertCreationSuggestion = (request: string, folder: string, sessions: string[]): DraftOfficeWideExpertCreationSuggestionMessage => ({ type: "draft-office-wide-expert-creation-suggestion", v: PROTOCOL_VERSION, request, project: PROJECT, folder, sessions });
+const draftOfficeWideExpertCreationSuggestion = (request: string, folder: string, sessions: string[]): DraftOfficeWideExpertCreationSuggestionMessage => ({ type: "draft-office-wide-expert-creation-suggestion", v: PROTOCOL_VERSION, request, project: PROJECT, folder, sessions, searchedBySessions: 3, searchWindowDays: 14 });
 
 test("draft-office-wide-expert-creation-suggestion: an office-wide suggestion is drafted from the newest of its sessions this runner reported to that office, once however often it is asked, and goes to that office alone, with the request's id; one with no draft is answered no-draft", async () => {
   const h = await harness();
@@ -403,6 +419,21 @@ test("draft-office-wide-expert-creation-suggestion: an office-wide suggestion is
   h.expertCreationSuggestions.take(1, draftOfficeWideExpertCreationSuggestion("office-2", "docs", ["claude-code:s1"]));
   await until(() => h.sent.some((s) => s.message.type === "expert-creation-suggestion-ended"));
   expect(h.sent.at(-1)).toEqual({ server: B, message: { type: "expert-creation-suggestion-ended", v: PROTOCOL_VERSION, id: "office-2", why: "no-draft" } });
+});
+
+test("draft-office-wide-expert-creation-suggestion: its session's line, and its file, say how many sessions searched the folder and over how many days, a restart included", async () => {
+  const h = await harness();
+  h.expertCreationSuggestions.take(0, dismissals());
+  h.expertCreationSuggestions.take(0, draftOfficeWideExpertCreationSuggestion("office-4", "src/parser", ["claude-code:s1"]));
+  await until(() => h.lines.length === 1);
+  const reason = { searchedBySessions: 3, searchWindowDays: 14 };
+  expect(h.lines[0]!.line).toMatchObject({ type: "expert-creation-suggestion", id: "office-4", officeWideReason: reason });
+  expect(JSON.parse(fs.readFileSync(path.join(h.isoplanDir, "expert-creation-suggestions", "s1.json"), "utf8")).expertCreationSuggestions[0].officeWideReason).toEqual(reason);
+  await sleep(30);
+  const again = await harness({}, h.root);
+  again.expertCreationSuggestions.rehooked("s1");
+  await until(() => again.lines.length === 1);
+  expect(again.lines[0]!.line).toMatchObject({ id: "office-4", officeWideReason: reason });
 });
 
 test("draft-office-wide-expert-creation-suggestion: a draft that throws is answered no-draft at once, saying why", async () => {

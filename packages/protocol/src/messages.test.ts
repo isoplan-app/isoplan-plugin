@@ -293,7 +293,7 @@ const valid = {
   "expert-creation-progress": { type: "expert-creation-progress", v, request: "make-x-0123456789", expertCreationSuggestionId: "o-4f9c2a", state: "grounding" },
   "expert-creation-progress failed": { type: "expert-creation-progress", v, request: "make-x-0123456789", expertCreationSuggestionId: "o-4f9c2a", state: "failed", detail: "This computer has no checkout of isoplan." },
   "create-expert-from-suggestion": createExpertFromSuggestion,
-  "draft-office-wide-expert-creation-suggestion": { type: "draft-office-wide-expert-creation-suggestion", v, request: "draft-x-0123456789", project: isoplan, folder: "packages/client/src/view", sessions: ["claude-code:s3", "claude-code:s1"] },
+  "draft-office-wide-expert-creation-suggestion": { type: "draft-office-wide-expert-creation-suggestion", v, request: "draft-x-0123456789", project: isoplan, folder: "packages/client/src/view", sessions: ["claude-code:s3", "claude-code:s1"], searchedBySessions: 3, searchWindowDays: 14 },
   "expert-creation-suggestion-dismissals": { type: "expert-creation-suggestion-dismissals", v, dismissals: [{ project: isoplan.id, folder: "packages/server/src/pairing", until: "2026-12-19T09:00:00.000Z" }, { project: isoplan.id, folder: "docs", forever: true }] },
   "expert-creation-suggestion-ended made": { type: "expert-creation-suggestion-ended", v, id: "o-4f9c2a", why: "made", key: "pairing-tokens" },
   "expert-creation-suggestion-ended expired": { type: "expert-creation-suggestion-ended", v, id: "o-4f9c2a", why: "expired" },
@@ -1173,6 +1173,16 @@ describe("expert creation suggestions", () => {
     const dismissals = (n: number) => Array.from({ length: n }, (_, i) => ({ project: isoplan.id, folder: `packages/p${i}`, forever: true }));
     for (const n of [0, MAX_EXPERT_CREATION_SUGGESTION_DISMISSALS]) expect(parseOfficeServerMessage({ ...valid["expert-creation-suggestion-dismissals"], dismissals: dismissals(n) })).toMatchObject({ ok: true });
     expect(parseOfficeServerMessage({ ...valid["expert-creation-suggestion-dismissals"], dismissals: dismissals(MAX_EXPERT_CREATION_SUGGESTION_DISMISSALS + 1) })).toMatchObject({ ok: false, kind: "invalid" });
+  });
+
+  test("a draft-office-wide-expert-creation-suggestion says how many sessions searched the folder, a positive whole number, within how many days, a positive number", () => {
+    const draft = valid["draft-office-wide-expert-creation-suggestion"];
+    expect(parseOfficeServerMessage({ ...draft, searchedBySessions: 2, searchWindowDays: 0.5 })).toMatchObject({ ok: true });
+    const { searchedBySessions: _, ...noCount } = draft;
+    const { searchWindowDays: __, ...noWindow } = draft;
+    for (const message of [noCount, noWindow, { ...draft, searchedBySessions: 0 }, { ...draft, searchedBySessions: 2.5 }, { ...draft, searchWindowDays: 0 }, { ...draft, searchWindowDays: -1 }]) {
+      expect(parseOfficeServerMessage(message)).toMatchObject({ ok: false, kind: "invalid" });
+    }
   });
 
   test("only an expert creation suggestion whose expert was made names its expert's key, and it must", () => {

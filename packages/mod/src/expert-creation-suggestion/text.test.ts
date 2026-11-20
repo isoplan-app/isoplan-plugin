@@ -25,6 +25,11 @@ test("the transcript line says what the session spent on the folder, and how oft
   expect(expertCreationSuggestionTranscriptText(line({ minutes: 12 }))).toBe("Isoplan: this session has spent about 12 minutes on src/parser. A Parser Expert could answer questions about src/parser without searching it again. Review it: http://127.0.0.1:4747/?expert-creation-suggestion=o1 (or type /isoplan:review-expert-suggestion)");
 });
 
+test("an office-wide suggestion's transcript line says how many sessions searched the folder, this week or in the last so many days", () => {
+  expect(expertCreationSuggestionTranscriptText(line({ minutes: 12 }, { officeWideReason: { searchedBySessions: 3, searchWindowDays: 7 } }))).toBe("Isoplan: 3 sessions this week searched src/parser. A Parser Expert could answer questions about src/parser without searching it again. Review it: http://127.0.0.1:4747/?expert-creation-suggestion=o1 (or type /isoplan:review-expert-suggestion)");
+  expect(reason(line({}, { folder: ".", officeWideReason: { searchedBySessions: 2, searchWindowDays: 14 } }))).toBe("Isoplan: 2 sessions in the last 14 days searched the repo's top folder");
+});
+
 test("a name that starts with a vowel takes an", () => {
   expect(expertCreationSuggestionStatusLineText(line({}, { key: "adr-0004", name: "Adr 0004 Expert" }))).toBe("An Adr 0004 Expert could help · review: http://127.0.0.1:4747/?expert-creation-suggestion=o1");
   expect(expertCreationSuggestionStatusLineText(line({}))).toBe("A Parser Expert could help · review: http://127.0.0.1:4747/?expert-creation-suggestion=o1");

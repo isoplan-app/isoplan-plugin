@@ -10,8 +10,12 @@
 //   searches took is `contextShare` of the session's context window or more (the window its hooks
 //   module said, else its model's, expert-meter.ts), or `tokens`; or its calls took `minutes`; or
 //   the person corrected the agent there `corrections` times: runner.json's `expertCreationSuggestions`.
-//   Of the folders that pass, the deepest is suggested. Never one already suggested to the session,
-//   or one inside or above it; never one the person dismissed in any office
+//   A read counts in every folder its folder is in, so of the folders that pass, only those with no
+//   other passing folder of the same repo inside them are candidates (the protocol's areaCovers, the
+//   rule the office uses for office-wide suggestions), before any is ruled out below: a folder whose
+//   reads were all in a dismissed folder is never suggested for them, while one whose reads are
+//   spread over folders that don't pass on their own still is. Of the candidates, the deepest is
+//   suggested. Never one already suggested to the session, or one inside or above it; never one the person dismissed in any office
 //   (`expert-creation-suggestion-dismissals`: until its time, or for good), nor one inside it, by the
 //   protocol's isDismissed, the rule the office uses too; and never one an expert on this computer
 //   covers, by its file's areas (the protocol's areaCovers, the rule the office uses too). The
@@ -44,7 +48,9 @@
 // - An office that sees several sessions search one folder asks the runner of the latest to draft
 //   an office-wide suggestion (`draft-office-wide-expert-creation-suggestion`): drafted the same
 //   way, from the newest of those sessions this runner reported to it, it goes to that office alone
-//   as scope `office`, with the request's id, or `no-draft` goes back when none could be made. The
+//   as scope `office`, with the request's id, or `no-draft` goes back when none could be made. How
+//   many sessions on any machine searched the folder, and the window in days, from the request, are
+//   kept with it for its session's line (ExpertCreationSuggestionLine `officeWideReason`). The
 //   same request again, while one is being drafted or once it was, changes nothing.
 // - An office ends a suggestion it won't keep at once: `refused` (the repo isn't taken there, the
 //   session is someone else's, and the like), or `made` with the key of an expert that covers its
@@ -120,7 +126,7 @@ import {
 } from "@isoplan/protocol";
 import type { RunnerExpertCreationSuggestionMessage, ServerExpertCreationSuggestionMessage } from "../data-layer/link.js";
 import type { SessionAreas } from "../data-layer/report-session.js";
-import type { DataLayerLine, ExpertCreationSuggestionLine } from "../lines.js";
+import type { DataLayerLine, ExpertCreationSuggestionLine, OfficeWideReason } from "../lines.js";
 import { parseExpertFile } from "./expert-file.js";
 import { windowFor } from "./expert-meter.js";
 import { readState } from "./expert-state.js";
@@ -345,6 +351,8 @@ interface ExpertCreationSuggestionRecord {
   told?: boolean;
   /** When the last office it went to refused it: from RETRY_MS after, its folder may be suggested to its session again. */
   refusedAt?: number;
+  /** An office-wide suggestion's: how many sessions searched its folder, and over how many days, as its draft request said. */
+  officeWideReason?: OfficeWideReason;
 }
 
 interface Saved {
@@ -432,7 +440,7 @@ export function createExpertCreationSuggestions(o: ExpertCreationSuggestionsOpti
   // What the session's hooks module is told of a suggestion open in one office.
   const lineOf = (r: ExpertCreationSuggestionRecord, server: string): ExpertCreationSuggestionLine => {
     const label = o.offices[indexOf(server)]?.label;
-    return { type: "expert-creation-suggestion", server, ...(label && { label }), id: r.id, key: r.key, name: expertDisplayName(r.key), folder: r.folder, url: reviewUrl(server, r.id), why: r.message.why };
+    return { type: "expert-creation-suggestion", server, ...(label && { label }), id: r.id, key: r.key, name: expertDisplayName(r.key), folder: r.folder, url: reviewUrl(server, r.id), why: r.message.why, ...(r.officeWideReason && { officeWideReason: r.officeWideReason }) };
   };
   const tell = (r: ExpertCreationSuggestionRecord, line: DataLayerLine) => (r.bare ? o.hooked(r.bare)?.send(line) : undefined);
 
@@ -621,8 +629,9 @@ export function createExpertCreationSuggestions(o: ExpertCreationSuggestionsOpti
     offices: Object.fromEntries([...servers].map((s) => [s, "pending" as const])),
   });
 
-  // A session's pass, once the office it came for has said its person's dismissals: the deepest
-  // folder that passes, not already suggested, held, dismissed or covered, is drafted and suggested.
+  // A session's pass, once the office it came for has said its person's dismissals: of the folders
+  // that pass with no other passing folder inside them, the deepest not already suggested, held,
+  // dismissed or covered is drafted and suggested.
   async function consider(s: SessionAreas) {
     const index = indexOf(s.server);
     if (!offices[index]!.ready) return;
@@ -630,12 +639,14 @@ export function createExpertCreationSuggestions(o: ExpertCreationSuggestionsOpti
     const window = windowOf(s);
     const at = now();
     forget(t, at);
+    const passing = s.areas.map((area) => ({ area, project: area.project ?? s.project, why: signalsOf(area, window) })).filter((c) => passes(c.why, t));
+    // A read counts in every folder its folder is in (the session's area facts), so of the folders
+    // that pass only the deepest are candidates: never a parent on the strength of a child excluded below.
+    const deepest = passing.filter((c) => !passing.some((d) => d.project.id.toLowerCase() === c.project.id.toLowerCase() && d.area.folder !== c.area.folder && areaCovers([c.area.folder], d.area.folder)));
     const candidates: { area: AreaFact; project: Project; why: Why }[] = [];
-    for (const area of s.areas) {
-      const project = area.project ?? s.project;
+    for (const { area, project, why } of deepest) {
       const id = project.id.toLowerCase();
-      const why = signalsOf(area, window);
-      if (!passes(why, t) || alreadySuggestedNear(s.session, id, area.folder, at) || heldNear(s.session, id, area.folder, at)) continue;
+      if (alreadySuggestedNear(s.session, id, area.folder, at) || heldNear(s.session, id, area.folder, at)) continue;
       if (offices.some((f) => isDismissed(f.dismissals, id, area.folder, at))) continue;
       if (await coveredHere(id, area.folder)) continue;
       candidates.push({ area, project, why });
@@ -685,7 +696,7 @@ export function createExpertCreationSuggestions(o: ExpertCreationSuggestionsOpti
       const first = m.sessions[0]!;
       // Its session isn't suggested the same folder again on its own.
       saved.foldersAlreadySuggested.push({ session: first, project, folder: m.folder, at: now(), expertCreationSuggestionId: m.request });
-      saved.expertCreationSuggestions.push(record(message, first.startsWith("claude-code:") ? first.slice("claude-code:".length) : null, [server]));
+      saved.expertCreationSuggestions.push({ ...record(message, first.startsWith("claude-code:") ? first.slice("claude-code:".length) : null, [server]), officeWideReason: { searchedBySessions: m.searchedBySessions, searchWindowDays: m.searchWindowDays } });
       await save();
       flush(index);
     } finally {
