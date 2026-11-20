@@ -60,6 +60,36 @@ function lateExpertText(m) {
 	return `Isoplan: expert ${m.expert} won't answer your question ${m.question}. ${asked}${expertText(m.code ?? "EXPERT_DROPPED", about)}`;
 }
 //#endregion
+//#region src/expert-creation-suggestion/text.ts
+const article = (name) => /^[aeiou]/i.test(name) ? "An" : "A";
+/** A folder as the copy names it: "." is the repo's top folder. */
+const folderWords = (folder) => folder === "." ? "the repo's top folder" : folder;
+const times = (n) => n === 1 ? "once" : n === 2 ? "twice" : `${n} times`;
+function tokens(n) {
+	const one = (x) => String(Math.round(x * 10) / 10);
+	if (n < 1e3) return String(n);
+	if (n < 9950) return one(n / 1e3) + "k";
+	if (n < 999500) return Math.round(n / 1e3) + "k";
+	return one(n / 1e6) + "M";
+}
+/** The suggestion's part of the status line, after its office's part. */
+const expertCreationSuggestionStatusLineText = (line) => `${article(line.name)} ${line.name} could help · review: ${line.url}`;
+/** The one transcript line of a suggestion: why it was made, and where to review it. */
+function expertCreationSuggestionTranscriptText(line) {
+	const where = folderWords(line.folder);
+	const wide = line.officeWideReason;
+	if (wide) {
+		const when = wide.searchWindowDays === 7 ? "this week" : `in the last ${wide.searchWindowDays} days`;
+		return `Isoplan: ${wide.searchedBySessions} sessions ${when} searched ${where}. ${article(line.name)} ${line.name} could answer questions about ${where} without searching it again. Review it: ${line.url} (or type /isoplan:review-expert-suggestion)`;
+	}
+	const { minutes, share, tokens: used, corrections } = line.why;
+	const m = Math.round(minutes);
+	const spent = [m >= 1 ? `about ${m} minute${m === 1 ? "" : "s"}` : null, share >= .01 ? `${Math.round(share * 100)}% of its context` : used > 0 ? `about ${tokens(used)} tokens` : null].filter((x) => x !== null);
+	return `Isoplan: ${spent.length ? `this session has spent ${spent.join(" and ")} on ${where}${corrections > 0 ? `, and you corrected it ${times(corrections)} there` : ""}` : corrections > 0 ? `you corrected this session ${times(corrections)} while it worked in ${where}` : `this session has searched ${where}`}. ${article(line.name)} ${line.name} could answer questions about ${where} without searching it again. Review it: ${line.url} (or type /isoplan:review-expert-suggestion)`;
+}
+/** The note on a later tool result once the expert created from the session's suggestion is ready. */
+const readyNoteText = (line) => `Isoplan: the ${line.name} is ready. Ask it with ask_expert, expert "${line.key}", before you search ${folderWords(line.folder)} again.`;
+//#endregion
 //#region src/lines.ts
 /** How long after a `superseded` line its hooks module tries again (src/hooks/register.ts). */
 const SUPERSEDED_RECHECK_MS = 6e4;
@@ -110,6 +140,9 @@ let lastError = null;
 const pairings = /* @__PURE__ */ new Map();
 const pairSaid = /* @__PURE__ */ new Set();
 const offices = /* @__PURE__ */ new Map();
+const openExpertCreationSuggestionsByOffice = /* @__PURE__ */ new Map();
+const expertCreationSuggestionsPutInTranscript = /* @__PURE__ */ new Set();
+const readyTold = /* @__PURE__ */ new Set();
 const floorWaits = /* @__PURE__ */ new Map();
 const questionCalls = /* @__PURE__ */ new Set();
 let waitsDir = null;
@@ -411,6 +444,7 @@ async function run($) {
 			expertFailures = 0;
 		}
 		offices.clear();
+		openExpertCreationSuggestionsByOffice.clear();
 		running = session;
 		lead = `claude-code:${session}:lead`;
 		let switched = false;
@@ -511,6 +545,7 @@ function handle($, text) {
 		case "runner":
 			offices.clear();
 			pairings.clear();
+			openExpertCreationSuggestionsByOffice.clear();
 			show($, line.state === "down" ? RUNNER_DOWN_TEXT[line.held ?? "starting"] : statusText());
 			break;
 		case "title-ask":
@@ -528,6 +563,16 @@ function handle($, text) {
 			break;
 		case "conflict":
 			addNote(line);
+			break;
+		case "expert-creation-suggestion":
+			addExpertCreationSuggestion($, line);
+			break;
+		case "expert-creation-suggestion-ended":
+			openExpertCreationSuggestionsByOffice.get(line.server)?.delete(line.id);
+			show($, statusText());
+			break;
+		case "expert-ready":
+			expertReady($, line);
 			break;
 		case "asked":
 			addReply($, line);
@@ -576,8 +621,32 @@ const RUNNER_DOWN_TEXT = {
 };
 const EARLIER_TEXT = "Isoplan: an earlier copy of Isoplan reports this session until this window reloads: type /reload-plugins";
 function statusText() {
-	const parts = [...offices.values()].filter(Boolean);
+	const parts = [];
+	const linked = /* @__PURE__ */ new Set();
+	for (const [server, part] of offices) {
+		if (!part) continue;
+		parts.push(part);
+		const suggestion = [...openExpertCreationSuggestionsByOffice.get(server)?.values() ?? []].reverse().find((o) => !linked.has(o.id));
+		if (!suggestion) continue;
+		linked.add(suggestion.id);
+		parts.push(expertCreationSuggestionStatusLineText(suggestion));
+	}
 	return parts.length ? `Isoplan: ${parts.join(" · ")}` : void 0;
+}
+function addExpertCreationSuggestion($, line) {
+	let open = openExpertCreationSuggestionsByOffice.get(line.server);
+	if (!open) openExpertCreationSuggestionsByOffice.set(line.server, open = /* @__PURE__ */ new Map());
+	open.set(line.id, line);
+	if (!expertCreationSuggestionsPutInTranscript.has(line.id)) $.ui.log(expertCreationSuggestionTranscriptText(line));
+	expertCreationSuggestionsPutInTranscript.add(line.id);
+	show($, statusText());
+}
+function expertReady($, line) {
+	for (const open of openExpertCreationSuggestionsByOffice.values()) open.delete(line.id);
+	show($, statusText());
+	if (!lead || readyTold.has(line.id)) return;
+	readyTold.add(line.id);
+	notes.set(lead, [...notes.get(lead) ?? [], readyNoteText(line)]);
 }
 function officeText(line) {
 	const label = line.label ?? line.server;

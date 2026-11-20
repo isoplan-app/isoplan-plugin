@@ -2,7 +2,7 @@
 // file with protocol and zod inlined, so the plugin runs from a git checkout with no install step,
 // plus dist/data-layer.js (kept for older code: src/data-layer/main.ts), the
 // wake hook (which install copies into the config folder), the install script, the runner, the
-// handoff commands' script, the ask_earlier_session tool's script, the ask_expert tool's script, the isoplan:// link handler (src/connect) and /isoplan:repos's script.
+// handoff commands' script, the ask_earlier_session tool's script, the ask_expert tool's script, the isoplan:// link handler (src/connect), /isoplan:repos's script and /isoplan:review-expert-suggestion's.
 // dist/ is committed: rebuild it with every change to src/.
 
 import { build } from "rolldown";
@@ -22,4 +22,5 @@ await build([
   { ...common, input: "src/ask/expert-main.ts", output: { ...output, file: "dist/ask-expert.js" } },
   { ...common, input: "src/connect/main.ts", output: { ...output, file: "dist/connect.js" } },
   { ...common, input: "src/repos/main.ts", output: { ...output, file: "dist/repos.js" } },
+  { ...common, input: "src/expert-creation-suggestion/main.ts", output: { ...output, file: "dist/review-expert-creation-suggestion.js" } },
 ]);

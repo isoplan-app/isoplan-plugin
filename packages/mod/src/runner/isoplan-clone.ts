@@ -24,6 +24,9 @@
 //   New session, nor taken for the clone a take works beside (repo-folders.ts isoplanFolder).
 // - The person's checkout is only read: its origin and where its objects are. One make or fetch at
 //   a time for each project, so two starts at once don't both clone.
+// - Make expert on a computer with no checkout of the repo (runner/expert-creation-suggestions.ts) asks for it from an
+//   address instead, for the expert alone: cloned from it borrowing nothing, or one already there
+//   fetched with its own origin left as it is. When git fails its own words come back as `reason`.
 
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
@@ -70,25 +73,30 @@ export interface IsoplanClonesOptions {
   platform?: NodeJS.Platform;
 }
 
-/** Isoplan's clone of `project`, from the person's `checkout`, made or fetched now: its folder, or why there is none, in words for the floor. */
-export type IsoplanClone = (checkout: string, project: string) => Promise<string | { problem: string }>;
+/** Isoplan's clone of `project`, from the origin of the person's checkout, or from `{ url }` where there is none, made or fetched now: its folder, or why there is none, in words for the floor, with git's own words when git failed. */
+export type IsoplanClone = (from: string | { url: string }, project: string) => Promise<string | { problem: string; reason?: string }>;
 
 export function createIsoplanClones({ git, claudeDir, clonesFolder = "", clonesFolders = [], timeoutMs, log, cloneFrom = onTheWire, platform = process.platform }: IsoplanClonesOptions): IsoplanClone {
   const busy = new Map<string, Promise<unknown>>();
   const run = async (cwd: string, args: string[]) => git(args, { cwd, timeoutMs: await timeoutMs() });
   const why = (r: { timedOut: boolean; stderr: string }) => `${r.timedOut ? "git took too long" : "git failed"}: ${r.stderr.trim()}`;
 
-  async function ready(checkout: string, project: string): Promise<string | { problem: string }> {
-    const remote = await run(checkout, ["remote", "get-url", "origin"]);
-    // Exit 2 is git's "no such remote"; anything else is a failure, not a repo without one.
-    if (remote.code === 2) return { problem: NO_REMOTE };
-    if (remote.code !== 0) {
-      log(`couldn't read the origin of ${checkout} for Isoplan's own clone of ${project} (${why(remote)})`);
-      return { problem: NOT_MADE };
+  async function ready(from: string | { url: string }, project: string): Promise<string | { problem: string; reason?: string }> {
+    const checkout = typeof from === "string" ? from : null;
+    let url: string;
+    if (checkout === null) url = (from as { url: string }).url;
+    else {
+      const remote = await run(checkout, ["remote", "get-url", "origin"]);
+      // Exit 2 is git's "no such remote"; anything else is a failure, not a repo without one.
+      if (remote.code === 2) return { problem: NO_REMOTE };
+      if (remote.code !== 0) {
+        log(`couldn't read the origin of ${checkout} for Isoplan's own clone of ${project} (${why(remote)})`);
+        return { problem: NOT_MADE, reason: why(remote) };
+      }
+      url = remote.stdout.trim();
     }
-    const url = remote.stdout.trim();
     if (!cloneFrom(url)) {
-      log(`didn't clone ${project} for a hidden start: ${checkout}'s origin, ${url}, isn't an https, ssh or host:path remote`);
+      log(`didn't clone ${project} for Isoplan's own clone: ${checkout ? `${checkout}'s origin, ` : ""}${url}, isn't an https, ssh or host:path remote`);
       return { problem: NOT_ON_WIRE };
     }
     // One made earlier is used where it is, at its name then: under <claude dir>/isoplan, or in a folder clonesFolder names or named before.
@@ -103,12 +111,13 @@ export function createIsoplanClones({ git, claudeDir, clonesFolder = "", clonesF
         log(`${clone} is there already and isn't a clone of its own, so it was left as it is and the hidden start of ${project} was refused; remove it and Isoplan clones it again`);
         return { problem: NOT_MADE };
       }
-      const set = await run(clone, ["remote", "set-url", "origin", url]);
+      // From an address, its origin is left as it is: the address may be another form of the same repo.
+      const set = checkout ? await run(clone, ["remote", "set-url", "origin", url]) : { code: 0, stdout: "", stderr: "", timedOut: false };
       if (set.code === 0) await keepLongPaths((args) => run(clone, args), platform, (why) => log(`couldn't turn on long paths in Isoplan's own clone ${clone} (${why})`));
       const fetched = set.code === 0 ? await run(clone, ["fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"]) : set;
       if (fetched.code !== 0) {
         log(`couldn't fetch origin in Isoplan's own clone ${clone} (${why(fetched)})`);
-        return { problem: NOT_FETCHED };
+        return { problem: NOT_FETCHED, reason: why(fetched) };
       }
       return clone;
     }
@@ -117,25 +126,26 @@ export function createIsoplanClones({ git, claudeDir, clonesFolder = "", clonesF
     await fs.rm(staging, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     const long = longPaths(platform);
     const clean = () => fs.rm(staging, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-    const made = await cloneBorrowing((borrow) => run(root, [...long.git, "clone", "-q", ...long.clone, ...borrow, "--", url, staging]), await borrowFrom(run, checkout), clean);
+    const cloneWith = (borrow: string[]) => run(root, [...long.git, "clone", "-q", ...long.clone, ...borrow, "--", url, staging]);
+    const made = checkout ? await cloneBorrowing(cloneWith, await borrowFrom(run, checkout), clean) : await cloneWith([]);
     if (made.code !== 0) {
-      log(`couldn't clone ${project} into ${staging} for a hidden start (${why(made)})`);
+      log(`couldn't clone ${project} into ${staging} for Isoplan's own clone (${why(made)})`);
       await fs.rm(staging, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => {});
-      return { problem: NOT_MADE };
+      return { problem: NOT_MADE, reason: why(made) };
     }
     await renamed(staging, clone);
     log(`made Isoplan's own clone of ${project} in ${clone}`);
     return clone;
   }
 
-  return (checkout, project) => {
+  return (from, project) => {
     const key = cloneName(project);
     // Each one never rejects, so the next always runs.
     const next = (busy.get(key) ?? Promise.resolve())
-      .then(() => ready(checkout, project))
+      .then(() => ready(from, project))
       .catch((err: Error) => {
         log(`Isoplan's own clone of ${project} failed: ${err?.stack ?? String(err)}`);
-        return { problem: NOT_MADE };
+        return { problem: NOT_MADE, reason: err?.message ?? String(err) };
       });
     busy.set(key, next);
     void next.then(() => busy.get(key) === next && busy.delete(key));

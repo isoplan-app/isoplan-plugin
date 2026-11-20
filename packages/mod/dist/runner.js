@@ -8,6 +8,37 @@ import http from "node:http";
 import fs$1, { realpath, statSync } from "node:fs";
 import { promisify } from "node:util";
 import net from "node:net";
+//#region ../protocol/dist/area-covers.js
+/**
+* Whether an expert's `areas` (AreaPathSchema: folders and globs) cover `folder`, relative to the
+* same repo's root: one area's part before its first wildcard part (one with any of `* ? [ ] { }`)
+* is the folder or a folder it is in. `.`, or an area that starts with a wildcard, covers every
+* folder. Letter case is ignored, as Windows and macOS ignore it.
+*/
+function areaCovers(areas, folder) {
+	const target = folder.toLowerCase();
+	return areas.some((area) => {
+		const parts = area.toLowerCase().split("/");
+		const wild = parts.findIndex((part) => /[*?[\]{}]/.test(part));
+		const base = (wild < 0 ? parts : parts.slice(0, wild)).join("/") || ".";
+		return base === "." || target === base || target.startsWith(base + "/");
+	});
+}
+//#endregion
+//#region ../protocol/dist/dismissals.js
+/**
+* Whether `list` holds a dismissal of `folder` (relative to the repo's root) of `project` at `now`
+* (ms since the epoch): one for the same project, its folder that folder or one it is in (`.` every
+* folder), and for good or `until` a time later than now. Letter case is ignored, as in `areaCovers`.
+*/
+function isDismissed(list, project, folder, now) {
+	const target = folder.toLowerCase();
+	return list.some((d) => {
+		const base = d.folder.toLowerCase();
+		return d.project.toLowerCase() === project.toLowerCase() && (base === "." || target === base || target.startsWith(base + "/")) && (d.forever === true || Date.parse(d.until ?? "") > now);
+	});
+}
+//#endregion
 //#region ../../node_modules/.pnpm/zod@4.6.7/node_modules/zod/v4/core/util.js
 function getEnumValues(entries) {
 	const numericValues = Object.values(entries).filter((v) => typeof v === "number");
@@ -5791,6 +5822,34 @@ const FileFactSchema = object({
 	...Elsewhere,
 	extra: Extra
 });
+/**
+* A folder or a glob in a repo (protocol 0.15.0), relative to the repo's root, with forward slashes:
+* `.` for the root itself, or named parts (`packages/server`, `docs/adr/*.md`) with no empty, `.` or
+* `..` part, no `\` and no `:`. An expert's area is written into its file on another machine, so a
+* path can never point outside the repo.
+*/
+const AreaPathSchema = string().min(1).max(1e3).refine((path) => !path.includes("\\"), "forward slashes, never `\\`").refine((path) => !path.includes(":"), "a path with no `:`, which Windows reads as a drive or a file's stream").refine((path) => path === "." || !path.split("/").some((part) => part === "" || part === "." || part === ".."), "`.` itself, or a relative path of named parts, with no empty, `.` or `..` part");
+const Count = number().int().nonnegative();
+/**
+* How much a session's agents worked in one folder of a repo (protocol 0.15.0), so the server can
+* suggest creating an expert on it (isoplan-app ADR 0013). Counts only: never file contents, search patterns or
+* results. `folder` is relative to its repo's root (AreaPathSchema). `reads`: files read in it;
+* `searches`: searches in it (Grep, Glob and the like); `tokens`: what their results took, estimated
+* as characters / 4; `ms`: the time from those calls to their results; `corrections`: the person's
+* corrections while the agent worked there (an interrupt, a turned-down tool call, or a message
+* telling it it was wrong). A subagent's calls count to its session's areas. The counts only grow
+* while the session lasts, so each one sent replaces the last. One is known by its folder and
+* project, as a file fact is, and it is sent under the same rules (Elsewhere).
+*/
+const AreaFactSchema = object({
+	folder: AreaPathSchema,
+	reads: Count,
+	searches: Count,
+	tokens: TokenCount,
+	ms: Count,
+	corrections: Count,
+	...Elsewhere
+});
 const WaitFactSchema = object({
 	waiter: string().min(1),
 	on: string().min(1),
@@ -5852,7 +5911,9 @@ const FactsSchema = object({
 	/** Absent from a data layer that doesn't report questions, which is the same as none. */
 	questions: array(QuestionFactSchema).optional(),
 	/** Absent from a data layer that doesn't report workflows, which is the same as none. */
-	workflows: array(WorkflowFactSchema).optional()
+	workflows: array(WorkflowFactSchema).optional(),
+	/** Absent from a data layer that doesn't report areas, which is the same as none. */
+	areas: array(AreaFactSchema).optional()
 });
 /** The records that changed, each replacing the one with the same key. */
 const FactUpsertSchema = object({
@@ -5863,7 +5924,8 @@ const FactUpsertSchema = object({
 	waits: array(WaitFactSchema).optional(),
 	reports: array(ReportFactSchema).optional(),
 	questions: array(QuestionFactSchema).optional(),
-	workflows: array(WorkflowFactSchema).optional()
+	workflows: array(WorkflowFactSchema).optional(),
+	areas: array(AreaFactSchema).optional()
 });
 const FileKey = FileFactSchema.pick({
 	agent: true,
@@ -5877,6 +5939,7 @@ const FileKey = FileFactSchema.pick({
 * the connection. `questionOutcomes`: how each question in `questions` ended, by its id: `answered`,
 * in the terminal or from the floor, or `abandoned`, with no answer (interrupted, or a new prompt
 * came first). Absent, or without a question's id, from a peer that doesn't say (protocol 0.3.5 on).
+* An area is never removed: it goes with its session.
 */
 const FactRemoveSchema = object({
 	agents: array(string().min(1)).optional(),
@@ -6048,6 +6111,13 @@ const HelloMessageSchema = object({
 * hidden (a start's `hidden`), in a clone Isoplan keeps for itself. The server sends `hidden` only to
 * a runner that says it: a runner from before 0.14.0 drops the field it doesn't know and would start
 * the session in the person's own checkout.
+* `canCreateExpertsFromSuggestions` (protocol 0.15.0, isoplan-app#328): this runner suggests creating
+* an expert where a session would have been helped by one, and creates it when a person confirms
+* (see `expert-creation-suggestion`). It sends `expert-creation-suggestion`,
+* `expert-creation-suggestion-ended` and `expert-creation-progress`, and takes
+* `expert-creation-suggestion-dismissals`, `draft-office-wide-expert-creation-suggestion`,
+* `create-expert-from-suggestion` and `expert-creation-suggestion-ended`; the server sends none of
+* these to a runner that didn't say it.
 */
 const RunnerHelloMessageSchema = object({
 	type: literal$1("runner"),
@@ -6061,7 +6131,8 @@ const RunnerHelloMessageSchema = object({
 	claude: ClaudeCliSchema.optional(),
 	starts: array(StartModeSchema).max(4).optional(),
 	experts: literal$1(true).optional(),
-	hiddenStarts: literal$1(true).optional()
+	hiddenStarts: literal$1(true).optional(),
+	canCreateExpertsFromSuggestions: literal$1(true).optional()
 });
 /** All of the session's facts. Sent on connect and on repair. */
 const FullMessageSchema = object({
@@ -6133,16 +6204,24 @@ const ExpertCapSchema = _enum([
 	"expert-tokens"
 ]);
 /**
+* An expert's name as people read it, from its key: the key's words, split on dashes, each
+* capitalised, then "Expert" (`pairing` is "Pairing Expert", `pairing-tokens` "Pairing Tokens Expert").
+*/
+const expertDisplayName = (key) => [...key.split("-").filter(Boolean).map((word) => word[0].toUpperCase() + word.slice(1)), "Expert"].join(" ");
+/**
 * One expert a runner hosts, as it lists it to an office server whose list takes its repo. `senior`
 * (protocol 0.14.0): it has a senior generation, which its junior can ask (see `expert-senior`);
-* absent from an older runner. An older server ignores it.
+* absent from an older runner. `areas` (protocol 0.15.0): the folders and globs of its repo it
+* covers, from its file, so the office never suggests creating an expert on a folder one already covers;
+* absent from an older runner, or when its file names none. An older server ignores both.
 */
 const ExpertListingSchema = object({
 	name: ExpertNameSchema,
 	project: ProjectSchema,
 	subject: Subject,
 	state: ExpertStateSchema,
-	senior: boolean().optional()
+	senior: boolean().optional(),
+	areas: array(AreaPathSchema).max(20).optional()
 });
 /** One expert a session may ask: `repo` is its project's short name, `host` the hosting person's name. */
 const ExpertRightSchema = object({
@@ -6392,6 +6471,98 @@ const AskExpertMessageSchema = object({
 	question: string().trim().min(1).max(MAX_QUESTION_LENGTH),
 	blocking: boolean(),
 	key: string().min(1).max(100)
+});
+/** The most dismissed areas an `expert-creation-suggestion-dismissals` lists. */
+const MAX_EXPERT_CREATION_SUGGESTION_DISMISSALS = 1e3;
+/**
+* An expert creation suggestion's id, which the floor's link names
+* (`/?expert-creation-suggestion=<id>`), so it keeps to letters, digits, `_` and `-`: the runner's own
+* random id for a session's suggestion, or the `draft-office-wide-expert-creation-suggestion`'s
+* `request` for an office-wide one.
+*/
+const ExpertCreationSuggestionId = string().regex(/^[A-Za-z0-9_-]{1,100}$/, "letters, digits, `_` and `-`, at most 100");
+/**
+* The model an expert grounds with, as Claude Code's `--model` takes it (`sonnet`,
+* `claude-opus-5-5`, `claude-sonnet-4-5[1m]`): kept to characters no shell reads, starting with a
+* letter or digit, as it goes into a command on the runner's machine.
+*/
+const Model = string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/[\]-]{0,199}$/, "a model name: letters, digits and . _ : / [ ] -, starting with a letter or digit, at most 200");
+/** The proof question an expert must answer before it answers anyone, and the answer expected. */
+const Proof = object({
+	question: string().trim().min(1).max(MAX_QUESTION_LENGTH),
+	answer: string().trim().min(1).max(MAX_EXPERT_ANSWER_LENGTH)
+});
+/** What an expert covers: folders and globs in its repo (AreaPathSchema). */
+const Area = array(AreaPathSchema).min(1).max(20);
+/**
+* A runner suggests creating an expert (protocol 0.15.0), once per session and folder, for a session
+* in a repo the office takes. `session` is the session that showed the need (for an office-wide one,
+* the latest that searched the area), `project` its repo, and `folder` the folder whose signals passed
+* their threshold, which dismissals name. `scope`: `session`, from that session's own signals, or
+* `office`, in answer to a `draft-office-wide-expert-creation-suggestion`, whose `request` is then its
+* `id`. The draft: `key`, the expert's name (shown as `expertDisplayName(key)`), `subject`, `area`
+* and `proof`, as the runner's local model wrote them and the secret check passed them. `why`, the
+* signals that passed their thresholds, each other one 0: `share`, the share of the session's context
+* spent reading and searching the folder (0 to 1), and `tokens`, those tokens, which are one signal;
+* `minutes`, the time spent there; `corrections`, the person's corrections there. `at`: when it was
+* suggested. Of its text, only these leave the machine, under ADR 0004's case for an expert creation
+* suggestion's draft.
+*/
+const ExpertCreationSuggestionMessageSchema = object({
+	type: literal$1("expert-creation-suggestion"),
+	v: Version,
+	id: ExpertCreationSuggestionId,
+	session: string().min(1),
+	project: ProjectSchema,
+	folder: AreaPathSchema,
+	scope: _enum(["session", "office"]),
+	key: ExpertNameSchema,
+	subject: Subject,
+	area: Area,
+	proof: Proof,
+	why: object({
+		share: number().min(0).max(1),
+		tokens: number().int().nonnegative(),
+		minutes: number().nonnegative(),
+		corrections: number().int().nonnegative()
+	}),
+	at: datetime({ offset: true })
+});
+/**
+* A runner ends its expert creation suggestion `id` itself (protocol 0.15.0): `withdrawn`, it took the
+* suggestion back before anyone created the expert or dismissed it; `no-draft`, it couldn't draft the
+* office-wide suggestion the `draft-office-wide-expert-creation-suggestion` of that id asked for (the
+* secret check matched, or its model gave no usable draft).
+*/
+const RunnerExpertCreationSuggestionEndedMessageSchema = object({
+	type: literal$1("expert-creation-suggestion-ended"),
+	v: Version,
+	id: ExpertCreationSuggestionId,
+	why: _enum(["withdrawn", "no-draft"])
+});
+/**
+* Where creating an expert stands on the runner that took the `create-expert-from-suggestion` request
+* `request`, for the expert creation suggestion `expertCreationSuggestionId` (protocol 0.15.0), sent
+* as each state is reached: `cloning`, it prepares the expert's own clone of the repo; `grounding`,
+* the expert reads what its subject rests on, as any expert grounds (its area decides only which
+* folders it covers, for expert creation suggestions); `proof`, it answers its
+* proof question; `ready`, it answers questions; `failed`, it stopped, with `detail` in the runner's
+* own words (no checkout of the repo on this machine, a key already used here, a failed proof).
+*/
+const ExpertCreationProgressStateSchema = _enum([
+	"cloning",
+	"grounding",
+	"proof",
+	"ready",
+	"failed"
+]);
+const ExpertCreationProgressMessageSchema = object({
+	type: literal$1("expert-creation-progress"),
+	v: Version,
+	request: RequestId,
+	expertCreationSuggestionId: ExpertCreationSuggestionId,
+	state: ExpertCreationProgressStateSchema,
+	detail: Detail.optional()
 });
 const driven$2 = {
 	type: literal$1("driven"),
@@ -6652,7 +6823,10 @@ discriminatedUnion("type", [
 	DrivenMessageSchema,
 	ExpertsMessageSchema,
 	AskExpertMessageSchema,
-	ExpertSeniorMessageSchema
+	ExpertSeniorMessageSchema,
+	ExpertCreationSuggestionMessageSchema,
+	RunnerExpertCreationSuggestionEndedMessageSchema,
+	ExpertCreationProgressMessageSchema
 ]);
 /** Asks the data layer to send its facts in full. */
 const RepairMessageSchema = object({
@@ -6905,6 +7079,222 @@ const drive$1 = {
 	id: DriveId,
 	by: Account
 };
+/**
+* A person acting on a driven session from the floor (protocol 0.5.0), sent only to a runner that said
+* `drive`, and only to the owner's own runner. `by` is the person acting, whom the runner checks is its
+* own person, and refuses `not-owner` otherwise. The runner answers by `id` (see `driven`). Nothing is
+* queued: the server refuses a request for a runner that isn't linked at once (`offline`, see
+* FloorDriveRefusalReason).
+*/
+const DriveMessageSchema = discriminatedUnion("kind", [
+	object({
+		...drive$1,
+		kind: literal$1("start"),
+		room: Room.optional(),
+		folder: Folder.optional(),
+		branch: BranchName.optional(),
+		project: ProjectSchema,
+		roomSessions: array(DrivenSessionId).max(20).optional(),
+		instruction: Instruction.optional(),
+		permissions: DrivePermissionsSchema,
+		mode: _enum([
+			"terminal",
+			"headless",
+			"orca",
+			"desktop",
+			"driven"
+		]).optional(),
+		hidden: boolean().optional()
+	}).superRefine((message, context) => {
+		if (message.hidden && message.mode === "orca") context.addIssue({
+			code: "custom",
+			path: ["hidden"],
+			message: "a hidden start doesn't open in Orca, which would list its folder"
+		});
+		if (message.mode !== void 0 && message.mode !== "driven") {
+			if (message.folder === void 0) context.addIssue({
+				code: "custom",
+				path: ["folder"],
+				message: "a start that opens outside the floor names a folder"
+			});
+			if (message.instruction === void 0) context.addIssue({
+				code: "custom",
+				path: ["instruction"],
+				message: "a start that opens outside the floor names its first instruction"
+			});
+		}
+		if (message.folder === void 0) {
+			if (message.room === void 0) context.addIssue({
+				code: "custom",
+				path: ["room"],
+				message: "a start names a room, or a folder"
+			});
+			if (message.branch !== void 0) context.addIssue({
+				code: "custom",
+				path: ["branch"],
+				message: "a start names a branch only with a folder"
+			});
+			if (message.hidden) context.addIssue({
+				code: "custom",
+				path: ["hidden"],
+				message: "a start is hidden only with a folder"
+			});
+			return;
+		}
+		for (const key of ["room", "roomSessions"]) if (message[key] !== void 0) context.addIssue({
+			code: "custom",
+			path: [key],
+			message: "a start in a folder opens a new room, with nothing from another"
+		});
+	}),
+	object({
+		...drive$1,
+		kind: literal$1("instruct"),
+		session: DrivenSessionId,
+		text: Instruction
+	}),
+	object({
+		...drive$1,
+		kind: literal$1("stop"),
+		session: DrivenSessionId,
+		remove: literal$1(true).optional()
+	}),
+	object({
+		...drive$1,
+		kind: literal$1("interrupt"),
+		session: DrivenSessionId
+	}),
+	object({
+		...drive$1,
+		kind: literal$1("hand-back"),
+		session: DrivenSessionId
+	}),
+	object({
+		...drive$1,
+		kind: literal$1("output"),
+		session: DrivenSessionId,
+		turn: DriveId.optional()
+	}),
+	object({
+		...drive$1,
+		kind: literal$1("answer"),
+		session: DrivenSessionId,
+		prompt: DriveId,
+		answer: _enum(["allow", "deny"])
+	}),
+	object({
+		...drive$1,
+		kind: literal$1("release"),
+		session: DrivenSessionId,
+		withheld: DriveId
+	}),
+	object({
+		...drive$1,
+		kind: literal$1("install-claude")
+	}),
+	object({
+		...drive$1,
+		kind: literal$1("sign-in-claude")
+	})
+]);
+/**
+* Where people may skip permission prompts in driven sessions (protocol 0.5.0): `bypassAllowed` lists
+* the projects, lower-cased, whose office allows `bypassPermissions`; an admin can turn it off for the
+* whole office. A project id here is as long as it comes, as everywhere in the protocol, so any
+* project the server holds can be listed. Sent to a runner that said `drive` once its hello is let in,
+* before any drive request, and again whenever an admin changes it. The runner sends no `driven`
+* message on a connection before the first one has come on it. Until one arrives on a connection,
+* and in any project it doesn't list, the runner opens no session's process with `bypassPermissions`:
+* not to start, reopen or restore one. What a session already running does when its project leaves
+* the list is the runner's to decide (#42).
+*
+* It is a message of its own, not a field of each start, because the runner enforces it as a standing
+* rule: a change has to reach the runner while its sessions run, and a session the runner restores
+* after its own restart comes with no start. Kept apart from a start's `permissions`, which is the
+* person's own choice, a mistake in the server's start path alone can't skip prompts in a project
+* whose office hasn't allowed it. It is by project because one server can host several offices, and a
+* runner's link serves all of them.
+*/
+const DrivePolicyMessageSchema = object({
+	type: literal$1("drive-policy"),
+	v: Version,
+	bypassAllowed: array(string().min(1)).max(1e3)
+});
+/**
+* Create the expert the expert creation suggestion `expertCreationSuggestionId` drafted (protocol
+* 0.15.0), as the person who confirmed it (`by`) set it on the floor, sent to the runner of the
+* computer they chose, one of their own, which checks `by` is its own person. The runner finds its
+* checkout of `project`, writes the expert file `key` with `subject`, `model`, `area` and `proof`, and
+* answers with `expert-creation-progress` under `request`. Nothing is queued: the server refuses at
+* once when that runner isn't linked.
+*/
+const CreateExpertFromSuggestionMessageSchema = object({
+	type: literal$1("create-expert-from-suggestion"),
+	v: Version,
+	request: RequestId,
+	expertCreationSuggestionId: ExpertCreationSuggestionId,
+	key: ExpertNameSchema,
+	subject: Subject,
+	model: Model,
+	project: ProjectSchema,
+	area: Area,
+	proof: Proof,
+	by: Account
+});
+/**
+* Draft an office-wide expert creation suggestion on `folder` of `project` (protocol 0.15.0), which
+* several sessions searched within the period: sent to the runner of the latest of them. `sessions`:
+* those on this runner's machine, newest first, whose work in the folder the draft is made from; the
+* first is the suggestion's `session`. The runner answers with `expert-creation-suggestion`, scope
+* `office`, whose `id` is `request`, or with `expert-creation-suggestion-ended` `no-draft`.
+* `searchedBySessions` and `searchWindowDays` let the runner say why it is office-wide.
+*/
+const DraftOfficeWideExpertCreationSuggestionMessageSchema = object({
+	type: literal$1("draft-office-wide-expert-creation-suggestion"),
+	v: Version,
+	request: ExpertCreationSuggestionId,
+	project: ProjectSchema,
+	folder: AreaPathSchema,
+	sessions: array(string().min(1)).min(1).max(20),
+	/** How many sessions in the office, on any machine, searched the folder within the window. */
+	searchedBySessions: number().int().positive(),
+	/** The window, in days: the office's `officeWideSuggestionWindowDays`. */
+	searchWindowDays: number().positive()
+});
+/**
+* One area this runner's person dismissed: a folder of a project, by its id, lower-cased. "Not now"
+* lasts `until` a time, after which the same area may be suggested again; "Don't suggest this again"
+* lasts `forever`. Exactly one of the two.
+*/
+const ExpertCreationSuggestionDismissalSchema = object({
+	project: string().min(1),
+	folder: AreaPathSchema,
+	until: datetime({ offset: true }).optional(),
+	forever: literal$1(true).optional()
+}).superRefine((dismissal, context) => {
+	if (dismissal.until === void 0 === (dismissal.forever === void 0)) context.addIssue({
+		code: "custom",
+		path: ["until"],
+		message: "a dismissal lasts until a time, or forever: one of the two"
+	});
+});
+/**
+* The areas this runner's person dismissed (protocol 0.15.0), the whole list each time: sent to a
+* runner that said `canCreateExpertsFromSuggestions` once its hello is let in, even an empty one, and
+* whenever the list changes. The runner suggests no expert on an area it lists, and sends none of its
+* expert creation suggestion messages on a connection before the connection's first one (see
+* `expert-creation-suggestion`).
+*/
+const ExpertCreationSuggestionDismissalsMessageSchema = object({
+	type: literal$1("expert-creation-suggestion-dismissals"),
+	v: Version,
+	dismissals: array(ExpertCreationSuggestionDismissalSchema).max(MAX_EXPERT_CREATION_SUGGESTION_DISMISSALS)
+});
+const expertCreationSuggestionEnded = {
+	type: literal$1("expert-creation-suggestion-ended"),
+	v: Version,
+	id: ExpertCreationSuggestionId
+};
 const OfficeServerMessageSchema = discriminatedUnion("type", [
 	RepairMessageSchema,
 	WelcomeMessageSchema,
@@ -6918,124 +7308,25 @@ const OfficeServerMessageSchema = discriminatedUnion("type", [
 	DropMessageSchema,
 	AskedMessageSchema,
 	AskRightsMessageSchema,
-	discriminatedUnion("kind", [
-		object({
-			...drive$1,
-			kind: literal$1("start"),
-			room: Room.optional(),
-			folder: Folder.optional(),
-			branch: BranchName.optional(),
-			project: ProjectSchema,
-			roomSessions: array(DrivenSessionId).max(20).optional(),
-			instruction: Instruction.optional(),
-			permissions: DrivePermissionsSchema,
-			mode: _enum([
-				"terminal",
-				"headless",
-				"orca",
-				"desktop",
-				"driven"
-			]).optional(),
-			hidden: boolean().optional()
-		}).superRefine((message, context) => {
-			if (message.hidden && message.mode === "orca") context.addIssue({
-				code: "custom",
-				path: ["hidden"],
-				message: "a hidden start doesn't open in Orca, which would list its folder"
-			});
-			if (message.mode !== void 0 && message.mode !== "driven") {
-				if (message.folder === void 0) context.addIssue({
-					code: "custom",
-					path: ["folder"],
-					message: "a start that opens outside the floor names a folder"
-				});
-				if (message.instruction === void 0) context.addIssue({
-					code: "custom",
-					path: ["instruction"],
-					message: "a start that opens outside the floor names its first instruction"
-				});
-			}
-			if (message.folder === void 0) {
-				if (message.room === void 0) context.addIssue({
-					code: "custom",
-					path: ["room"],
-					message: "a start names a room, or a folder"
-				});
-				if (message.branch !== void 0) context.addIssue({
-					code: "custom",
-					path: ["branch"],
-					message: "a start names a branch only with a folder"
-				});
-				if (message.hidden) context.addIssue({
-					code: "custom",
-					path: ["hidden"],
-					message: "a start is hidden only with a folder"
-				});
-				return;
-			}
-			for (const key of ["room", "roomSessions"]) if (message[key] !== void 0) context.addIssue({
-				code: "custom",
-				path: [key],
-				message: "a start in a folder opens a new room, with nothing from another"
-			});
-		}),
-		object({
-			...drive$1,
-			kind: literal$1("instruct"),
-			session: DrivenSessionId,
-			text: Instruction
-		}),
-		object({
-			...drive$1,
-			kind: literal$1("stop"),
-			session: DrivenSessionId,
-			remove: literal$1(true).optional()
-		}),
-		object({
-			...drive$1,
-			kind: literal$1("interrupt"),
-			session: DrivenSessionId
-		}),
-		object({
-			...drive$1,
-			kind: literal$1("hand-back"),
-			session: DrivenSessionId
-		}),
-		object({
-			...drive$1,
-			kind: literal$1("output"),
-			session: DrivenSessionId,
-			turn: DriveId.optional()
-		}),
-		object({
-			...drive$1,
-			kind: literal$1("answer"),
-			session: DrivenSessionId,
-			prompt: DriveId,
-			answer: _enum(["allow", "deny"])
-		}),
-		object({
-			...drive$1,
-			kind: literal$1("release"),
-			session: DrivenSessionId,
-			withheld: DriveId
-		}),
-		object({
-			...drive$1,
-			kind: literal$1("install-claude")
-		}),
-		object({
-			...drive$1,
-			kind: literal$1("sign-in-claude")
-		})
-	]),
-	object({
-		type: literal$1("drive-policy"),
-		v: Version,
-		bypassAllowed: array(string().min(1)).max(1e3)
-	}),
+	DriveMessageSchema,
+	DrivePolicyMessageSchema,
 	ExpertRightsMessageSchema,
-	HostingMessageSchema
+	HostingMessageSchema,
+	CreateExpertFromSuggestionMessageSchema,
+	DraftOfficeWideExpertCreationSuggestionMessageSchema,
+	ExpertCreationSuggestionDismissalsMessageSchema,
+	discriminatedUnion("why", [object({
+		...expertCreationSuggestionEnded,
+		why: literal$1("made"),
+		key: ExpertNameSchema
+	}), object({
+		...expertCreationSuggestionEnded,
+		why: _enum([
+			"dismissed",
+			"refused",
+			"expired"
+		])
+	})])
 ]);
 /** Validates a message a data layer received from an office server. */
 function parseOfficeServerMessage(value) {
@@ -7137,12 +7428,18 @@ function officesOf(config) {
 	if (!offices.length) add(config.plainRefused ?? config.server, new URL(config.plainRefused ?? config.server).host, !!config.plainRefused);
 	return offices;
 }
-/** The same per-key override for any settings file of the mod's, such as the runner's runner.json. */
+/**
+* The same per-key override for any settings file of the mod's, such as the runner's runner.json. A
+* block of settings (an object, such as runner.json's `expertCreationSuggestions`) is overridden per key inside it.
+*/
 async function loadSettings(io, defaultsPath, userPath) {
-	const defaults = await readJson$2(io, defaultsPath);
-	const user = await readJson$2(io, userPath, true);
+	return overridden(await readJson$2(io, defaultsPath), await readJson$2(io, userPath, true));
+}
+const isBlock = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+function overridden(defaults, user) {
 	const config = {};
-	for (const [key, fallback] of Object.entries(defaults)) config[key] = fits(key, user[key], fallback) ? user[key] : fallback;
+	for (const [key, fallback] of Object.entries(defaults)) if (isBlock(fallback)) config[key] = overridden(fallback, isBlock(user[key]) ? user[key] : {});
+	else config[key] = fits(key, user[key], fallback) ? user[key] : fallback;
 	return config;
 }
 const BYTE_KEYS = /* @__PURE__ */ new Set(["tailBytes"]);
@@ -7790,7 +8087,7 @@ const getJson = async (url, headers) => {
 };
 /** While the machine waits to be paired the list is asked for again this soon, and after a failure this soon. */
 const PAIR_POLL_MS = 5e3;
-const RETRY_MS$1 = 3e4;
+const RETRY_MS$2 = 3e4;
 /** A rename the file system refuses for a moment (a scanner holding the file, on Windows) is tried this often. */
 const RENAME_TRIES = 5;
 const isList = (value) => {
@@ -7862,7 +8159,7 @@ function createApproved({ server, file, pairing, refreshMs, maxAgeMs, log, get =
 			tell(`couldn't read which repos the office takes: ${String(err?.message ?? err)}`);
 			problem = "unreachable";
 			failedAt = now();
-			nextAt = failedAt + RETRY_MS$1;
+			nextAt = failedAt + RETRY_MS$2;
 			return "unreachable";
 		}
 		if (token === null) {
@@ -7921,7 +8218,7 @@ function createApproved({ server, file, pairing, refreshMs, maxAgeMs, log, get =
 		}
 		tell(`couldn't read which repos the office takes from ${server}: ${answer.status ? `it answered ${answer.status}` : String(answer.body)}`);
 		problem = "unreachable";
-		nextAt = at + RETRY_MS$1;
+		nextAt = at + RETRY_MS$2;
 		return "unreachable";
 	}
 	function run(force, ask = false) {
@@ -8349,6 +8646,7 @@ function inRepos(facts) {
 		...facts,
 		edits: placed(facts.edits),
 		reads: placed(facts.reads),
+		...facts.areas && { areas: placed(facts.areas) },
 		agents: facts.agents.map((a) => a.doing && !a.doing.project && a.doing.file !== void 0 ? {
 			...a,
 			doing: {
@@ -8406,7 +8704,7 @@ async function commandHome(folder, io, list) {
 /** Where the answers are kept. */
 const remoteNamesPath = (claudeDir) => path.join(claudeDir, "isoplan", "remote-names.json");
 const ANSWER_MS$2 = 864e5;
-const RETRY_MS = 3e5;
+const RETRY_MS$1 = 3e5;
 const ASK_TIMEOUT_MS = 1e4;
 /**
 * The repos' current names. With `ask`, for a long-lived process, GitHub is asked as above; without
@@ -8416,7 +8714,7 @@ function remoteNames({ file, ask = null, now = Date.now }) {
 	let entries = null;
 	const asking = /* @__PURE__ */ new Map();
 	const load = () => entries ??= readEntries(file);
-	const stale = (e) => now() - e.at >= (e.failures ? Math.min(ANSWER_MS$2, RETRY_MS * 2 ** (e.failures - 1)) : ANSWER_MS$2);
+	const stale = (e) => now() - e.at >= (e.failures ? Math.min(ANSWER_MS$2, RETRY_MS$1 * 2 ** (e.failures - 1)) : ANSWER_MS$2);
 	const refresh = (id, owner, repo) => {
 		const running = asking.get(id);
 		if (running) return running;
@@ -8635,6 +8933,8 @@ function diffFacts(before, after, answered) {
 	const workflows = diff(before.workflows ?? [], after.workflows ?? [], (w) => w.id);
 	if (workflows.upsert.length) upsert.workflows = workflows.upsert;
 	if (workflows.remove.length) remove.workflows = workflows.remove.map((w) => w.id);
+	const areas = diff(before.areas ?? [], after.areas ?? [], (a) => key(a.folder, a.project?.id ?? ""));
+	if (areas.upsert.length) upsert.areas = areas.upsert;
 	return Object.keys(upsert).length || Object.keys(remove).length ? {
 		upsert,
 		remove
@@ -8655,7 +8955,7 @@ const same = (a, b) => a !== void 0 && JSON.stringify(a) === JSON.stringify(b);
 const STABLE_MS$1 = 3e4;
 const OUTBOX_MAX$1 = 100;
 const OUTBOX_MAX_AGE_MS$1 = 36e5;
-function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, retryCapMs = 3e4, notWantedRetryMs = 36e5, takenRetryMs = 36e5, onNotWanted, onPairingEnded, onMessage, onDrive, onHosting, onOpen, onClose, filter = (facts) => facts, answered, pairing, pairPollMs = 5e3, admit, random = Math.random, onError }) {
+function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, retryCapMs = 3e4, notWantedRetryMs = 36e5, takenRetryMs = 36e5, onNotWanted, onPairingEnded, onMessage, onDrive, onHosting, onExpertCreationSuggestionMessages, onOpen, onClose, filter = (facts) => facts, answered, pairing, pairPollMs = 5e3, admit, random = Math.random, onError }) {
 	const outbox = [];
 	let latest = null;
 	let socket = null;
@@ -8909,6 +9209,7 @@ function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, 
 		} else if (onMessage && (message.type === "request" || message.type === "release" || message.type === "handoff" || message.type === "drop")) onMessage(message);
 		else if (onDrive && (message.type === "drive" || message.type === "drive-policy")) onDrive(message);
 		else if (onHosting && message.type === "hosting") onHosting(message);
+		else if (onExpertCreationSuggestionMessages && (message.type === "expert-creation-suggestion-dismissals" || message.type === "draft-office-wide-expert-creation-suggestion" || message.type === "create-expert-from-suggestion" || message.type === "expert-creation-suggestion-ended")) onExpertCreationSuggestionMessages(message);
 		else emit({
 			type: "log",
 			text: `the office server sent a ${message.type} message, which this data layer doesn't handle yet`
@@ -8949,8 +9250,8 @@ function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, 
 }
 //#endregion
 //#region src/runner/caps.ts
-const HOUR_MS = 36e5;
-const DAY_MS$1 = 24 * HOUR_MS;
+const HOUR_MS$1 = 36e5;
+const DAY_MS$2 = 24 * HOUR_MS$1;
 /** The tokens `usage` counts for against the budget. */
 function weighted(usage, s) {
 	return usage.input * s.inputTokenWeight + usage.cacheWrite * s.cacheWriteTokenWeight + usage.cacheRead * s.cacheReadTokenWeight + usage.output * s.outputTokenWeight;
@@ -8966,8 +9267,8 @@ function estimate(context, s) {
 }
 /** The cap one more answer in `room`, expected to use `expected`, would go over, or null. */
 function overCap(entries, room, expected, now, s) {
-	const day = entries.filter((e) => now - e.at < DAY_MS$1);
-	if (day.filter((e) => e.room === room && now - e.at < HOUR_MS).length >= s.answersPerRoomPerHour) return "room-hour";
+	const day = entries.filter((e) => now - e.at < DAY_MS$2);
+	if (day.filter((e) => e.room === room && now - e.at < HOUR_MS$1).length >= s.answersPerRoomPerHour) return "room-hour";
 	if (day.length >= s.answersPerMachinePerDay) return "owner-day";
 	if (day.reduce((sum, e) => sum + weighted(e.usage, s), 0) + weighted(expected, s) > s.tokenBudgetPerMachinePerDay) return "owner-tokens";
 	return null;
@@ -8979,7 +9280,7 @@ async function openLedger(file) {
 		const value = JSON.parse(await fs.readFile(file, "utf8"));
 		if (Array.isArray(value)) entries = value.filter(isEntry);
 	} catch {}
-	const recent = (now) => entries.filter((e) => now - e.at < DAY_MS$1);
+	const recent = (now) => entries.filter((e) => now - e.at < DAY_MS$2);
 	let writing = Promise.resolve();
 	const save = () => {
 		const text = JSON.stringify(entries) + "\n";
@@ -9052,6 +9353,7 @@ function createAttribution({ folder, where: home, resolve, projectOf, stat, real
 			const up = dirname(at);
 			if (up === at) return {
 				real: p,
+				found: p,
 				where: null
 			};
 			at = up;
@@ -9061,12 +9363,14 @@ function createAttribution({ folder, where: home, resolve, projectOf, stat, real
 		const where = await resolve(realAt);
 		return {
 			real: rest ? `${realAt.replace(/\/$/, "")}/${rest}` : realAt,
+			found: realAt,
 			where: where && {
 				...where,
 				toplevel: await realOf(where.toplevel)
 			}
 		};
 	}
+	const under = (root, dir) => pathKey(root) === pathKey(dir) ? "." : relativeTo(root, dir);
 	async function elsewhere(where, real) {
 		if (home && pathKey(where.commonDir) === pathKey(home.commonDir)) return {};
 		const project = await projectOf(where);
@@ -9091,11 +9395,21 @@ function createAttribution({ folder, where: home, resolve, projectOf, stat, real
 			const { real: d, where } = await locate(dir, true);
 			if (where) return elsewhere(where, d);
 			return !home && (relativeTo(await homeFolder, d) !== null || pathKey(await homeFolder) === pathKey(d)) ? {} : null;
+		},
+		async folder(path) {
+			const { found, where } = await locate(path, true);
+			const folder = where && under(where.toplevel, found);
+			if (where && folder) return {
+				folder,
+				...await elsewhere(where, found)
+			};
+			const own = !home && under(await homeFolder, found);
+			return own ? { folder: own } : null;
 		}
 	};
 }
 /**
-* The facts as they may leave the machine: a file, command or subagent's checkout in another repo
+* The facts as they may leave the machine: a file, command, area or subagent's checkout in another repo
 * only when `projects`, the office's from the server's welcome, holds that repo. Without a welcome
 * (an older server, or none yet on this connection) none of them leave. `checkouts` names the
 * project of each subagent whose worktree is another repo's, by agent id.
@@ -9122,7 +9436,8 @@ function forOffice$1(facts, projects, checkouts = {}) {
 			return out;
 		}),
 		edits: files(facts.edits),
-		reads: files(facts.reads)
+		reads: files(facts.reads),
+		...facts.areas && { areas: facts.areas.every((a) => ok(a.project)) ? facts.areas : facts.areas.filter((a) => ok(a.project)) }
 	};
 }
 //#endregion
@@ -9873,7 +10188,7 @@ function createWorkflowReader(io) {
 				label: text(ev.label) ?? "",
 				phase: text(ev.phase) ?? ""
 			});
-			if (ev.type === "result") st.results.set(ev.agentId, resultText$1(ev.result));
+			if (ev.type === "result") st.results.set(ev.agentId, resultText$2(ev.result));
 		}
 		return st;
 	}
@@ -10241,7 +10556,7 @@ function literal(src, start) {
 		return null;
 	}
 }
-function resultText$1(v) {
+function resultText$2(v) {
 	if (v === void 0 || v === null) return null;
 	if (typeof v === "string") return v.trim() ? v : null;
 	try {
@@ -10296,8 +10611,9 @@ function createClaudeCode(io) {
 	const places = attributionCache();
 	const searched = /* @__PURE__ */ new Map();
 	const runs = createWorkflowReader(io);
+	const areaStates = /* @__PURE__ */ new Map();
 	let used = /* @__PURE__ */ new Set();
-	async function read({ sessionId, cwd, now, config, resolve, projectOf }) {
+	async function read({ sessionId, cwd, now, config, resolve, projectOf, corrected }) {
 		used = /* @__PURE__ */ new Set();
 		runs.begin();
 		const errors = {
@@ -10354,14 +10670,15 @@ function createClaudeCode(io) {
 				now
 			});
 			const checkouts = {};
-			const { facts, answered } = await sessionFacts(c, main, where, workspace, now, config, resolve, place, fail, checkouts);
+			const { facts, answered, said } = await sessionFacts(c, main, where, workspace, now, config, resolve, place, fail, checkouts, corrected);
 			return {
 				facts,
 				status: null,
 				errors,
 				workspace,
 				checkouts,
-				answered
+				answered,
+				said
 			};
 		} finally {
 			for (const cache of [transcripts, metas]) for (const key of cache.keys()) if (!used.has(key)) cache.delete(key);
@@ -10460,7 +10777,7 @@ function createClaudeCode(io) {
 		});
 		return is;
 	}
-	async function sessionFacts(c, main, where, workspace, now, config, resolve, place, fail, checkouts) {
+	async function sessionFacts(c, main, where, workspace, now, config, resolve, place, fail, checkouts, corrected) {
 		const session = `${SOURCE}:${c.id}`;
 		const lead = `${session}:lead`;
 		const agentFiles = [];
@@ -10680,13 +10997,25 @@ function createClaudeCode(io) {
 			a.t.touches = await addFiles(facts.edits, id, a.t.touches, [...config.touchedTools, ...config.shellTools], now, config, place);
 			a.t.reads = await addFiles(facts.reads, id, a.t.reads, [...READ_TOOLS$1, ...config.shellTools], now, config, place);
 		}
+		areaStates.set(c.path, {
+			area: main.area,
+			lastText: main.lastText
+		});
+		for (const a of agentFiles) areaStates.set(a.path, {
+			area: a.t.area,
+			lastText: a.t.lastText
+		});
+		const own = [...areaStates].filter(([p]) => p !== c.path && pathKey(p).startsWith(pathKey(sessionDir) + "/")).map(([, s]) => s);
+		const { areas, said } = await areasOf([areaStates.get(c.path), ...own], place, corrected);
+		if (areas.length) facts.areas = areas;
 		const answered = (id) => {
 			const r = results.get(id);
 			return !!r && !r.launched && r.status === "completed";
 		};
 		return {
 			facts,
-			answered
+			answered,
+			said
 		};
 	}
 	async function readMeta(p) {
@@ -10855,9 +11184,24 @@ function newTranscriptState() {
 		firstPrompt: null,
 		compacted: false,
 		asks: /* @__PURE__ */ new Map(),
-		workflows: /* @__PURE__ */ new Map()
+		workflows: /* @__PURE__ */ new Map(),
+		area: {
+			tallies: /* @__PURE__ */ new Map(),
+			calls: /* @__PURE__ */ new Map(),
+			names: /* @__PURE__ */ new Map(),
+			turn: newTurn(null),
+			turns: [],
+			rejected: false,
+			asks: []
+		}
 	};
 }
+const newTurn = (prompt) => ({
+	dirs: /* @__PURE__ */ new Map(),
+	corrections: 0,
+	prompt,
+	reply: null
+});
 const MESSAGE_TYPES = /* @__PURE__ */ new Set([
 	"user",
 	"assistant",
@@ -10890,6 +11234,7 @@ function foldLine(st, line, home, isDir) {
 	if (ev.type === "assistant" && Array.isArray(content)) {
 		st.lastRole = "assistant";
 		st.waiting = false;
+		st.area.rejected = false;
 		readUsage(st, ev.message, at);
 		for (const c of content) {
 			if (!c || typeof c !== "object") continue;
@@ -10911,6 +11256,7 @@ function foldLine(st, line, home, isDir) {
 			});
 			const input = c.input || {};
 			const cwd = ev.cwd || st.cwd;
+			areaCall(st.area, c, cwd, at);
 			const shell = typeof input.command === "string" ? shellFiles(input.command, cwd, {
 				powershell: c.name === "PowerShell",
 				home,
@@ -10964,25 +11310,38 @@ function foldLine(st, line, home, isDir) {
 		st.lastRole = "user";
 		let toolResults = false;
 		if (typeof content === "string") readNotifications(st, content, at);
-		else if (Array.isArray(content)) for (const c of content) {
-			if (!c || typeof c !== "object") continue;
-			if (c.type === "text" && typeof c.text === "string") readNotifications(st, c.text, at);
-			if (c.type === "tool_result" && typeof c.tool_use_id === "string") {
-				toolResults = true;
-				st.results.set(c.tool_use_id, {
-					...toolResult(ev.toolUseResult, c.is_error),
-					at
-				});
-				const launch = workflowLaunch(ev.toolUseResult);
-				if (launch) st.workflows.set(launch.runId, {
-					...launch,
-					at
-				});
+		else if (Array.isArray(content)) {
+			const down = turnedDown(ev, content, st.area.names);
+			for (const c of content) {
+				if (!c || typeof c !== "object") continue;
+				if (c.type === "text" && typeof c.text === "string") readNotifications(st, c.text, at);
+				if (c.type === "tool_result" && typeof c.tool_use_id === "string") {
+					toolResults = true;
+					st.results.set(c.tool_use_id, {
+						...toolResult(ev.toolUseResult, c.is_error),
+						at
+					});
+					const launch = workflowLaunch(ev.toolUseResult);
+					if (launch) st.workflows.set(launch.runId, {
+						...launch,
+						at
+					});
+					areaResult(st.area, c, at, ev.toolDenialKind === void 0 && !refused(c, st.area.names), ev.toolUseResult);
+				}
+			}
+			if (down) {
+				st.area.turn.corrections++;
+				st.area.rejected = true;
 			}
 		}
 		const turn = userTurn$1(ev, content);
 		if (turn !== null) setTurn(st, turn, at);
+		if (turn === false) {
+			if (!st.area.rejected) st.area.turn.corrections++;
+			st.area.rejected = false;
+		}
 		if (turn === true && !toolResults) {
+			areaPrompt(st, ev, content, at);
 			st.lastTool = null;
 			st.asks.clear();
 			st.prompts++;
@@ -11162,6 +11521,267 @@ async function doingOf(st, place, fallbackMs, config) {
 		kind,
 		...t.file && t.cwd ? await place.file(t.file) : t.dir ? await place.dir(t.dir) : null,
 		since: iso$1(t.at, fallbackMs)
+	};
+}
+const AREA_TOOLS = {
+	Read: "read",
+	Grep: "search",
+	Glob: "search"
+};
+const AREA_EDITS = /* @__PURE__ */ new Set([
+	"Edit",
+	"Write",
+	"NotebookEdit"
+]);
+const TURNED_DOWN = "The user doesn't want to proceed with this tool use";
+const MAX_AREA_CALLS = 200;
+const MAX_AREA_NAMES = 100;
+const SAID_TURNS = 20;
+const MAX_AREA_TURNS = 500;
+const MAX_AREA_ASKS = 100;
+const SAID_PROMPT_CHARS = 500;
+const SAID_REPLY_CHARS = 1e3;
+const ASK_CHARS = 2e3;
+const NOT_AREAS = /* @__PURE__ */ new Set(["node_modules", ".git"]);
+const capped = (map, max) => {
+	if (map.size > max) map.delete(map.keys().next().value);
+};
+function areaPath(name, input, cwd) {
+	const absolute = (p) => typeof p !== "string" || !p ? null : isAbsolute(p) ? normalize(p) : cwd ? join(cwd, p) : null;
+	const here = cwd ? normalize(cwd) : null;
+	if (name === "Grep") return absolute(input.path) ?? here;
+	if (name === "Glob") {
+		const base = absolute(input.path) ?? here;
+		const parts = (typeof input.pattern === "string" ? input.pattern : "").replace(/\\/g, "/").split("/");
+		const wild = parts.findIndex((p) => /[*?[\]{}]/.test(p));
+		const prefix = (wild < 0 ? parts : parts.slice(0, wild)).join("/");
+		if (!prefix) return base;
+		return isAbsolute(prefix) ? normalize(prefix) : base && join(base, prefix);
+	}
+	const file = absolute(input.file_path ?? input.notebook_path);
+	return file && dirname(file);
+}
+function areaCall(a, c, cwd, at) {
+	if (typeof c.id === "string" && typeof c.name === "string") {
+		a.names.set(c.id, c.name);
+		capped(a.names, MAX_AREA_NAMES);
+	}
+	const kind = Object.hasOwn(AREA_TOOLS, c.name) ? AREA_TOOLS[c.name] : AREA_EDITS.has(c.name) ? "edit" : null;
+	const path = kind && areaPath(c.name, c.input && typeof c.input === "object" ? c.input : {}, cwd);
+	if (!kind || !path) return;
+	const key = pathKey(path);
+	a.turn.dirs.set(key, path);
+	if (kind === "edit") return;
+	let t = a.tallies.get(key);
+	if (!t) a.tallies.set(key, t = {
+		path,
+		reads: 0,
+		searches: 0,
+		chars: 0,
+		ms: 0
+	});
+	if (kind === "read") t.reads++;
+	else t.searches++;
+	if (typeof c.id === "string") {
+		a.calls.set(c.id, {
+			key,
+			at,
+			cwd,
+			search: kind === "search"
+		});
+		capped(a.calls, MAX_AREA_CALLS);
+	}
+}
+function resultText$1(content) {
+	if (typeof content === "string") return content;
+	return Array.isArray(content) ? content.map((b) => b && b.type === "text" && typeof b.text === "string" ? b.text : "").join("") : "";
+}
+function resultFiles(used) {
+	if (!used || typeof used !== "object") return [];
+	const r = used;
+	if (Array.isArray(r.filenames) && r.filenames.length) return r.filenames.filter((f) => typeof f === "string" && f !== "");
+	if (typeof r.content !== "string") return [];
+	return r.content.split(/\r?\n/).flatMap((l) => /^(.+?):\d+(?::|$)/.exec(l)?.[1] ?? []);
+}
+function holding(files, cwd) {
+	const dirs = files.map((f) => isAbsolute(f) ? dirname(f) : cwd ? dirname(join(cwd, f)) : null);
+	if (!dirs.length || dirs.includes(null)) return null;
+	let common = dirs[0];
+	for (const d of dirs) while (pathKey(common) !== pathKey(d) && relativeTo(common, d) === null) {
+		const up = dirname(common);
+		if (up === common) return null;
+		common = up;
+	}
+	return common;
+}
+function areaResult(a, c, at, ran, used) {
+	const call = a.calls.get(c.tool_use_id);
+	if (!call) return;
+	a.calls.delete(c.tool_use_id);
+	let t = a.tallies.get(call.key);
+	if (!t) return;
+	if (!ran) {
+		if (call.search) t.searches--;
+		else t.reads--;
+		if (!t.reads && !t.searches && !t.chars && !t.ms) a.tallies.delete(call.key);
+		return;
+	}
+	const within = call.search ? holding(resultFiles(used), call.cwd) : null;
+	if (within && relativeTo(t.path, within)) {
+		const key = `${call.key}\n${pathKey(within)}`;
+		const own = a.tallies.get(key) ?? {
+			path: t.path,
+			within,
+			reads: 0,
+			searches: 0,
+			chars: 0,
+			ms: 0
+		};
+		a.tallies.set(key, own);
+		t.searches--;
+		if (!t.reads && !t.searches && !t.chars && !t.ms) a.tallies.delete(call.key);
+		own.searches++;
+		t = own;
+	}
+	t.chars += resultText$1(c.content).length;
+	if (at > call.at) t.ms += at - call.at;
+}
+const refused = (c, names) => c.is_error === true && resultText$1(c.content).includes(TURNED_DOWN) && !(names.get(c.tool_use_id) ?? "").startsWith("mcp__");
+function turnedDown(ev, content, names) {
+	if (!content.some((c) => c && c.type === "tool_result")) return false;
+	if (typeof ev.toolDenialKind === "string") return ev.toolDenialKind === "user-rejected";
+	return content.some((c) => c && c.type === "tool_result" && refused(c, names));
+}
+function areaPrompt(st, ev, content, at) {
+	const a = st.area;
+	const before = a.turn;
+	endTurn(a, st.lastText);
+	const text = promptText(content).trim();
+	const person = text !== "" && !text.startsWith("<");
+	if (person && before.dirs.size) {
+		a.asks.push({
+			key: typeof ev.uuid === "string" ? ev.uuid : String(at),
+			text: text.slice(0, ASK_CHARS),
+			reply: before.reply,
+			dirs: [...before.dirs.values()],
+			correction: null
+		});
+		if (a.asks.length > MAX_AREA_ASKS) a.asks.shift();
+	}
+	a.turn = newTurn(person ? text.slice(0, SAID_PROMPT_CHARS) : null);
+}
+function endTurn(a, reply) {
+	const t = a.turn;
+	if (!t.dirs.size) return;
+	t.reply = reply ? reply.slice(0, SAID_REPLY_CHARS) : null;
+	a.turns.push(t);
+	const at = a.turns.length - 1 - SAID_TURNS;
+	const older = a.turns[at];
+	if (older) {
+		older.prompt = older.reply = null;
+		if (!older.corrections) a.turns.splice(at, 1);
+	}
+	if (a.turns.length > MAX_AREA_TURNS) a.turns.shift();
+}
+function ancestors(folder) {
+	if (folder === ".") return [];
+	const out = [];
+	const parts = folder.split("/");
+	for (let i = 0; i < parts.length && !NOT_AREAS.has(parts[i]); i++) out.push(parts.slice(0, i + 1).join("/"));
+	return out;
+}
+/**
+* The session's areas from its transcripts' area states, the lead's first, at most MAX_AREAS, and
+* what it said in each. A path is placed as a folder (attribution.ts): its nearest folder that
+* exists, in a repo or the workspace. A message `corrected` has judged is settled for good, and its
+* words dropped.
+*/
+async function areasOf(sources, place, corrected) {
+	const placed = /* @__PURE__ */ new Map();
+	const where = (key, path) => {
+		let p = placed.get(key);
+		if (!p) {
+			p = place.folder(path).then((f) => f && {
+				group: f.project?.id ?? "",
+				...f.project && { project: f.project },
+				...f.away && { away: true },
+				folders: ancestors(f.folder)
+			}, () => null);
+			placed.set(key, p);
+		}
+		return p;
+	};
+	const facts = /* @__PURE__ */ new Map();
+	const factOf = (g, folder) => {
+		const k = `${g.group}\n${folder}`;
+		let f = facts.get(k);
+		if (!f) facts.set(k, f = {
+			folder,
+			reads: 0,
+			searches: 0,
+			tokens: 0,
+			ms: 0,
+			corrections: 0,
+			chars: 0,
+			...g.project && { project: g.project },
+			...g.away && { away: true }
+		});
+		return f;
+	};
+	for (const { area } of sources) for (const t of area.tallies.values()) {
+		let g = await where(pathKey(t.path), t.path);
+		if (g && !g.folders.length && t.within) g = await where(pathKey(t.within), t.within);
+		for (const folder of g?.folders ?? []) {
+			const f = factOf(g, folder);
+			f.reads += t.reads;
+			f.searches += t.searches;
+			f.ms += t.ms;
+			f.chars += t.chars;
+		}
+	}
+	const correct = async (dirs, n) => {
+		const hit = /* @__PURE__ */ new Set();
+		for (const [key, path] of dirs) {
+			const g = await where(key, path);
+			for (const folder of g?.folders ?? []) hit.add(factOf(g, folder));
+		}
+		for (const f of hit) f.corrections += n;
+	};
+	for (const { area } of sources) for (const turn of [...area.turns, area.turn]) if (turn.corrections) await correct(turn.dirs, turn.corrections);
+	for (const ask of sources[0].area.asks) {
+		if (ask.correction === null && ask.text !== null && corrected) {
+			const judged = corrected(ask.key, ask.text, ask.reply);
+			if (judged !== null) Object.assign(ask, {
+				correction: judged,
+				text: null,
+				reply: null
+			});
+		}
+		if (ask.correction) await correct(ask.dirs.map((p) => [pathKey(p), p]), 1);
+	}
+	const areas = [...facts.values()].filter((f) => AreaPathSchema.safeParse(f.folder).success).map(({ chars, ...f }) => ({
+		...f,
+		tokens: Math.round(chars / 4)
+	})).sort((a, b) => b.tokens - a.tokens || b.ms - a.ms || (a.folder < b.folder ? -1 : a.folder > b.folder ? 1 : 0)).slice(0, 100);
+	const said = async (project, folder) => {
+		const out = [];
+		for (const { area, lastText } of sources) for (const turn of [...area.turns, {
+			...area.turn,
+			reply: lastText?.slice(0, SAID_REPLY_CHARS) ?? null
+		}]) {
+			if (!turn.prompt && !turn.reply) continue;
+			let inside = false;
+			for (const [key, path] of turn.dirs) {
+				const g = await where(key, path);
+				if (g && g.group.toLowerCase() === (project ?? "").toLowerCase() && g.folders.includes(folder)) inside = true;
+			}
+			if (inside) out.push([turn.prompt && `Asked: ${turn.prompt}`, turn.reply && `Answered: ${turn.reply}`].filter(Boolean).join("\n"));
+		}
+		return out.slice(-8);
+	};
+	return {
+		areas,
+		said
 	};
 }
 //#endregion
@@ -15390,20 +16010,28 @@ function createIsoplanClones({ git, claudeDir, clonesFolder = "", clonesFolders 
 		timeoutMs: await timeoutMs()
 	});
 	const why = (r) => `${r.timedOut ? "git took too long" : "git failed"}: ${r.stderr.trim()}`;
-	async function ready(checkout, project) {
-		const remote = await run(checkout, [
-			"remote",
-			"get-url",
-			"origin"
-		]);
-		if (remote.code === 2) return { problem: NO_REMOTE };
-		if (remote.code !== 0) {
-			log(`couldn't read the origin of ${checkout} for Isoplan's own clone of ${project} (${why(remote)})`);
-			return { problem: NOT_MADE };
+	async function ready(from, project) {
+		const checkout = typeof from === "string" ? from : null;
+		let url;
+		if (checkout === null) url = from.url;
+		else {
+			const remote = await run(checkout, [
+				"remote",
+				"get-url",
+				"origin"
+			]);
+			if (remote.code === 2) return { problem: NO_REMOTE };
+			if (remote.code !== 0) {
+				log(`couldn't read the origin of ${checkout} for Isoplan's own clone of ${project} (${why(remote)})`);
+				return {
+					problem: NOT_MADE,
+					reason: why(remote)
+				};
+			}
+			url = remote.stdout.trim();
 		}
-		const url = remote.stdout.trim();
 		if (!cloneFrom(url)) {
-			log(`didn't clone ${project} for a hidden start: ${checkout}'s origin, ${url}, isn't an https, ssh or host:path remote`);
+			log(`didn't clone ${project} for Isoplan's own clone: ${checkout ? `${checkout}'s origin, ` : ""}${url}, isn't an https, ssh or host:path remote`);
 			return { problem: NOT_ON_WIRE };
 		}
 		const earlier = [path.join(clonesDir(claudeDir), earlierCloneName(project)), ...[
@@ -15420,12 +16048,17 @@ function createIsoplanClones({ git, claudeDir, clonesFolder = "", clonesFolders 
 				log(`${clone} is there already and isn't a clone of its own, so it was left as it is and the hidden start of ${project} was refused; remove it and Isoplan clones it again`);
 				return { problem: NOT_MADE };
 			}
-			const set = await run(clone, [
+			const set = checkout ? await run(clone, [
 				"remote",
 				"set-url",
 				"origin",
 				url
-			]);
+			]) : {
+				code: 0,
+				stdout: "",
+				stderr: "",
+				timedOut: false
+			};
 			if (set.code === 0) await keepLongPaths((args) => run(clone, args), platform, (why) => log(`couldn't turn on long paths in Isoplan's own clone ${clone} (${why})`));
 			const fetched = set.code === 0 ? await run(clone, [
 				"fetch",
@@ -15434,7 +16067,10 @@ function createIsoplanClones({ git, claudeDir, clonesFolder = "", clonesFolders 
 			]) : set;
 			if (fetched.code !== 0) {
 				log(`couldn't fetch origin in Isoplan's own clone ${clone} (${why(fetched)})`);
-				return { problem: NOT_FETCHED };
+				return {
+					problem: NOT_FETCHED,
+					reason: why(fetched)
+				};
 			}
 			return clone;
 		}
@@ -15453,7 +16089,7 @@ function createIsoplanClones({ git, claudeDir, clonesFolder = "", clonesFolders 
 			maxRetries: 5,
 			retryDelay: 200
 		});
-		const made = await cloneBorrowing((borrow) => run(root, [
+		const cloneWith = (borrow) => run(root, [
 			...long.git,
 			"clone",
 			"-q",
@@ -15462,26 +16098,33 @@ function createIsoplanClones({ git, claudeDir, clonesFolder = "", clonesFolders 
 			"--",
 			url,
 			staging
-		]), await borrowFrom(run, checkout), clean);
+		]);
+		const made = checkout ? await cloneBorrowing(cloneWith, await borrowFrom(run, checkout), clean) : await cloneWith([]);
 		if (made.code !== 0) {
-			log(`couldn't clone ${project} into ${staging} for a hidden start (${why(made)})`);
+			log(`couldn't clone ${project} into ${staging} for Isoplan's own clone (${why(made)})`);
 			await fs.rm(staging, {
 				recursive: true,
 				force: true,
 				maxRetries: 5,
 				retryDelay: 200
 			}).catch(() => {});
-			return { problem: NOT_MADE };
+			return {
+				problem: NOT_MADE,
+				reason: why(made)
+			};
 		}
 		await renamed(staging, clone);
 		log(`made Isoplan's own clone of ${project} in ${clone}`);
 		return clone;
 	}
-	return (checkout, project) => {
+	return (from, project) => {
 		const key = cloneName(project);
-		const next = (busy.get(key) ?? Promise.resolve()).then(() => ready(checkout, project)).catch((err) => {
+		const next = (busy.get(key) ?? Promise.resolve()).then(() => ready(from, project)).catch((err) => {
 			log(`Isoplan's own clone of ${project} failed: ${err?.stack ?? String(err)}`);
-			return { problem: NOT_MADE };
+			return {
+				problem: NOT_MADE,
+				reason: err?.message ?? String(err)
+			};
 		});
 		busy.set(key, next);
 		next.then(() => busy.get(key) === next && busy.delete(key));
@@ -15491,7 +16134,7 @@ function createIsoplanClones({ git, claudeDir, clonesFolder = "", clonesFolders 
 //#endregion
 //#region src/data-layer/titles.ts
 const ASK_EVERY_MS = 6e5;
-const MAX_FILES = 15;
+const MAX_FILES$1 = 15;
 const MAX_TASKS = 10;
 const MAX_TITLE = 60;
 const TITLE_SYSTEM = "You name coding sessions for a floor plan of a team's work. From the facts given, write a title of 3 to 6 words saying what the session is working on. Reply with the title alone: no quotes and no full stop.";
@@ -15510,7 +16153,7 @@ function titleInputs(facts) {
 	const tasks = subs.filter((a) => a.task).sort((a, b) => cmp(b.lastActive, a.lastActive));
 	return {
 		branch: facts.session.branch,
-		files: [...files.values()].sort((a, b) => cmp(b.at, a.at)).slice(0, MAX_FILES).map((f) => f.file).sort(),
+		files: [...files.values()].sort((a, b) => cmp(b.at, a.at)).slice(0, MAX_FILES$1).map((f) => f.file).sort(),
 		types: [...new Set(subs.map((a) => a.agentType).filter((t) => !!t))].sort(),
 		tasks: [...new Set(tasks.map((a) => a.task))].slice(0, MAX_TASKS).sort()
 	};
@@ -15633,6 +16276,1276 @@ function createNamer(o) {
 		close() {
 			for (const child of running) killTree(child, platform);
 			running.clear();
+		}
+	};
+}
+//#endregion
+//#region src/runner/expert-creation-suggestion-model-calls.ts
+/** Every flag of a call's command line, after the binary. */
+function expertCreationSuggestionModelCallArgs(model, system) {
+	return [
+		"-p",
+		"--no-session-persistence",
+		"--tools",
+		"",
+		"--setting-sources",
+		"",
+		...NO_HOOKS,
+		"--strict-mcp-config",
+		"--model",
+		model,
+		"--system-prompt",
+		system,
+		"--output-format",
+		"json"
+	];
+}
+/** The text of the call's result, the one JSON object `--output-format json` writes; null for a failure. */
+function resultOf(stdout) {
+	let e;
+	try {
+		e = JSON.parse(stdout.trim());
+	} catch {
+		return null;
+	}
+	if (!e || e.type !== "result" || e.is_error === true || e.subtype !== "success" || typeof e.result !== "string") return null;
+	return e.result;
+}
+/** The check's word: YES true, NO false, anything else null. */
+function verdictFrom(text) {
+	const word = /^\W*(yes|no)\b/i.exec(text.trim())?.[1]?.toLowerCase();
+	return word === "yes" ? true : word === "no" ? false : null;
+}
+/** The draft in the model's reply: its one JSON object, fenced or not; null when it isn't a whole draft. */
+function draftFrom(text) {
+	const start = text.indexOf("{");
+	const end = text.lastIndexOf("}");
+	if (start < 0 || end < start) return null;
+	let o;
+	try {
+		o = JSON.parse(text.slice(start, end + 1));
+	} catch {
+		return null;
+	}
+	const proof = o?.proof ?? {};
+	const words = (v, max) => typeof v === "string" && v.trim() && v.trim().length <= max ? v.trim() : null;
+	const key = typeof o?.key === "string" ? o.key.trim().toLowerCase().replace(/[\s_]+/g, "-") : "";
+	const subject = words(o?.subject, MAX_EXPERT_SUBJECT_LENGTH);
+	const question = words(proof.question, MAX_QUESTION_LENGTH);
+	const answer = words(proof.answer, MAX_EXPERT_ANSWER_LENGTH);
+	if (!ExpertNameSchema.safeParse(key).success || !subject || !question || !answer) return null;
+	return {
+		key,
+		subject,
+		proof: {
+			question,
+			answer
+		}
+	};
+}
+/** The check's input: the agent's reply, then the person's message. It goes only to the person's own Claude account, never to the office. */
+const correctionInput = (text, reply) => `The agent's reply:\n${reply ?? "(none)"}\n\nThe person's next message:\n${text}`;
+/** The draft's input. */
+function draftInput(d) {
+	return [
+		`Repo: ${d.project.name}`,
+		`Folder: ${d.folder}`,
+		"",
+		`Its files (${d.files.length}):`,
+		...d.files.length ? d.files : ["(none listed)"],
+		"",
+		"The start of some of them:",
+		...d.excerpts.map((e) => `=== ${e.file}\n${e.text}`),
+		"",
+		"What the session said while it worked there, oldest first:",
+		d.said.length ? d.said.join("\n---\n") : "(nothing kept)"
+	].join("\n");
+}
+function createExpertCreationSuggestionModelCalls(o) {
+	const spawn = o.spawn ?? hiddenSpawn;
+	const env = o.env ?? process.env;
+	const platform = o.platform ?? process.platform;
+	const running = /* @__PURE__ */ new Set();
+	async function ask(what, prompt, input, s) {
+		const bin = await o.binary();
+		if (!bin) return null;
+		const system = (await o.prompt(prompt)).trim();
+		let child;
+		try {
+			child = spawn([...claudeCommand(bin), ...expertCreationSuggestionModelCallArgs(s.draftModel, system)], {
+				cwd: o.cwd ?? os.tmpdir(),
+				env: forkEnv(env)
+			});
+		} catch (err) {
+			o.log(`couldn't start claude to ${what}: ${err.message}`);
+			return null;
+		}
+		running.add(child);
+		return new Promise((resolve) => {
+			let stdout = "";
+			let stderr = "";
+			let over = false;
+			const finish = (text, why) => {
+				if (over) return;
+				over = true;
+				clearTimeout(timer);
+				running.delete(child);
+				if (why) o.log(`couldn't ${what}: ${why}`);
+				resolve(text);
+			};
+			const timer = setTimeout(() => {
+				killTree(child, platform);
+				finish(null, `it took longer than ${s.timeoutSeconds} s`);
+			}, s.timeoutSeconds * 1e3);
+			timer.unref?.();
+			child.stdout.setEncoding("utf8").on("data", (piece) => stdout += piece);
+			child.stderr.setEncoding("utf8").on("data", (piece) => stderr = (stderr + piece).slice(-500));
+			child.stdin.on("error", () => {});
+			child.on("error", (err) => finish(null, `claude failed: ${err.message}`));
+			child.on("close", (code) => {
+				const text = resultOf(stdout);
+				finish(text, text !== null ? void 0 : `claude exited${code === null ? "" : ` with code ${code}`} with no result${stderr.trim() ? `: ${stderr.trim().split("\n").slice(-2).join(" ")}` : ""}`);
+			});
+			child.stdin.end(input);
+		});
+	}
+	return {
+		async corrects(text, reply, s) {
+			const said = await ask("check whether a message corrected the agent", "correction.md", correctionInput(text, reply), s);
+			return said === null ? null : verdictFrom(said);
+		},
+		async draft(input, s) {
+			const said = await ask(`draft an expert on ${input.folder}`, "expert-draft.md", draftInput(input), s);
+			if (said === null) return null;
+			const draft = draftFrom(said);
+			if (!draft) o.log(`the draft of an expert on ${input.folder} wasn't usable: no key, subject, proof question and answer that fit`);
+			return draft;
+		},
+		close() {
+			for (const child of running) killTree(child, platform);
+			running.clear();
+		}
+	};
+}
+//#endregion
+//#region src/runner/expert-file.ts
+/** What an expert file leaves out. */
+const EXPERT_DEFAULTS = {
+	forkTimeLimitMinutes: 5,
+	groundingTimeLimitMinutes: 15,
+	fetchSeconds: 60,
+	maxForks: 3,
+	caps: {
+		perAskerPerDay: 30,
+		openPerAsker: 3,
+		tokenBudgetPerDay: 2e6
+	}
+};
+const KNOWN = [
+	"version",
+	"name",
+	"repo",
+	"subject",
+	"model",
+	"promoteAtTokens",
+	"forkTimeLimitMinutes",
+	"groundingTimeLimitMinutes",
+	"fetchSeconds",
+	"maxForks",
+	"caps",
+	"proof",
+	"window",
+	"areas"
+];
+const KNOWN_CAPS = [
+	"perAskerPerDay",
+	"openPerAsker",
+	"tokenBudgetPerDay"
+];
+const KNOWN_PROOF = ["question", "answer"];
+var Bad = class extends Error {
+	field;
+	reason;
+	constructor(field, reason) {
+		super(`${field}: ${reason}`);
+		this.field = field;
+		this.reason = reason;
+	}
+};
+const isObject$2 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+/** `text` as the expert file named `fileName` (its base name is the expert's name). */
+function parseExpertFile(text, fileName) {
+	let value;
+	try {
+		value = JSON.parse(text);
+	} catch (err) {
+		return {
+			ok: false,
+			field: "(file)",
+			reason: `isn't valid JSON: ${err.message}`
+		};
+	}
+	try {
+		return parse$1(value, path.basename(fileName, ".json"));
+	} catch (err) {
+		if (err instanceof Bad) return {
+			ok: false,
+			field: err.field,
+			reason: err.reason
+		};
+		throw err;
+	}
+}
+function parse$1(value, base) {
+	if (!isObject$2(value)) throw new Bad("(file)", "must be a JSON object");
+	const o = value;
+	const whole = (field, v, min, fallback) => {
+		if (v === void 0 && fallback !== void 0) return fallback;
+		if (v === void 0) throw new Bad(field, "is required");
+		if (typeof v !== "number" || !Number.isInteger(v) || v < min) throw new Bad(field, `must be a whole number of at least ${min}`);
+		return v;
+	};
+	const words = (field, v) => {
+		if (v === void 0) throw new Bad(field, "is required");
+		if (typeof v !== "string" || !v.trim()) throw new Bad(field, "must be text that isn't empty");
+		return v.trim();
+	};
+	if (o.version === void 0) throw new Bad("version", "is required");
+	if (typeof o.version === "number" && Number.isInteger(o.version) && o.version > 1) throw new Bad("version", `is ${o.version}: written for a newer runner; update the Isoplan plugin on this machine`);
+	if (o.version !== 1) throw new Bad("version", "must be 1");
+	if (o.name === void 0) throw new Bad("name", "is required");
+	if (typeof o.name !== "string" || !ExpertNameSchema.safeParse(o.name).success) throw new Bad("name", "must be lowercase letters, digits and dashes, at most 63, starting with a letter or digit");
+	if (o.name !== base) throw new Bad("name", `is "${o.name}", but the file is ${base}.json; they must be the same`);
+	const repo = words("repo", o.repo);
+	if (!path.isAbsolute(repo)) throw new Bad("repo", "must be the full path of the repo's folder");
+	const subject = words("subject", o.subject);
+	if (subject.length > 1e3) throw new Bad("subject", `must be at most ${MAX_EXPERT_SUBJECT_LENGTH} characters`);
+	const model = words("model", o.model);
+	if (model.startsWith("-")) throw new Bad("model", "must be a model name, not starting with -");
+	const caps = o.caps === void 0 ? {} : o.caps;
+	if (!isObject$2(caps)) throw new Bad("caps", "must be an object");
+	if (o.proof === void 0) throw new Bad("proof", "is required");
+	if (!isObject$2(o.proof)) throw new Bad("proof", "must be an object with a question and its answer");
+	if (o.areas !== void 0 && !(Array.isArray(o.areas) && o.areas.every((a) => typeof a === "string"))) throw new Bad("areas", "must be a list of globs");
+	return {
+		ok: true,
+		expert: {
+			version: 1,
+			name: o.name,
+			repo,
+			subject,
+			model,
+			promoteAtTokens: whole("promoteAtTokens", o.promoteAtTokens, 1),
+			forkTimeLimitMinutes: whole("forkTimeLimitMinutes", o.forkTimeLimitMinutes, 1, EXPERT_DEFAULTS.forkTimeLimitMinutes),
+			groundingTimeLimitMinutes: whole("groundingTimeLimitMinutes", o.groundingTimeLimitMinutes, 1, EXPERT_DEFAULTS.groundingTimeLimitMinutes),
+			fetchSeconds: whole("fetchSeconds", o.fetchSeconds, 0, EXPERT_DEFAULTS.fetchSeconds),
+			maxForks: whole("maxForks", o.maxForks, 1, EXPERT_DEFAULTS.maxForks),
+			caps: {
+				perAskerPerDay: whole("caps.perAskerPerDay", caps.perAskerPerDay, 1, EXPERT_DEFAULTS.caps.perAskerPerDay),
+				openPerAsker: whole("caps.openPerAsker", caps.openPerAsker, 1, EXPERT_DEFAULTS.caps.openPerAsker),
+				tokenBudgetPerDay: whole("caps.tokenBudgetPerDay", caps.tokenBudgetPerDay, 1, EXPERT_DEFAULTS.caps.tokenBudgetPerDay)
+			},
+			proof: {
+				question: words("proof.question", o.proof.question),
+				answer: words("proof.answer", o.proof.answer)
+			},
+			...o.window !== void 0 && { window: whole("window", o.window, 1e5) },
+			areas: o.areas ?? []
+		},
+		unknown: [
+			...Object.keys(o).filter((k) => !KNOWN.includes(k)),
+			...Object.keys(caps).filter((k) => !KNOWN_CAPS.includes(k)).map((k) => `caps.${k}`),
+			...Object.keys(o.proof).filter((k) => !KNOWN_PROOF.includes(k)).map((k) => `proof.${k}`)
+		]
+	};
+}
+//#endregion
+//#region src/runner/expert-meter.ts
+const native1m = {
+	window: 1e6,
+	compactAt: 967e3
+};
+const window200k = {
+	window: 2e5,
+	compactAt: null
+};
+/** The office server's table as of 6 Nov 2026: a model id matches the longest key it starts with, at a "-" or "[" or its end. */
+const EXPERT_WINDOWS = {
+	"claude-fable-5-1": native1m,
+	"claude-opus-5-5": native1m,
+	"claude-sonnet-5-5": native1m,
+	"claude-haiku-5-5": native1m,
+	"claude-fable-5": native1m,
+	"claude-opus-5": native1m,
+	"claude-sonnet-5": native1m,
+	"claude-opus-4-8": native1m,
+	"claude-opus-4-7": native1m,
+	"claude-opus-4-6": window200k,
+	"claude-opus-4-6[1m]": native1m,
+	"claude-sonnet-4-6": window200k,
+	"claude-sonnet-4-6[1m]": native1m,
+	"claude-opus-4-5": window200k,
+	"claude-opus-4-5-20251101": window200k,
+	"claude-sonnet-4-5": window200k,
+	"claude-sonnet-4-5-20250929": window200k,
+	"claude-haiku-4-5": window200k,
+	"claude-haiku-4-5-20251001": window200k
+};
+/** How far below the compaction point a threshold has to stay. */
+const THRESHOLD_MARGIN = 1e5;
+/**
+* The window of the model the trunk resolved to: the expert file's `window` when it sets one (with
+* the table's compaction point only when the table gives that same window), else the table's entry.
+* With neither, why the generation can't run.
+*/
+function windowFor(modelId, override) {
+	const key = Object.keys(EXPERT_WINDOWS).filter((k) => modelId.startsWith(k) && (modelId.length === k.length || "-[".includes(modelId.charAt(k.length)))).sort((x, y) => y.length - x.length)[0];
+	const listed = key === void 0 ? null : EXPERT_WINDOWS[key];
+	if (override !== void 0) return {
+		ok: true,
+		window: override,
+		compactAt: listed?.window === override ? listed.compactAt : null
+	};
+	if (listed) return {
+		ok: true,
+		...listed
+	};
+	return {
+		ok: false,
+		why: `no context window is known for ${modelId}; set "window" in the expert file`
+	};
+}
+/** A trunk's meter after a turn: that turn's context. */
+const meterOf = (turn) => turn.context;
+/** Why `promoteAt` is too close to the compaction point (the table's `compactAt`, else the window), or null. */
+function thresholdProblem(promoteAt, compactAt) {
+	if (promoteAt <= compactAt - 1e5) return null;
+	return `promoteAtTokens ${promoteAt} is within ${THRESHOLD_MARGIN.toLocaleString("en")} tokens of the compaction point at ${compactAt}; set it lower in the expert file`;
+}
+/** Why a junior grounded at `grounded` tokens leaves too little room below `promoteAt` for learned notes, or null. */
+function notesRoomProblem(promoteAt, grounded) {
+	if (promoteAt - grounded >= 1e4) return null;
+	return `room for fewer than 20 learned notes: grounded at ${grounded} tokens, promoteAtTokens ${promoteAt}; raise promoteAtTokens in the expert file`;
+}
+//#endregion
+//#region src/runner/expert-state.ts
+const statePath = (dir) => path.join(dir, "state.json");
+const indexPath = (dir, n) => path.join(dir, `index-${n}.json`);
+const STATES = [
+	"grounding",
+	"junior",
+	"senior",
+	"retired",
+	"failed"
+];
+const isGeneration = (g) => {
+	const o = g;
+	return !!o && Number.isInteger(o.n) && typeof o.trunk === "string" && typeof o.model === "string" && typeof o.commit === "string" && Number.isFinite(o.groundedAt) && Number.isFinite(o.meter) && Number.isInteger(o.notes) && STATES.includes(o.state) && (o.last === void 0 || o.last === null || typeof o.last === "string");
+};
+async function readJson$1(file) {
+	try {
+		return JSON.parse(await fs.readFile(file, "utf8"));
+	} catch {
+		return null;
+	}
+}
+async function writeJson(file, value) {
+	await fs.mkdir(path.dirname(file), { recursive: true });
+	const temp = `${file}.${process.pid}.tmp`;
+	await fs.writeFile(temp, JSON.stringify(value, null, 2) + "\n");
+	for (let tries = 0;; tries++) try {
+		return await fs.rename(temp, file);
+	} catch (err) {
+		if (tries >= 5 || ![
+			"EPERM",
+			"EBUSY",
+			"EACCES"
+		].includes(err.code ?? "")) throw err;
+		await new Promise((r) => setTimeout(r, 50 * (tries + 1)));
+	}
+}
+/** The expert's state.json, or null when there is none it can use. */
+async function readState(dir) {
+	const o = await readJson$1(statePath(dir));
+	if (!o || o.version !== 1 || typeof o.fingerprint !== "string" || typeof o.repo !== "string" || typeof o.branch !== "string" || !Array.isArray(o.generations) || !o.generations.every(isGeneration)) return null;
+	return o;
+}
+const writeState = (dir, s) => writeJson(statePath(dir), s);
+/** Generation n's file → commit index; empty when it has none. */
+async function readIndex(dir, n) {
+	const files = (await readJson$1(indexPath(dir, n)))?.files;
+	if (!files || typeof files !== "object" || Array.isArray(files)) return {};
+	return Object.fromEntries(Object.entries(files).filter((e) => typeof e[1] === "string"));
+}
+const writeIndex = (dir, n, index) => writeJson(indexPath(dir, n), {
+	version: 1,
+	files: index
+});
+/** The expert file fields a new generation is grounded for: a change to any of them starts one. */
+function fingerprint(file) {
+	return createHash("sha256").update(JSON.stringify([
+		file.repo,
+		file.subject,
+		file.model,
+		file.proof.question,
+		file.proof.answer,
+		file.window ?? null
+	])).digest("hex");
+}
+const EXCERPT_CHARS = 3e3;
+/** How long creating an expert may take before it is said to have failed. */
+const EXPERT_CREATION_LIMIT_MS = 36e5;
+/** How long a folder whose draft couldn't be made waits, for that session, before it is tried again. */
+const RETRY_MS = 36e5;
+const MAX_CHECKS_WAITING = 50;
+const MAX_VERDICTS = 1e3;
+const MAX_SESSIONS = 200;
+const PROJECT_MS = 3e5;
+const SETTINGS_MS = 5e3;
+const HOUR_MS = 36e5;
+const DAY_MS$1 = 864e5;
+const FILE_VERSION = 1;
+/** The address of a suggestion's review on the office's floor: its http address, with `/?expert-creation-suggestion=<id>`. */
+function reviewUrl(server, id) {
+	const url = new URL(server);
+	url.protocol = url.protocol === "wss:" ? "https:" : "http:";
+	url.pathname = url.pathname.replace(/\/data-layer\/?$/, "") + "/";
+	url.search = `expert-creation-suggestion=${id}`;
+	url.hash = "";
+	return url.toString();
+}
+/** A folder's signals, given the session's context window (null when it isn't known): its minutes to a tenth, rounded down. */
+function signalsOf(area, window) {
+	return {
+		share: window ? Math.min(1, area.tokens / window) : 0,
+		tokens: area.tokens,
+		minutes: Math.floor(area.ms / 6e3) / 10,
+		corrections: area.corrections
+	};
+}
+/** Whether a folder's signals pass any of their thresholds. */
+const passes = (why, t) => why.share >= t.contextShare || why.tokens >= t.tokens || why.minutes >= t.minutes || why.corrections >= t.corrections;
+/** The signals a suggestion gives (ADR 0004): those that passed their thresholds, each other one 0. Share and tokens are one signal, what reading and searching there took. */
+function passed(why, t) {
+	const spent = why.share >= t.contextShare || why.tokens >= t.tokens;
+	return {
+		share: spent ? why.share : 0,
+		tokens: spent ? why.tokens : 0,
+		minutes: why.minutes >= t.minutes ? why.minutes : 0,
+		corrections: why.corrections >= t.corrections ? why.corrections : 0
+	};
+}
+const within$1 = (folder, other) => other === "." || folder === other || folder.startsWith(other + "/");
+const near = (a, b) => within$1(a, b) || within$1(b, a);
+/** The addresses Isoplan's own clone of a project is made from where this computer has no checkout, in order: https from its id, then ssh; none for a repo with no remote. */
+function cloneUrls(project) {
+	if (project.startsWith("local:")) return [];
+	const [host, ...rest] = project.split("/");
+	return rest.length ? [`https://${project}.git`, `git@${host}:${rest.join("/")}.git`] : [`https://${project}.git`];
+}
+/** The files under `folder` of `checkout`, relative to it, by name, at most `max`; dot entries and node_modules left out. */
+async function folderFiles(checkout, folder, max = 200) {
+	const out = [];
+	const queue = [folder === "." ? "" : folder];
+	while (queue.length && out.length < max) {
+		const rel = queue.shift();
+		const entries = await fs.readdir(path.join(checkout, rel), { withFileTypes: true }).catch(() => []);
+		for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+			if (e.name.startsWith(".") || e.name === "node_modules") continue;
+			const p = rel ? `${rel}/${e.name}` : e.name;
+			if (e.isDirectory()) queue.push(p);
+			else if (e.isFile() && out.length < max) out.push(p);
+		}
+	}
+	return out;
+}
+/** The start of the first `max` of `files` (relative to `checkout`) that read as text, each at most EXCERPT_CHARS; an empty file, or one with a NUL byte, is left out. */
+async function folderExcerpts(checkout, files, max = 6) {
+	const out = [];
+	for (const file of files) {
+		if (out.length >= max) break;
+		const handle = await fs.open(path.join(checkout, file), "r").catch(() => null);
+		if (!handle) continue;
+		try {
+			const { bytesRead, buffer } = await handle.read(Buffer.alloc(EXCERPT_CHARS * 4), 0, EXCERPT_CHARS * 4, 0);
+			const bytes = buffer.subarray(0, bytesRead);
+			const text = bytes.includes(0) ? "" : bytes.toString("utf8").slice(0, EXCERPT_CHARS).trim();
+			if (text) out.push({
+				file,
+				text
+			});
+		} catch {} finally {
+			await handle.close().catch(() => {});
+		}
+	}
+	return out;
+}
+async function writeWhole$1(file, text) {
+	await fs.mkdir(path.dirname(file), { recursive: true });
+	const temp = `${file}.${process.pid}.tmp`;
+	await fs.writeFile(temp, text);
+	for (let tries = 0;; tries++) try {
+		return await fs.rename(temp, file);
+	} catch (err) {
+		if (tries >= 5 || ![
+			"EPERM",
+			"EBUSY",
+			"EACCES"
+		].includes(err.code ?? "")) throw err;
+		await new Promise((r) => setTimeout(r, 50 * (tries + 1)));
+	}
+}
+function createExpertCreationSuggestions(o) {
+	const now = o.now ?? Date.now;
+	const pollMs = o.pollMs ?? 2e3;
+	const keptMs = o.keptMs ?? 5e3;
+	const file = path.join(o.isoplanDir, "runner", "expert-creation-suggestions.json");
+	const sessionFile = (bare) => path.join(o.isoplanDir, "expert-creation-suggestions", `${bare}.json`);
+	const expertFile = (key) => path.join(o.isoplanDir, "experts", `${key}.json`);
+	const offices = o.offices.map(() => ({
+		ready: false,
+		fresh: true,
+		dismissals: [],
+		queue: []
+	}));
+	let saved = {
+		version: FILE_VERSION,
+		foldersAlreadySuggested: [],
+		expertCreationSuggestions: [],
+		expertCreations: [],
+		held: []
+	};
+	let started = false;
+	let closed = false;
+	const latest = /* @__PURE__ */ new Map();
+	const busy = /* @__PURE__ */ new Set();
+	const officeWideSuggestionRequestsBeingDrafted = /* @__PURE__ */ new Set();
+	const cleared = /* @__PURE__ */ new Set();
+	const keeping = /* @__PURE__ */ new Map();
+	const expertCreations = /* @__PURE__ */ new Map();
+	const verdicts = /* @__PURE__ */ new Map();
+	const waiting = [];
+	const checked = [];
+	let checking = false;
+	let checkOn = false;
+	let checkTimer = null;
+	let saving = Promise.resolve();
+	let read = null;
+	const settings = () => {
+		if (!read || now() - read.at > SETTINGS_MS) read = {
+			at: now(),
+			settings: o.settings().then((s) => (checkOn = s.expertCreationSuggestions.correctionCheck === true, s.expertCreationSuggestions))
+		};
+		const mine = read;
+		return mine.settings.catch((err) => (read === mine && (read = null), Promise.reject(err)));
+	};
+	const indexOf = (server) => o.offices.findIndex((f) => f.server === server);
+	const say = (text) => o.log(text);
+	const done = (m) => m.state === "ready" || m.state === "failed";
+	const save = () => {
+		const copy = JSON.stringify(saved, null, 2) + "\n";
+		saving = saving.then(() => writeWhole$1(file, copy)).catch((err) => say(`couldn't save the expert creation suggestions: ${err.message}`));
+		return saving;
+	};
+	const lineOf = (r, server) => {
+		const label = o.offices[indexOf(server)]?.label;
+		return {
+			type: "expert-creation-suggestion",
+			server,
+			...label && { label },
+			id: r.id,
+			key: r.key,
+			name: expertDisplayName(r.key),
+			folder: r.folder,
+			url: reviewUrl(server, r.id),
+			why: r.message.why,
+			...r.officeWideReason && { officeWideReason: r.officeWideReason }
+		};
+	};
+	const tell = (r, line) => r.bare ? o.hooked(r.bare)?.send(line) : void 0;
+	const sessionWrites = /* @__PURE__ */ new Map();
+	function writeSessionFile(bare) {
+		if (!bare || !/^[\w-]{1,200}$/.test(bare)) return;
+		const write = async () => {
+			const open = saved.expertCreationSuggestions.filter((r) => r.bare === bare).flatMap((r) => Object.entries(r.offices).filter(([, s]) => s === "open").map(([server]) => lineOf(r, server)));
+			if (open.length) await writeWhole$1(sessionFile(bare), JSON.stringify({ expertCreationSuggestions: open }, null, 2) + "\n");
+			else await fs.rm(sessionFile(bare), { force: true });
+		};
+		const next = (sessionWrites.get(bare) ?? Promise.resolve()).then(write).catch((err) => say(`couldn't write the open expert creation suggestions of session ${bare}: ${err.message}`)).finally(() => sessionWrites.get(bare) === next && sessionWrites.delete(bare));
+		sessionWrites.set(bare, next);
+	}
+	function flush(index) {
+		const office = o.offices[index];
+		const st = offices[index];
+		if (!st.ready || closed) return;
+		while (st.queue.length && office.send(st.queue[0])) st.queue.shift();
+		if (st.fresh) {
+			st.fresh = false;
+			for (const r of saved.expertCreationSuggestions) if (r.offices[office.server] === "open") office.send(r.message);
+		}
+		let changed = false;
+		for (const r of saved.expertCreationSuggestions) {
+			if (r.offices[office.server] !== "pending") continue;
+			if (isDismissed(st.dismissals, r.project.id, r.folder, now())) {
+				r.offices[office.server] = "ended";
+				changed = true;
+				say(`the expert creation suggestion ${r.id} on ${r.folder} of ${r.project.name} isn't sent to ${office.server}, where its person dismissed that folder, and is withdrawn wherever else it went`);
+				withdraw(r);
+				writeSessionFile(r.bare);
+				continue;
+			}
+			if (!office.send(r.message)) continue;
+			r.offices[office.server] = "sent";
+			changed = true;
+			say(`suggested an expert on ${r.folder} of ${r.project.name} (${r.key}) to ${office.server}, as ${r.id}`);
+			keep(r, office.server);
+		}
+		if (changed) save();
+		for (const m of expertCreations.values()) if (m.index === index) sendExpertCreationProgress(m);
+	}
+	function keep(r, server) {
+		const k = `${r.id}\n${server}`;
+		clearTimeout(keeping.get(k));
+		const timer = setTimeout(() => {
+			keeping.delete(k);
+			if (closed || r.offices[server] !== "sent") return;
+			r.offices[server] = "open";
+			tell(r, lineOf(r, server));
+			writeSessionFile(r.bare);
+			save();
+		}, keptMs);
+		timer.unref?.();
+		keeping.set(k, timer);
+	}
+	function withdraw(r) {
+		for (const [other, state] of Object.entries(r.offices)) {
+			if (state === "ended" || state === "refused") continue;
+			r.offices[other] = "ended";
+			const i = indexOf(other);
+			if (state === "pending" || i < 0) continue;
+			sendOrQueue(i, {
+				type: "expert-creation-suggestion-ended",
+				v: 1,
+				id: r.id,
+				why: "withdrawn"
+			});
+			if (state === "open") tell(r, {
+				type: "expert-creation-suggestion-ended",
+				server: other,
+				id: r.id,
+				why: "withdrawn"
+			});
+		}
+	}
+	function sendOrQueue(index, message) {
+		const st = offices[index];
+		if (!(st.ready && o.offices[index].send(message))) st.queue.push(message);
+	}
+	const expertProjects = /* @__PURE__ */ new Map();
+	async function coveredHere(project, folder) {
+		for (const e of o.experts()) {
+			if (!e.areas?.length || !areaCovers(e.areas, folder)) continue;
+			let hit = expertProjects.get(e.repo);
+			if (!hit || now() - hit.at > PROJECT_MS) expertProjects.set(e.repo, hit = {
+				at: now(),
+				project: o.projectOf(e.repo).catch(() => null)
+			});
+			if (await hit.project === project) return true;
+		}
+		return false;
+	}
+	const retryable = (r, at) => !!r?.refusedAt && at - r.refusedAt >= 36e5 && Object.values(r.offices).every((s) => s === "refused");
+	const alreadySuggestedNear = (session, project, folder, at) => saved.foldersAlreadySuggested.some((x) => x.session === session && x.project === project && near(folder, x.folder) && !(x.expertCreationSuggestionId && retryable(saved.expertCreationSuggestions.find((r) => r.id === x.expertCreationSuggestionId), at)));
+	const heldNear = (session, project, folder, at) => (saved.held = saved.held.filter((x) => x.until > at)).some((x) => x.session === session && x.project === project && near(folder, x.folder));
+	const names = (s) => new Set([s.project, ...s.areas.map((a) => a.project ?? s.project)].map((p) => p.id.toLowerCase()));
+	const mayTell = (session, project) => [...latest.get(session)?.values() ?? []].filter((p) => names(p).has(project)).map((p) => p.server);
+	const couldBeSuggested = (bare) => [...latest.values()].some((byOffice) => [...byOffice.values()].some((p) => p.bare === bare && !!offices[indexOf(p.server)]?.ready));
+	function forget(t, at) {
+		const keep = t.rememberDays * DAY_MS$1;
+		saved.foldersAlreadySuggested = saved.foldersAlreadySuggested.filter((x) => at - x.at < keep);
+		saved.expertCreationSuggestions = saved.expertCreationSuggestions.filter((r) => at - r.at < keep);
+		const old = saved.expertCreations.filter((k) => k.state && at - k.since >= keep);
+		if (!old.length) return;
+		for (const k of old) expertCreations.delete(k.request);
+		saved.expertCreations = saved.expertCreations.filter((k) => !old.includes(k));
+		save();
+	}
+	const windowOf = (s) => {
+		if (s.window) return s.window;
+		const w = s.model ? windowFor(s.model) : null;
+		return w && w.ok ? w.window : null;
+	};
+	async function drafted(a, t) {
+		const where = `${a.folder} of ${a.project.name}`;
+		if (!a.checkout) {
+			say(`no expert is suggested on ${where}: this computer has no checkout of the repo to draft it from`);
+			return null;
+		}
+		const named = await o.scan(a.folder);
+		if (named) {
+			say(`no expert is suggested on a folder of ${a.project.name}: its path matches the secret pattern "${named}"`);
+			return null;
+		}
+		const files = await folderFiles(a.checkout, a.folder);
+		const excerpts = await folderExcerpts(a.checkout, files);
+		if (!excerpts.length) {
+			say(`no expert is suggested on ${where}: none of its files could be read to draft it from`);
+			return null;
+		}
+		const draft = await o.draft({
+			project: a.project,
+			folder: a.folder,
+			files,
+			excerpts,
+			said: a.said
+		}, t);
+		if (!draft) {
+			say(`no expert is suggested on ${where}: no usable draft came`);
+			return null;
+		}
+		const matched = await o.scan([
+			a.folder,
+			draft.key,
+			draft.subject,
+			draft.proof.question,
+			draft.proof.answer
+		].join("\n"));
+		if (matched) {
+			say(`no expert is suggested on ${where}: its draft matches the secret pattern "${matched}"`);
+			return null;
+		}
+		const message = {
+			type: "expert-creation-suggestion",
+			v: 1,
+			id: a.id,
+			session: a.session,
+			project: {
+				id: a.project.id,
+				name: a.project.name
+			},
+			folder: a.folder,
+			scope: a.scope,
+			key: draft.key,
+			subject: draft.subject,
+			area: [a.folder],
+			proof: draft.proof,
+			why: passed(a.why, t),
+			at: new Date(now()).toISOString()
+		};
+		const parsed = ExpertCreationSuggestionMessageSchema.safeParse(message);
+		if (!parsed.success) {
+			say(`no expert is suggested on ${where}: its suggestion doesn't fit the protocol: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
+			return null;
+		}
+		return parsed.data;
+	}
+	const record = (message, bare, servers) => ({
+		id: message.id,
+		scope: message.scope,
+		session: message.session,
+		bare,
+		project: message.project,
+		folder: message.folder,
+		key: message.key,
+		at: now(),
+		message,
+		offices: Object.fromEntries([...servers].map((s) => [s, "pending"]))
+	});
+	async function consider(s) {
+		const index = indexOf(s.server);
+		if (!offices[index].ready) return;
+		const t = await settings();
+		const window = windowOf(s);
+		const at = now();
+		forget(t, at);
+		const passing = s.areas.map((area) => ({
+			area,
+			project: area.project ?? s.project,
+			why: signalsOf(area, window)
+		})).filter((c) => passes(c.why, t));
+		const deepest = passing.filter((c) => !passing.some((d) => d.project.id.toLowerCase() === c.project.id.toLowerCase() && d.area.folder !== c.area.folder && areaCovers([c.area.folder], d.area.folder)));
+		const candidates = [];
+		for (const { area, project, why } of deepest) {
+			const id = project.id.toLowerCase();
+			if (alreadySuggestedNear(s.session, id, area.folder, at) || heldNear(s.session, id, area.folder, at)) continue;
+			if (offices.some((f) => isDismissed(f.dismissals, id, area.folder, at))) continue;
+			if (await coveredHere(id, area.folder)) continue;
+			candidates.push({
+				area,
+				project,
+				why
+			});
+		}
+		const depth = (folder) => folder.split("/").length;
+		const best = candidates.sort((a, b) => depth(b.area.folder) - depth(a.area.folder) || b.area.tokens - a.area.tokens)[0];
+		if (!best) return;
+		const { area, project, why } = best;
+		const id = project.id.toLowerCase();
+		const checkout = area.project ? await o.checkout(index, project).catch(() => null) : s.checkout;
+		const said = await s.said(area.project ? area.project.id : null, area.folder).catch(() => []);
+		const message = await drafted({
+			id: randomBytes(12).toString("base64url"),
+			scope: "session",
+			session: s.session,
+			project,
+			folder: area.folder,
+			checkout,
+			said,
+			why
+		}, t);
+		if (closed) return;
+		if (!message) {
+			saved.held.push({
+				session: s.session,
+				project: id,
+				folder: area.folder,
+				until: now() + RETRY_MS
+			});
+			save();
+			return;
+		}
+		saved.foldersAlreadySuggested.push({
+			session: s.session,
+			project: id,
+			folder: area.folder,
+			at,
+			expertCreationSuggestionId: message.id
+		});
+		saved.expertCreationSuggestions.push(record(message, s.bare, /* @__PURE__ */ new Set([s.server, ...mayTell(s.session, id)])));
+		await save();
+		o.offices.forEach((_, i) => flush(i));
+	}
+	async function draftOfficeWideExpertCreationSuggestion(index, m) {
+		const server = o.offices[index].server;
+		if (officeWideSuggestionRequestsBeingDrafted.has(m.request) || saved.expertCreationSuggestions.some((r) => r.id === m.request)) return;
+		officeWideSuggestionRequestsBeingDrafted.add(m.request);
+		try {
+			const project = m.project.id.toLowerCase();
+			let message = null;
+			try {
+				const s = m.sessions.map((id) => latest.get(id)?.get(server)).find((x) => !!x);
+				const area = s?.areas.find((a) => a.folder === m.folder && (a.project ?? s.project).id.toLowerCase() === project);
+				const own = !!s && s.project.id.toLowerCase() === project && !area?.project;
+				const checkout = own ? s.checkout : await o.checkout(index, m.project).catch(() => null);
+				const said = s ? await s.said(own ? null : m.project.id, m.folder).catch(() => []) : [];
+				const why = area && s ? signalsOf(area, windowOf(s)) : {
+					share: 0,
+					tokens: 0,
+					minutes: 0,
+					corrections: 0
+				};
+				const t = await settings();
+				message = await drafted({
+					id: m.request,
+					scope: "office",
+					session: m.sessions[0],
+					project: m.project,
+					folder: m.folder,
+					checkout,
+					said,
+					why
+				}, t);
+			} catch (err) {
+				say(`no office-wide expert is suggested on ${m.folder} of ${m.project.name} (${m.request}): drafting it failed: ${err.message}`);
+			}
+			if (closed) return;
+			if (!message) return sendOrQueue(index, {
+				type: "expert-creation-suggestion-ended",
+				v: 1,
+				id: m.request,
+				why: "no-draft"
+			});
+			const first = m.sessions[0];
+			saved.foldersAlreadySuggested.push({
+				session: first,
+				project,
+				folder: m.folder,
+				at: now(),
+				expertCreationSuggestionId: m.request
+			});
+			saved.expertCreationSuggestions.push({
+				...record(message, first.startsWith("claude-code:") ? first.slice(12) : null, [server]),
+				officeWideReason: {
+					searchedBySessions: m.searchedBySessions,
+					searchWindowDays: m.searchWindowDays
+				}
+			});
+			await save();
+			flush(index);
+		} finally {
+			officeWideSuggestionRequestsBeingDrafted.delete(m.request);
+		}
+	}
+	function ended(index, m) {
+		const server = o.offices[index].server;
+		const r = saved.expertCreationSuggestions.find((x) => x.id === m.id);
+		if (!r || r.offices[server] === void 0) return say(`${server} says the expert creation suggestion ${m.id} ended, but this runner didn't suggest it there`);
+		const was = r.offices[server];
+		r.offices[server] = m.why === "refused" ? "refused" : "ended";
+		if (Object.values(r.offices).every((s) => s === "refused")) r.refusedAt = now();
+		if (was === "open") tell(r, {
+			type: "expert-creation-suggestion-ended",
+			server,
+			id: r.id,
+			why: m.why
+		});
+		say(`the expert creation suggestion ${r.id} on ${r.folder} of ${r.project.name} ended in ${server}: ${m.why}`);
+		if (m.why === "made") {
+			r.made = {
+				key: m.key,
+				server
+			};
+			withdraw(r);
+			tellReady(r);
+		} else if (m.why === "dismissed") withdraw(r);
+		save();
+		writeSessionFile(r.bare);
+	}
+	function tellReady(r) {
+		const hooks = r.made && !r.told && r.bare ? o.hooked(r.bare) : null;
+		if (!hooks || !r.made) return;
+		hooks.send({
+			type: "expert-ready",
+			server: r.made.server,
+			id: r.id,
+			key: r.made.key,
+			name: expertDisplayName(r.made.key),
+			folder: r.folder
+		});
+		r.told = true;
+		save();
+	}
+	function sendExpertCreationProgress(m) {
+		const text = `${m.state}\n${m.detail ?? ""}`;
+		if (m.sent !== text && offices[m.index].ready && o.offices[m.index].send({
+			type: "expert-creation-progress",
+			v: 1,
+			request: m.request,
+			expertCreationSuggestionId: m.expertCreationSuggestionId,
+			state: m.state,
+			...m.detail && { detail: m.detail }
+		})) m.sent = text;
+	}
+	function setExpertCreationProgress(m, state, detail) {
+		const changed = m.state !== state || m.detail !== detail;
+		m.state = state;
+		m.detail = detail;
+		if (changed && done(m)) {
+			say(`expert ${m.key}, created from suggestion ${m.expertCreationSuggestionId}: ${state}${detail ? `: ${detail}` : ""}`);
+			if (m.timer) clearTimeout(m.timer);
+			m.timer = null;
+			const kept = saved.expertCreations.find((k) => k.request === m.request);
+			if (kept) {
+				Object.assign(kept, {
+					state,
+					...detail && { detail }
+				});
+				save();
+			}
+			if (state === "failed" && m.wrote) clear(m);
+		}
+		sendExpertCreationProgress(m);
+	}
+	async function clear(m) {
+		const key = m.key;
+		cleared.add(key);
+		try {
+			await fs.rm(expertFile(key), { force: true });
+			say(`removed the expert file of ${key}, whose creation failed, so this computer stops hosting it`);
+			m.wrote = false;
+			const kept = saved.expertCreations.find((k) => k.request === m.request);
+			if (kept) kept.wrote = false;
+			save();
+		} catch (err) {
+			say(`couldn't remove the expert file ${expertFile(key)}, whose creation failed: ${err.message}`);
+		}
+	}
+	async function stopped(key) {
+		for (let waited = 0; o.experts().some((e) => e.name === key); waited += pollMs) {
+			if (closed || waited >= 6e4) return false;
+			await new Promise((r) => setTimeout(r, pollMs));
+		}
+		cleared.delete(key);
+		return true;
+	}
+	async function follow(m) {
+		m.timer = null;
+		if (closed || done(m)) return;
+		m.working = true;
+		let step = null;
+		try {
+			const st = await readState(path.join(o.isoplanDir, "experts", m.key));
+			const hosted = o.experts().find((e) => e.name === m.key);
+			const g = st?.generations.filter((x) => x.groundedAt >= m.since).reduce((a, b) => !a || b.n > a.n ? b : a, null) ?? null;
+			delete m.problem;
+			if (g?.state === "junior" || g?.state === "senior") return setExpertCreationProgress(m, "ready");
+			if (g?.state === "failed") return setExpertCreationProgress(m, "failed", g.proof?.passed === false ? "its answer to the proof question didn't match the answer expected" : "its grounding failed; its health log on that computer says why");
+			if (!g && hosted?.state === "failed") return setExpertCreationProgress(m, "failed", "its own copy of the repo couldn't be made");
+			step = !g ? "cloning" : g.commit ? "proof" : "grounding";
+		} catch (err) {
+			const problem = err.message;
+			if (m.problem !== problem) say(`couldn't look at how expert ${m.key}, created from suggestion ${m.expertCreationSuggestionId}, is coming along (${problem}); it is looked at again`);
+			m.problem = problem;
+		} finally {
+			m.working = false;
+		}
+		if (closed || done(m)) return;
+		if (now() - m.since > 36e5) return setExpertCreationProgress(m, "failed", `it wasn't ready within ${EXPERT_CREATION_LIMIT_MS / 6e4} minutes${m.problem ? `; the last look at it failed: ${m.problem}` : ""}`);
+		if (step) setExpertCreationProgress(m, step);
+		m.timer = setTimeout(() => void follow(m).catch(orLog(`follow expert ${m.key}`)), pollMs);
+		m.timer.unref?.();
+	}
+	async function createExpertFromSuggestion(index, m) {
+		if (expertCreations.has(m.request)) return;
+		const server = o.offices[index].server;
+		const same = m.by.id === o.account.id ? [...expertCreations.values()].find((x) => x.expertCreationSuggestionId === m.expertCreationSuggestionId && x.key === m.key && x.state !== "failed") : void 0;
+		if (same) {
+			expertCreations.delete(same.request);
+			const kept = saved.expertCreations.find((k) => k.request === same.request);
+			if (kept) Object.assign(kept, {
+				request: m.request,
+				server
+			});
+			Object.assign(same, {
+				request: m.request,
+				index,
+				sent: null
+			});
+			expertCreations.set(m.request, same);
+			say(`expert ${m.key}, created from suggestion ${m.expertCreationSuggestionId}, is asked for again as ${m.request}: its creation goes on`);
+			save();
+			return sendExpertCreationProgress(same);
+		}
+		const expertCreation = {
+			index,
+			request: m.request,
+			expertCreationSuggestionId: m.expertCreationSuggestionId,
+			key: m.key,
+			since: now(),
+			state: "cloning",
+			sent: null,
+			wrote: false,
+			working: true,
+			timer: null
+		};
+		expertCreations.set(m.request, expertCreation);
+		const kept = {
+			request: m.request,
+			expertCreationSuggestionId: m.expertCreationSuggestionId,
+			key: m.key,
+			since: expertCreation.since,
+			server,
+			wrote: false
+		};
+		saved.expertCreations.push(kept);
+		save();
+		const fail = (detail) => setExpertCreationProgress(expertCreation, "failed", detail);
+		try {
+			if (m.by.id !== o.account.id) return fail("this computer's runner is someone else's, so it makes experts only for them");
+			if (cleared.has(m.key) && !await stopped(m.key)) return fail(`the expert named ${m.key}, whose creation failed, is still stopping on this computer; try again in a minute`);
+			if (o.experts().some((e) => e.name === m.key) || await fs.stat(expertFile(m.key)).then(() => true, () => false)) return fail(`an expert named ${m.key} is already on this computer`);
+			let checkout = await o.checkout(index, m.project).catch(() => null);
+			if (!checkout) {
+				const urls = cloneUrls(m.project.id);
+				if (!urls.length) return fail(`this computer has no checkout of ${m.project.name}, and its repo has no remote to clone it from`);
+				sendExpertCreationProgress(expertCreation);
+				const reasons = [];
+				for (const url of urls) {
+					const clone = await o.clone(url, m.project.id);
+					if (closed) return;
+					if (typeof clone === "string") {
+						checkout = clone;
+						break;
+					}
+					reasons.push(`from ${url}, ${clone.reason ?? clone.problem}`);
+				}
+				if (!checkout) return fail(`this computer has no checkout of ${m.project.name}, and Isoplan's own copy of it couldn't be made: ${reasons.join("; ")}`);
+			}
+			const t = await settings();
+			const body = {
+				version: 1,
+				name: m.key,
+				repo: checkout,
+				subject: m.subject,
+				model: m.model,
+				promoteAtTokens: t.promoteAtTokens,
+				proof: m.proof,
+				areas: m.area
+			};
+			const text = JSON.stringify(body, null, 2) + "\n";
+			const parsed = parseExpertFile(text, `${m.key}.json`);
+			if (!parsed.ok) return fail(`its expert file wouldn't be read: ${parsed.field} ${parsed.reason}`);
+			try {
+				await writeWhole$1(expertFile(m.key), text);
+			} catch (err) {
+				say(`couldn't write the expert file ${expertFile(m.key)}: ${err.message}`);
+				return fail("its expert file couldn't be written on that computer");
+			}
+			expertCreation.wrote = kept.wrote = true;
+			say(`wrote the expert file for ${m.key}, created from suggestion ${m.expertCreationSuggestionId} by ${m.by.name || m.by.id}, for ${checkout}`);
+			save();
+		} catch (err) {
+			if (!closed) fail(`creating it stopped on that computer: ${err.message}`);
+			return;
+		} finally {
+			expertCreation.working = false;
+		}
+		await follow(expertCreation);
+	}
+	async function check() {
+		if (checking || closed) return;
+		while (waiting.length && !couldBeSuggested(waiting[0].bare)) waiting.shift();
+		if (!waiting.length) return;
+		checking = true;
+		let again = false;
+		try {
+			const t = await settings();
+			if (!t.correctionCheck) return void (waiting.length = 0);
+			const at = now();
+			while (checked.length && at - checked[0] >= HOUR_MS) checked.shift();
+			if (checked.length >= t.checksPerHour) {
+				if (!checkTimer) {
+					checkTimer = setTimeout(() => (checkTimer = null, void check()), checked[0] + HOUR_MS - at);
+					checkTimer.unref?.();
+				}
+				return;
+			}
+			const next = waiting.shift();
+			checked.push(at);
+			again = true;
+			const verdict = await o.corrects(next.text, next.reply, t);
+			if (verdict !== null) {
+				verdicts.set(next.key, verdict);
+				if (verdicts.size > MAX_VERDICTS) verdicts.delete(verdicts.keys().next().value);
+				saved.verdicts = [...verdicts];
+				save();
+			}
+		} catch (err) {
+			say(`couldn't check whether a message corrected the agent: ${err.message}`);
+		} finally {
+			checking = false;
+		}
+		if (again) check();
+	}
+	const orLog = (what) => (err) => say(`couldn't ${what}: ${err.message}`);
+	return {
+		async start() {
+			const text = await fs.readFile(file, "utf8").catch((err) => {
+				if (err.code !== "ENOENT") say(`EXPERT CREATION SUGGESTIONS: couldn't read ${file} (${err.message}), so what was suggested before isn't known and may be suggested again`);
+				return null;
+			});
+			if (text !== null) {
+				let value = null;
+				try {
+					value = JSON.parse(text);
+				} catch {}
+				if (value?.version === FILE_VERSION && Array.isArray(value.foldersAlreadySuggested) && Array.isArray(value.expertCreationSuggestions)) {
+					saved = {
+						...value,
+						expertCreations: Array.isArray(value.expertCreations) ? value.expertCreations : [],
+						held: Array.isArray(value.held) ? value.held : []
+					};
+					if (Array.isArray(value.verdicts)) for (const [key, verdict] of value.verdicts) verdicts.set(key, verdict);
+				} else {
+					const aside = `${file}.unreadable-${now()}`;
+					const moved = await fs.rename(file, aside).then(() => `moved to ${aside}`, (err) => `left where it is (${err.message})`);
+					say(`EXPERT CREATION SUGGESTIONS: ${file} isn't expert-creation-suggestions.json as this runner writes it, so it was ${moved}, and expert creation suggestions start again from nothing: folders suggested before may be suggested again`);
+				}
+			}
+			for (const r of saved.expertCreationSuggestions) for (const [server, state] of Object.entries(r.offices)) if (state === "sent") r.offices[server] = "pending";
+			await settings().then((t) => forget(t, now()), (err) => say(`couldn't read runner.json's expertCreationSuggestions as the expert creation suggestions started (${err.message}); it is read again on the next session's pass`));
+			started = true;
+			saved.expertCreations = saved.expertCreations.filter((k) => indexOf(k.server) >= 0);
+			for (const k of saved.expertCreations) {
+				const index = indexOf(k.server);
+				if (expertCreations.has(k.request)) continue;
+				const m = {
+					index,
+					request: k.request,
+					expertCreationSuggestionId: k.expertCreationSuggestionId,
+					key: k.key,
+					since: k.since,
+					state: k.state ?? "cloning",
+					...k.detail && { detail: k.detail },
+					sent: null,
+					wrote: k.wrote !== false,
+					working: false,
+					timer: null
+				};
+				expertCreations.set(m.request, m);
+				if (k.state === "failed" && m.wrote && !saved.expertCreations.some((x) => x.key === k.key && x.since > k.since)) clear(m);
+				if (k.state) continue;
+				if (m.wrote) follow(m).catch(orLog(`follow expert ${m.key}`));
+				else setExpertCreationProgress(m, "failed", "the runner on that computer stopped before its expert file was written; make it again");
+			}
+		},
+		seen(s) {
+			if (!started || closed || indexOf(s.server) < 0) return;
+			const byOffice = latest.get(s.session) ?? /* @__PURE__ */ new Map();
+			latest.delete(s.session);
+			latest.set(s.session, byOffice.set(s.server, s));
+			if (latest.size > MAX_SESSIONS) latest.delete(latest.keys().next().value);
+			const may = names(s);
+			let added = false;
+			for (const r of saved.expertCreationSuggestions) {
+				if (r.session !== s.session || r.scope !== "session" || r.offices[s.server] !== void 0 || !may.has(r.project.id.toLowerCase()) || Object.values(r.offices).includes("ended") || retryable(r, now())) continue;
+				r.offices[s.server] = "pending";
+				added = true;
+			}
+			if (added) {
+				save();
+				flush(indexOf(s.server));
+			}
+			if (busy.has(s.session)) return;
+			busy.add(s.session);
+			consider(s).catch(orLog(`look at session ${s.bare}'s areas for an expert creation suggestion`)).finally(() => busy.delete(s.session));
+		},
+		corrected(bare, key, text, reply) {
+			const verdict = checkOn ? verdicts.get(key) : void 0;
+			if (verdict !== void 0) return verdict;
+			if (closed || !couldBeSuggested(bare)) return null;
+			if (!waiting.some((w) => w.key === key) && waiting.length < MAX_CHECKS_WAITING) waiting.push({
+				bare,
+				key,
+				text,
+				reply
+			});
+			if (waiting.length) check().catch(orLog("check whether a message corrected the agent"));
+			return null;
+		},
+		take(index, message) {
+			if (closed) return;
+			if (message.type === "expert-creation-suggestion-dismissals") {
+				offices[index].dismissals = message.dismissals;
+				offices[index].ready = true;
+				return flush(index);
+			}
+			if (message.type === "draft-office-wide-expert-creation-suggestion") return void draftOfficeWideExpertCreationSuggestion(index, message).catch(orLog(`draft the office-wide expert creation suggestion ${message.request}`));
+			if (message.type === "create-expert-from-suggestion") return void createExpertFromSuggestion(index, message).catch(orLog(`make the expert ${message.key}`));
+			ended(index, message);
+		},
+		linked(index) {
+			offices[index].ready = false;
+			offices[index].fresh = true;
+			for (const m of expertCreations.values()) if (m.index === index) m.sent = null;
+			const server = o.offices[index].server;
+			for (const r of saved.expertCreationSuggestions) if (r.offices[server] === "sent") r.offices[server] = "pending";
+		},
+		rehooked(bare) {
+			const hooks = o.hooked(bare);
+			if (!hooks) return;
+			for (const r of saved.expertCreationSuggestions) {
+				if (r.bare !== bare) continue;
+				for (const [server, state] of Object.entries(r.offices)) if (state === "open") hooks.send(lineOf(r, server));
+				tellReady(r);
+			}
+		},
+		idle: () => officeWideSuggestionRequestsBeingDrafted.size === 0 && !checking && busy.size === 0 && keeping.size === 0 && [...expertCreations.values()].every((m) => done(m) || !m.working && !m.timer),
+		close() {
+			closed = true;
+			if (checkTimer) clearTimeout(checkTimer);
+			for (const m of expertCreations.values()) if (m.timer) clearTimeout(m.timer);
+			for (const timer of keeping.values()) clearTimeout(timer);
 		}
 	};
 }
@@ -17180,18 +19093,18 @@ function compareSemver(a, b) {
 }
 async function isComplete(install) {
 	for (const file of KEY_FILES) if (!await fs.stat(path.join(install.installPath, ...file)).then((s) => s.isFile(), () => false)) return false;
-	const manifest = await readJson$1(path.join(install.installPath, ".claude-plugin", "plugin.json"));
+	const manifest = await readJson(path.join(install.installPath, ".claude-plugin", "plugin.json"));
 	return !!manifest && (typeof manifest.version !== "string" || manifest.version === install.version);
 }
 const realPath = async (p) => normalPath(await fs.realpath(p).catch(() => p));
 const nameOf = (id) => id.slice(0, id.lastIndexOf("@"));
 /** Every install installed_plugins.json records; null when it is missing, can't be read, or isn't the shape known. */
 async function installs(plugins) {
-	const record = await readJson$1(path.join(plugins, "installed_plugins.json"));
+	const record = await readJson(path.join(plugins, "installed_plugins.json"));
 	const list = record?.plugins;
-	if (record?.version !== 2 || !isObject$2(list) || !Object.values(list).every(Array.isArray)) return null;
+	if (record?.version !== 2 || !isObject$1(list) || !Object.values(list).every(Array.isArray)) return null;
 	return Object.entries(list).flatMap(([id, entries]) => entries.map((entry) => {
-		const e = isObject$2(entry) ? entry : {};
+		const e = isObject$1(entry) ? entry : {};
 		const text = (key) => typeof e[key] === "string" ? e[key] : null;
 		return {
 			id,
@@ -17205,8 +19118,8 @@ async function installs(plugins) {
 }
 /** Whether `enabledPlugins` names the plugin `id` enabled, disabled, or not at all (null). */
 async function enabledIn(file, id) {
-	const value = (await readJson$1(file))?.enabledPlugins;
-	return isObject$2(value) && typeof value[id] === "boolean" ? value[id] : null;
+	const value = (await readJson(file))?.enabledPlugins;
+	return isObject$1(value) && typeof value[id] === "boolean" ? value[id] : null;
 }
 /**
 * What Claude Code says of the plugin `dataLayer` belongs to. With `project` (a session's project
@@ -17240,7 +19153,7 @@ async function enabledFor(place, id, project) {
 	return true;
 }
 async function isInPluginDirs(dirs, name) {
-	for (const dir of dirs) if ((await readJson$1(path.join(dir, ".claude-plugin", "plugin.json")))?.name === name) return true;
+	for (const dir of dirs) if ((await readJson(path.join(dir, ".claude-plugin", "plugin.json")))?.name === name) return true;
 	return false;
 }
 async function managedFiles(managed) {
@@ -17263,11 +19176,11 @@ async function gitRoot(dir) {
 		if (path.dirname(at) === at) return null;
 	}
 }
-const isObject$2 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
-async function readJson$1(file) {
+const isObject$1 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
+async function readJson(file) {
 	try {
 		const value = JSON.parse((await fs.readFile(file, "utf8")).replace(/^\uFEFF/, ""));
-		return isObject$2(value) ? value : null;
+		return isObject$1(value) ? value : null;
 	} catch {
 		return null;
 	}
@@ -17508,8 +19421,8 @@ function runHidden(argv, cwd, { env = commandEnv(process.env), timeoutMs = COMMA
 async function turnOnAutoUpdate(settings, marketplace) {
 	const current = await readSettings(settings);
 	const known = current.extraKnownMarketplaces;
-	const entry = isObject$1(known) ? known[marketplace] : void 0;
-	if (!isObject$1(entry) || !isObject$1(entry.source) || "autoUpdate" in entry) return null;
+	const entry = isObject(known) ? known[marketplace] : void 0;
+	if (!isObject(entry) || !isObject(entry.source) || "autoUpdate" in entry) return null;
 	entry.autoUpdate = true;
 	await writeSettings(settings, current);
 	return `turned on Claude Code's auto-update for the ${marketplace} marketplace in ${settings}`;
@@ -17601,7 +19514,7 @@ async function checkForUpdate({ claudeDir, settings, plugins, id, cwd, claude, e
 	}
 }
 const lastLine = (output) => output.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean).at(-1) ?? "";
-const isObject$1 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
+const isObject = (value) => !!value && typeof value === "object" && !Array.isArray(value);
 //#endregion
 //#region src/data-layer/detached.ts
 const LINK_DOWN_MS = 3e5;
@@ -17841,7 +19754,7 @@ async function relayOwnerMessage(request, { detached, takes, owner, session, fil
 	});
 	for (let waited = 0; waited < waitMs; waited += POLL_MS) {
 		await sleep(POLL_MS);
-		const taken = parse$1(await take(file));
+		const taken = parse(await take(file));
 		if (!taken) continue;
 		if (taken.taken) return {
 			type: "reply",
@@ -17854,7 +19767,7 @@ async function relayOwnerMessage(request, { detached, takes, owner, session, fil
 	}
 	return refuse("no-answer");
 }
-function parse$1(text) {
+function parse(text) {
 	if (text === null) return null;
 	let said;
 	try {
@@ -18235,7 +20148,7 @@ async function reporting(o, c) {
 		readText: (p) => fs.readFile(p, "utf8").catch(() => null),
 		run: io.run
 	}, claudeJson, cwd);
-	const openLink = (run, home, mayConnect) => createLink({
+	const openLink = (run, home, mayConnect) => (run.home = home, createLink({
 		url: run.office.server,
 		emit: run.emit,
 		pairing: run.pairing,
@@ -18313,7 +20226,7 @@ async function reporting(o, c) {
 			session: factsSession,
 			project: home
 		}
-	});
+	}));
 	const runs = await Promise.all(offices.filter((o) => !o.plainRefused).map(async (office) => {
 		const { server, label } = office;
 		const until = notWantedBefore[server];
@@ -18327,7 +20240,8 @@ async function reporting(o, c) {
 			connected: false,
 			unwanted: held,
 			unwantedUntil: held ? until : null,
-			sent: null
+			sent: null,
+			home: null
 		};
 		run.hold = await openReportHold(releasedPath(claudeDir, office, sessionId), (text) => emit({
 			type: "log",
@@ -18529,7 +20443,8 @@ async function reporting(o, c) {
 			now,
 			config,
 			resolve,
-			projectOf: projectOfRepo
+			projectOf: projectOfRepo,
+			...o.corrected && { corrected: c.guard(o.corrected, null) }
 		}).catch((err) => ({
 			facts: null,
 			status: String(err?.message ?? err),
@@ -18641,6 +20556,34 @@ async function reporting(o, c) {
 				type: "log",
 				text: `couldn't send this session's facts to ${run.office.server}: ${String(err?.message ?? err)}`
 			});
+		}
+		if (o.areas && facts.areas?.length) {
+			const model = facts.agents.find((a) => a.id === facts.session.lead)?.usage?.model ?? null;
+			for (const run of taking) {
+				const link = run.gate.current();
+				if (!run.home || !link) continue;
+				const welcome = link.projects();
+				const areas = facts.areas.filter((a) => a.project ? !!welcome?.has(a.project.id.toLowerCase()) : !workspace);
+				if (!areas.length) continue;
+				try {
+					o.areas({
+						server: run.office.server,
+						session: facts.session.id,
+						bare: sessionId,
+						project: run.home,
+						checkout: facts.session.checkout ?? cwd,
+						window: contextWindow,
+						model,
+						areas,
+						said: read.said ?? (async () => [])
+					});
+				} catch (err) {
+					emit({
+						type: "log",
+						text: `couldn't look at this session's areas for an expert creation suggestion: ${String(err?.message ?? err)}`
+					});
+				}
+			}
 		}
 		const quiet = hooked ? null : detachedStop({
 			now,
@@ -19664,138 +21607,6 @@ function within(p, ms) {
 	});
 }
 //#endregion
-//#region src/runner/expert-file.ts
-/** What an expert file leaves out. */
-const EXPERT_DEFAULTS = {
-	forkTimeLimitMinutes: 5,
-	groundingTimeLimitMinutes: 15,
-	fetchSeconds: 60,
-	maxForks: 3,
-	caps: {
-		perAskerPerDay: 30,
-		openPerAsker: 3,
-		tokenBudgetPerDay: 2e6
-	}
-};
-const KNOWN = [
-	"version",
-	"name",
-	"repo",
-	"subject",
-	"model",
-	"promoteAtTokens",
-	"forkTimeLimitMinutes",
-	"groundingTimeLimitMinutes",
-	"fetchSeconds",
-	"maxForks",
-	"caps",
-	"proof",
-	"window",
-	"areas"
-];
-const KNOWN_CAPS = [
-	"perAskerPerDay",
-	"openPerAsker",
-	"tokenBudgetPerDay"
-];
-const KNOWN_PROOF = ["question", "answer"];
-var Bad = class extends Error {
-	field;
-	reason;
-	constructor(field, reason) {
-		super(`${field}: ${reason}`);
-		this.field = field;
-		this.reason = reason;
-	}
-};
-const isObject = (v) => !!v && typeof v === "object" && !Array.isArray(v);
-/** `text` as the expert file named `fileName` (its base name is the expert's name). */
-function parseExpertFile(text, fileName) {
-	let value;
-	try {
-		value = JSON.parse(text);
-	} catch (err) {
-		return {
-			ok: false,
-			field: "(file)",
-			reason: `isn't valid JSON: ${err.message}`
-		};
-	}
-	try {
-		return parse(value, path.basename(fileName, ".json"));
-	} catch (err) {
-		if (err instanceof Bad) return {
-			ok: false,
-			field: err.field,
-			reason: err.reason
-		};
-		throw err;
-	}
-}
-function parse(value, base) {
-	if (!isObject(value)) throw new Bad("(file)", "must be a JSON object");
-	const o = value;
-	const whole = (field, v, min, fallback) => {
-		if (v === void 0 && fallback !== void 0) return fallback;
-		if (v === void 0) throw new Bad(field, "is required");
-		if (typeof v !== "number" || !Number.isInteger(v) || v < min) throw new Bad(field, `must be a whole number of at least ${min}`);
-		return v;
-	};
-	const words = (field, v) => {
-		if (v === void 0) throw new Bad(field, "is required");
-		if (typeof v !== "string" || !v.trim()) throw new Bad(field, "must be text that isn't empty");
-		return v.trim();
-	};
-	if (o.version === void 0) throw new Bad("version", "is required");
-	if (typeof o.version === "number" && Number.isInteger(o.version) && o.version > 1) throw new Bad("version", `is ${o.version}: written for a newer runner; update the Isoplan plugin on this machine`);
-	if (o.version !== 1) throw new Bad("version", "must be 1");
-	if (o.name === void 0) throw new Bad("name", "is required");
-	if (typeof o.name !== "string" || !ExpertNameSchema.safeParse(o.name).success) throw new Bad("name", "must be lowercase letters, digits and dashes, at most 63, starting with a letter or digit");
-	if (o.name !== base) throw new Bad("name", `is "${o.name}", but the file is ${base}.json; they must be the same`);
-	const repo = words("repo", o.repo);
-	if (!path.isAbsolute(repo)) throw new Bad("repo", "must be the full path of the repo's folder");
-	const subject = words("subject", o.subject);
-	if (subject.length > 1e3) throw new Bad("subject", `must be at most ${MAX_EXPERT_SUBJECT_LENGTH} characters`);
-	const model = words("model", o.model);
-	if (model.startsWith("-")) throw new Bad("model", "must be a model name, not starting with -");
-	const caps = o.caps === void 0 ? {} : o.caps;
-	if (!isObject(caps)) throw new Bad("caps", "must be an object");
-	if (o.proof === void 0) throw new Bad("proof", "is required");
-	if (!isObject(o.proof)) throw new Bad("proof", "must be an object with a question and its answer");
-	if (o.areas !== void 0 && !(Array.isArray(o.areas) && o.areas.every((a) => typeof a === "string"))) throw new Bad("areas", "must be a list of globs");
-	return {
-		ok: true,
-		expert: {
-			version: 1,
-			name: o.name,
-			repo,
-			subject,
-			model,
-			promoteAtTokens: whole("promoteAtTokens", o.promoteAtTokens, 1),
-			forkTimeLimitMinutes: whole("forkTimeLimitMinutes", o.forkTimeLimitMinutes, 1, EXPERT_DEFAULTS.forkTimeLimitMinutes),
-			groundingTimeLimitMinutes: whole("groundingTimeLimitMinutes", o.groundingTimeLimitMinutes, 1, EXPERT_DEFAULTS.groundingTimeLimitMinutes),
-			fetchSeconds: whole("fetchSeconds", o.fetchSeconds, 0, EXPERT_DEFAULTS.fetchSeconds),
-			maxForks: whole("maxForks", o.maxForks, 1, EXPERT_DEFAULTS.maxForks),
-			caps: {
-				perAskerPerDay: whole("caps.perAskerPerDay", caps.perAskerPerDay, 1, EXPERT_DEFAULTS.caps.perAskerPerDay),
-				openPerAsker: whole("caps.openPerAsker", caps.openPerAsker, 1, EXPERT_DEFAULTS.caps.openPerAsker),
-				tokenBudgetPerDay: whole("caps.tokenBudgetPerDay", caps.tokenBudgetPerDay, 1, EXPERT_DEFAULTS.caps.tokenBudgetPerDay)
-			},
-			proof: {
-				question: words("proof.question", o.proof.question),
-				answer: words("proof.answer", o.proof.answer)
-			},
-			...o.window !== void 0 && { window: whole("window", o.window, 1e5) },
-			areas: o.areas ?? []
-		},
-		unknown: [
-			...Object.keys(o).filter((k) => !KNOWN.includes(k)),
-			...Object.keys(caps).filter((k) => !KNOWN_CAPS.includes(k)).map((k) => `caps.${k}`),
-			...Object.keys(o.proof).filter((k) => !KNOWN_PROOF.includes(k)).map((k) => `proof.${k}`)
-		]
-	};
-}
-//#endregion
 //#region src/runner/expert-files.ts
 function watchExpertFiles({ dir, lookMs = 5e3, read = (file) => fs.readFile(file, "utf8"), log, onChange }) {
 	const known = /* @__PURE__ */ new Map();
@@ -20001,74 +21812,6 @@ function createGate() {
 	};
 }
 //#endregion
-//#region src/runner/expert-meter.ts
-const native1m = {
-	window: 1e6,
-	compactAt: 967e3
-};
-const window200k = {
-	window: 2e5,
-	compactAt: null
-};
-/** The office server's table as of 6 Nov 2026: a model id matches the longest key it starts with, at a "-" or "[" or its end. */
-const EXPERT_WINDOWS = {
-	"claude-fable-5-1": native1m,
-	"claude-opus-5-5": native1m,
-	"claude-sonnet-5-5": native1m,
-	"claude-haiku-5-5": native1m,
-	"claude-fable-5": native1m,
-	"claude-opus-5": native1m,
-	"claude-sonnet-5": native1m,
-	"claude-opus-4-8": native1m,
-	"claude-opus-4-7": native1m,
-	"claude-opus-4-6": window200k,
-	"claude-opus-4-6[1m]": native1m,
-	"claude-sonnet-4-6": window200k,
-	"claude-sonnet-4-6[1m]": native1m,
-	"claude-opus-4-5": window200k,
-	"claude-opus-4-5-20251101": window200k,
-	"claude-sonnet-4-5": window200k,
-	"claude-sonnet-4-5-20250929": window200k,
-	"claude-haiku-4-5": window200k,
-	"claude-haiku-4-5-20251001": window200k
-};
-/** How far below the compaction point a threshold has to stay. */
-const THRESHOLD_MARGIN = 1e5;
-/**
-* The window of the model the trunk resolved to: the expert file's `window` when it sets one (with
-* the table's compaction point only when the table gives that same window), else the table's entry.
-* With neither, why the generation can't run.
-*/
-function windowFor(modelId, override) {
-	const key = Object.keys(EXPERT_WINDOWS).filter((k) => modelId.startsWith(k) && (modelId.length === k.length || "-[".includes(modelId.charAt(k.length)))).sort((x, y) => y.length - x.length)[0];
-	const listed = key === void 0 ? null : EXPERT_WINDOWS[key];
-	if (override !== void 0) return {
-		ok: true,
-		window: override,
-		compactAt: listed?.window === override ? listed.compactAt : null
-	};
-	if (listed) return {
-		ok: true,
-		...listed
-	};
-	return {
-		ok: false,
-		why: `no context window is known for ${modelId}; set "window" in the expert file`
-	};
-}
-/** A trunk's meter after a turn: that turn's context. */
-const meterOf = (turn) => turn.context;
-/** Why `promoteAt` is too close to the compaction point (the table's `compactAt`, else the window), or null. */
-function thresholdProblem(promoteAt, compactAt) {
-	if (promoteAt <= compactAt - 1e5) return null;
-	return `promoteAtTokens ${promoteAt} is within ${THRESHOLD_MARGIN.toLocaleString("en")} tokens of the compaction point at ${compactAt}; set it lower in the expert file`;
-}
-/** Why a junior grounded at `grounded` tokens leaves too little room below `promoteAt` for learned notes, or null. */
-function notesRoomProblem(promoteAt, grounded) {
-	if (promoteAt - grounded >= 1e4) return null;
-	return `room for fewer than 20 learned notes: grounded at ${grounded} tokens, promoteAtTokens ${promoteAt}; raise promoteAtTokens in the expert file`;
-}
-//#endregion
 //#region src/runner/expert-reply.ts
 /** The longest learned note appended to a trunk; one longer is cut. */
 const LEARNED_MAX = 3e3;
@@ -20159,71 +21902,6 @@ function answerText(body, block) {
 	const room = block ? MAX_EXPERT_ANSWER_LENGTH - block.length - 2 : MAX_EXPERT_ANSWER_LENGTH;
 	const cut = body.length <= room ? body : body.slice(0, room - 1) + "…";
 	return block ? `${cut}\n\n${block}` : cut;
-}
-//#endregion
-//#region src/runner/expert-state.ts
-const statePath = (dir) => path.join(dir, "state.json");
-const indexPath = (dir, n) => path.join(dir, `index-${n}.json`);
-const STATES = [
-	"grounding",
-	"junior",
-	"senior",
-	"retired",
-	"failed"
-];
-const isGeneration = (g) => {
-	const o = g;
-	return !!o && Number.isInteger(o.n) && typeof o.trunk === "string" && typeof o.model === "string" && typeof o.commit === "string" && Number.isFinite(o.groundedAt) && Number.isFinite(o.meter) && Number.isInteger(o.notes) && STATES.includes(o.state) && (o.last === void 0 || o.last === null || typeof o.last === "string");
-};
-async function readJson(file) {
-	try {
-		return JSON.parse(await fs.readFile(file, "utf8"));
-	} catch {
-		return null;
-	}
-}
-async function writeJson(file, value) {
-	await fs.mkdir(path.dirname(file), { recursive: true });
-	const temp = `${file}.${process.pid}.tmp`;
-	await fs.writeFile(temp, JSON.stringify(value, null, 2) + "\n");
-	for (let tries = 0;; tries++) try {
-		return await fs.rename(temp, file);
-	} catch (err) {
-		if (tries >= 5 || ![
-			"EPERM",
-			"EBUSY",
-			"EACCES"
-		].includes(err.code ?? "")) throw err;
-		await new Promise((r) => setTimeout(r, 50 * (tries + 1)));
-	}
-}
-/** The expert's state.json, or null when there is none it can use. */
-async function readState(dir) {
-	const o = await readJson(statePath(dir));
-	if (!o || o.version !== 1 || typeof o.fingerprint !== "string" || typeof o.repo !== "string" || typeof o.branch !== "string" || !Array.isArray(o.generations) || !o.generations.every(isGeneration)) return null;
-	return o;
-}
-const writeState = (dir, s) => writeJson(statePath(dir), s);
-/** Generation n's file → commit index; empty when it has none. */
-async function readIndex(dir, n) {
-	const files = (await readJson(indexPath(dir, n)))?.files;
-	if (!files || typeof files !== "object" || Array.isArray(files)) return {};
-	return Object.fromEntries(Object.entries(files).filter((e) => typeof e[1] === "string"));
-}
-const writeIndex = (dir, n, index) => writeJson(indexPath(dir, n), {
-	version: 1,
-	files: index
-});
-/** The expert file fields a new generation is grounded for: a change to any of them starts one. */
-function fingerprint(file) {
-	return createHash("sha256").update(JSON.stringify([
-		file.repo,
-		file.subject,
-		file.model,
-		file.proof.question,
-		file.proof.answer,
-		file.window ?? null
-	])).digest("hex");
 }
 //#endregion
 //#region src/runner/expert.ts
@@ -20364,7 +22042,8 @@ function createExpert(o) {
 		repo: file.repo,
 		subject: file.subject,
 		state: state(),
-		senior: !!gen("junior") && !!gen("senior")
+		senior: !!gen("junior") && !!gen("senior"),
+		...file.areas.length && { areas: [...file.areas] }
 	});
 	function changed() {
 		for (const wake of [...waiters]) wake();
@@ -21538,6 +23217,7 @@ async function listingFor(hosted, home, scan, log) {
 			log(`expert ${h.name} isn't listed: its subject matches the secret pattern "${matched}"`);
 			continue;
 		}
+		const areas = (h.areas ?? []).filter((a) => AreaPathSchema.safeParse(a).success).slice(0, 20);
 		const listing = {
 			name: h.name,
 			project: {
@@ -21546,7 +23226,8 @@ async function listingFor(hosted, home, scan, log) {
 			},
 			subject: h.subject,
 			state: h.state,
-			...h.senior && { senior: true }
+			...h.senior && { senior: true },
+			...areas.length && { areas }
 		};
 		const parsed = ExpertListingSchema.safeParse(listing);
 		if (!parsed.success) {
@@ -22244,10 +23925,11 @@ async function worker() {
 	const scanText = async (text) => scan(text, await loadPatterns(path.join(appDir, "secret-patterns.json"), path.join(isoplanDir, "secret-patterns.json"), log));
 	let rehook = (_session) => {};
 	let closeFor = async (_close, _remove) => false;
+	let expertCreationSuggestionsOnceStarted = null;
 	const pipe = await createPipeServer({
 		claudeDir,
 		log,
-		onChange: (session) => rehook(session),
+		onChange: (session) => (rehook(session), expertCreationSuggestionsOnceStarted?.rehooked(session)),
 		ask: (request) => askFromMachine({
 			...request,
 			appDir,
@@ -22284,6 +23966,10 @@ async function worker() {
 			said.say(hooks ? `the runner reports this session for its hooks module, in ${cwd}` : `the runner reports this session, in ${cwd}`);
 			const shares = (office) => shared.get(office.server) ?? null;
 			const titled = (title) => void titles.set(sessionId, title);
+			const expertCreationSuggestionSignals = {
+				areas: (s) => expertCreationSuggestionsOnceStarted?.seen(s),
+				corrected: (key, text, reply) => expertCreationSuggestionsOnceStarted?.corrected(sessionId, key, text, reply) ?? null
+			};
 			try {
 				if (hooks) return await reportSession({
 					sessionId,
@@ -22303,7 +23989,8 @@ async function worker() {
 					},
 					closed: Promise.race([closed, hooks.closed.then(() => "its hooks module's link to the runner closed")]),
 					shared: shares,
-					titled
+					titled,
+					...expertCreationSuggestionSignals
 				}).finally(() => pairLinks.ended(sessionId, hooks.send));
 				return await reportSession({
 					sessionId,
@@ -22315,7 +24002,8 @@ async function worker() {
 					notWanted,
 					isOff: () => isOff(cwd),
 					shared: shares,
-					titled
+					titled,
+					...expertCreationSuggestionSignals
 				});
 			} catch (err) {
 				said.say(`stopping: something went wrong: ${String(err?.stack ?? err)}`);
@@ -22347,10 +24035,17 @@ async function worker() {
 		system: () => fs.readFile(path.join(appDir, "prompts", "naming.md"), "utf8"),
 		log
 	});
+	const expertCreationSuggestionModelCalls = createExpertCreationSuggestionModelCalls({
+		binary,
+		prompt: (name) => fs.readFile(path.join(appDir, "prompts", name), "utf8"),
+		log
+	});
 	let driver = null;
 	process.on("exit", () => {
 		answerer.close();
 		namer.close();
+		expertCreationSuggestionModelCalls.close();
+		expertCreationSuggestionsOnceStarted?.close();
 		driver?.close();
 		experts?.close();
 	});
@@ -22410,6 +24105,7 @@ async function worker() {
 	let live = (_index) => (_message) => false;
 	const isDir = (p) => fs.stat(p).then((s) => s.isDirectory(), () => false);
 	const drives = [];
+	const repoLists = [];
 	const transcriptFolders = /* @__PURE__ */ new Map();
 	const checkouts = createCheckouts({
 		file: path.join(isoplanDir, "runner", "checkouts.json"),
@@ -22435,6 +24131,28 @@ async function worker() {
 			return (await approvedHome(folder, homeIo, approved.repos()))?.id.toLowerCase() ?? null;
 		};
 		const foldersLeftOut = /* @__PURE__ */ new Set();
+		const expertCreationSuggestionFoldersLeftOut = /* @__PURE__ */ new Set();
+		const listRepos = async (withBranches) => {
+			const since = Date.now() - (await settings()).cloneSearchDays * 864e5;
+			const seen = await sessionFolders(io, path.join(claudeDir, "projects"), since, transcriptFolders, { gone: true });
+			for (const r of registry.list()) if (r.kind === "driven" && r.folder) seen.push({
+				folder: r.folder,
+				at: Date.parse(r.lastActivity) || 0
+			});
+			const repos = await repoFolders(seen, {
+				claudeDir,
+				clonesFolders: clones.folders,
+				checkout: checkouts.of,
+				home,
+				branches: async (checkout, project) => withBranches && !project.startsWith("local:") && await homeIo.resolve(checkout) ? remoteBranches(checkout) : null,
+				scan: scanText,
+				log,
+				leftOut: withBranches ? foldersLeftOut : expertCreationSuggestionFoldersLeftOut
+			});
+			await checkouts.keep(seen.map((s) => s.folder)).catch((err) => log(`couldn't save which checkout each worktree belongs to: ${err.message}`));
+			return repos;
+		};
+		repoLists[index] = listRepos;
 		drives[index] = {
 			server,
 			send: (message) => live(index)(message),
@@ -22447,26 +24165,7 @@ async function worker() {
 				}
 				return null;
 			},
-			repoFolders: async () => {
-				const since = Date.now() - (await settings()).cloneSearchDays * 864e5;
-				const seen = await sessionFolders(io, path.join(claudeDir, "projects"), since, transcriptFolders, { gone: true });
-				for (const r of registry.list()) if (r.kind === "driven" && r.folder) seen.push({
-					folder: r.folder,
-					at: Date.parse(r.lastActivity) || 0
-				});
-				const repos = await repoFolders(seen, {
-					claudeDir,
-					clonesFolders: clones.folders,
-					checkout: checkouts.of,
-					home,
-					branches: async (checkout, project) => !project.startsWith("local:") && await homeIo.resolve(checkout) ? remoteBranches(checkout) : null,
-					scan: scanText,
-					log,
-					leftOut: foldersLeftOut
-				});
-				await checkouts.keep(seen.map((s) => s.folder)).catch((err) => log(`couldn't save which checkout each worktree belongs to: ${err.message}`));
-				return repos;
-			},
+			repoFolders: () => listRepos(true),
 			home,
 			branchFolder: async (folder, branch) => branchFolder(git, folder, branch, await gitMs())
 		};
@@ -22573,6 +24272,14 @@ async function worker() {
 		server: office.server,
 		checkMs: first.approvedRefreshMinutes * 6e4
 	}));
+	const isoplanClone = createIsoplanClones({
+		git,
+		claudeDir,
+		clonesFolder: clones.folder,
+		clonesFolders: clones.folders,
+		timeoutMs: gitMs,
+		log
+	});
 	const drive = createDriver({
 		claudeDir,
 		account,
@@ -22585,14 +24292,7 @@ async function worker() {
 		namer,
 		removed: (session) => reporting.end(session.slice(session.indexOf(":") + 1), REMOVED, true),
 		projectOf: async (folder) => (await homeIo.projectOf(await homeIo.resolve(folder), folder)).id,
-		isoplanClone: createIsoplanClones({
-			git,
-			claudeDir,
-			clonesFolder: clones.folder,
-			clonesFolders: clones.folders,
-			timeoutMs: gitMs,
-			log
-		}),
+		isoplanClone,
 		elsewhere: (start, bin) => startWhere(start, bin, {
 			run: git,
 			claudeDir,
@@ -22642,6 +24342,27 @@ async function worker() {
 		}
 	};
 	await listSessions();
+	const expertCreationSuggestions = createExpertCreationSuggestions({
+		isoplanDir,
+		settings,
+		offices: answering.map((office, index) => ({
+			server: office.server,
+			label: office.label,
+			send: (m) => live(index)(m)
+		})),
+		account,
+		scan: scanText,
+		draft: (input, t) => expertCreationSuggestionModelCalls.draft(input, t),
+		corrects: (text, reply, t) => expertCreationSuggestionModelCalls.corrects(text, reply, t),
+		experts: () => hosted.hosted(),
+		projectOf: async (folder) => (await homeIo.projectOf(await homeIo.resolve(folder), folder)).id.toLowerCase(),
+		checkout: async (index, project) => (await repoLists[index](false)).find((r) => r.project === project.id.toLowerCase())?.folders[0] ?? null,
+		clone: (url, project) => isoplanClone({ url }, project),
+		hooked: (bare) => pipe?.hooked(bare) ?? null,
+		log
+	});
+	await expertCreationSuggestions.start();
+	expertCreationSuggestionsOnceStarted = expertCreationSuggestions;
 	const links = answerOffices({
 		offices: answering,
 		name: (office) => office.server,
@@ -22657,13 +24378,15 @@ async function worker() {
 				onMessage: (message) => runner.take(message),
 				onDrive: (message) => drive.take(office.server, message),
 				onHosting: host.onHosting,
+				onExpertCreationSuggestionMessages: (message) => expertCreationSuggestions.take(answering.indexOf(office), message),
 				onOpen: () => {
 					status.opened(office.server);
 					drive.linked(office.server);
 					host.onOpen();
+					expertCreationSuggestions.linked(answering.indexOf(office));
 					readPairing(pairingPath(claudeDir)).then((all) => status.email(office.server, pairingEntry(all, office.server, account.id)?.email));
 				},
-				onClose: () => (status.closed(office.server), drive.unlinked(office.server), host.onClose()),
+				onClose: () => (status.closed(office.server), drive.unlinked(office.server), host.onClose(), expertCreationSuggestions.linked(answering.indexOf(office))),
 				onNotWanted: () => (status.stopped(office.server, "not-wanted"), said.notWanted()),
 				onPairingEnded: () => (status.stopped(office.server, "unpaired"), said.unpaired()),
 				hello: {
@@ -22677,12 +24400,13 @@ async function worker() {
 					experts: true,
 					claude: claude.state(),
 					starts: startPlaces(process.platform, hasOrca, hasDesktop),
-					hiddenStarts: true
+					hiddenStarts: true,
+					canCreateExpertsFromSuggestions: true
 				}
 			});
 		},
 		paired: async (office) => !!pairingEntry(await readPairing(pairingPath(claudeDir)), office.server, account.id)?.credential,
-		idle: () => answerers.every((a) => a.runner.idle()) && reporting.reporting().length === 0 && !pipe?.all().length && hosted.idle(),
+		idle: () => answerers.every((a) => a.runner.idle()) && reporting.reporting().length === 0 && !pipe?.all().length && hosted.idle() && expertCreationSuggestions.idle(),
 		lit: async () => anyRoomSince(io, path.join(claudeDir, "projects"), Date.now() - askableMs(await config().catch(() => first))),
 		keep: async () => drive.held() > 0 || hosted.hosted().length > 0 || (await settings()).startAtLogin,
 		gone: new Promise((resolve) => process.stdin.on("end", resolve).on("error", resolve).resume()),

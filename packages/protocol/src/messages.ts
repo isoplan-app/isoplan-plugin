@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { FactRemoveSchema, FactsSchema, FactUpsertSchema, ProjectSchema, SourceSchema } from "./facts.js";
+import { AreaPathSchema, FactRemoveSchema, FactsSchema, FactUpsertSchema, ProjectSchema, SourceSchema } from "./facts.js";
 
 /**
  * The protocol version every message carries as `v`. Adding optional fields doesn't change it;
@@ -215,6 +215,13 @@ export const HelloMessageSchema = z.object({
  * hidden (a start's `hidden`), in a clone Isoplan keeps for itself. The server sends `hidden` only to
  * a runner that says it: a runner from before 0.14.0 drops the field it doesn't know and would start
  * the session in the person's own checkout.
+ * `canCreateExpertsFromSuggestions` (protocol 0.15.0, isoplan-app#328): this runner suggests creating
+ * an expert where a session would have been helped by one, and creates it when a person confirms
+ * (see `expert-creation-suggestion`). It sends `expert-creation-suggestion`,
+ * `expert-creation-suggestion-ended` and `expert-creation-progress`, and takes
+ * `expert-creation-suggestion-dismissals`, `draft-office-wide-expert-creation-suggestion`,
+ * `create-expert-from-suggestion` and `expert-creation-suggestion-ended`; the server sends none of
+ * these to a runner that didn't say it.
  */
 export const RunnerHelloMessageSchema = z.object({
   type: z.literal("runner"),
@@ -229,6 +236,7 @@ export const RunnerHelloMessageSchema = z.object({
   starts: z.array(StartModeSchema).max(4).optional(),
   experts: z.literal(true).optional(),
   hiddenStarts: z.literal(true).optional(),
+  canCreateExpertsFromSuggestions: z.literal(true).optional(),
 });
 
 /** All of the session's facts. Sent on connect and on repair. */
@@ -299,12 +307,31 @@ export const ExpertStateSchema = z.enum(["starting", "ready", "failed"]);
 /** The host's caps, from the expert file: questions per asking session per day, open questions per asking session, the expert's daily token budget. */
 export const ExpertCapSchema = z.enum(["asker-day", "asker-open", "expert-tokens"]);
 
+/** The most folders or globs an expert's area names (protocol 0.15.0). */
+export const MAX_AREA_PATHS = 20;
+
+/**
+ * An expert's name as people read it, from its key: the key's words, split on dashes, each
+ * capitalised, then "Expert" (`pairing` is "Pairing Expert", `pairing-tokens` "Pairing Tokens Expert").
+ */
+export const expertDisplayName = (key: string) =>
+  [...key.split("-").filter(Boolean).map((word) => word[0]!.toUpperCase() + word.slice(1)), "Expert"].join(" ");
+
 /**
  * One expert a runner hosts, as it lists it to an office server whose list takes its repo. `senior`
  * (protocol 0.14.0): it has a senior generation, which its junior can ask (see `expert-senior`);
- * absent from an older runner. An older server ignores it.
+ * absent from an older runner. `areas` (protocol 0.15.0): the folders and globs of its repo it
+ * covers, from its file, so the office never suggests creating an expert on a folder one already covers;
+ * absent from an older runner, or when its file names none. An older server ignores both.
  */
-export const ExpertListingSchema = z.object({ name: ExpertNameSchema, project: ProjectSchema, subject: Subject, state: ExpertStateSchema, senior: z.boolean().optional() });
+export const ExpertListingSchema = z.object({
+  name: ExpertNameSchema,
+  project: ProjectSchema,
+  subject: Subject,
+  state: ExpertStateSchema,
+  senior: z.boolean().optional(),
+  areas: z.array(AreaPathSchema).max(MAX_AREA_PATHS).optional(),
+});
 /** One expert a session may ask: `repo` is its project's short name, `host` the hosting person's name. */
 export const ExpertRightSchema = z.object({ name: ExpertNameSchema, subject: Subject, repo: z.string().min(1), host: z.string() });
 
@@ -518,6 +545,117 @@ export const AskExpertMessageSchema = z.object({
   key: z.string().min(1).max(100),
 });
 
+// Expert creation suggestions (protocol 0.15.0, isoplan-app#328, ADR 0013): a runner notices, from a
+// session's area facts, when the session would have been helped by an expert on one folder of its
+// repo. It drafts one on its machine, with no hooks, checks the draft for secrets there (a match means
+// no suggestion), and suggests creating it once (`expert-creation-suggestion`). Anyone signed in to
+// the office may open it on the floor, change what they like, and press Make expert: the server sends
+// `create-expert-from-suggestion` to one of that person's own connected runners, which writes the
+// expert file and says how creating it goes (`expert-creation-progress`). An area several sessions
+// search within a week becomes an office-wide expert creation suggestion, which the server asks the
+// runner of the latest of them to draft (`draft-office-wide-expert-creation-suggestion`). The server
+// tells each such runner its person's dismissed areas (`expert-creation-suggestion-dismissals`), and
+// the runner that sent a suggestion how it ended (`expert-creation-suggestion-ended`). A runner that
+// can says `canCreateExpertsFromSuggestions` in its hello. The server sends it
+// `expert-creation-suggestion-dismissals` once its hello is let in, even an empty one, and the runner
+// sends no `expert-creation-suggestion`, `expert-creation-suggestion-ended` or
+// `expert-creation-progress` on a connection before that connection's first
+// `expert-creation-suggestion-dismissals`, so a server from before expert creation suggestions, which
+// sends none, is never sent one.
+
+/** The most sessions a `draft-office-wide-expert-creation-suggestion` names. */
+export const MAX_EXPERT_CREATION_SUGGESTION_SESSIONS = 20;
+/** The most dismissed areas an `expert-creation-suggestion-dismissals` lists. */
+export const MAX_EXPERT_CREATION_SUGGESTION_DISMISSALS = 1000;
+
+/**
+ * An expert creation suggestion's id, which the floor's link names
+ * (`/?expert-creation-suggestion=<id>`), so it keeps to letters, digits, `_` and `-`: the runner's own
+ * random id for a session's suggestion, or the `draft-office-wide-expert-creation-suggestion`'s
+ * `request` for an office-wide one.
+ */
+const ExpertCreationSuggestionId = z.string().regex(/^[A-Za-z0-9_-]{1,100}$/, "letters, digits, `_` and `-`, at most 100");
+/**
+ * The model an expert grounds with, as Claude Code's `--model` takes it (`sonnet`,
+ * `claude-opus-5-5`, `claude-sonnet-4-5[1m]`): kept to characters no shell reads, starting with a
+ * letter or digit, as it goes into a command on the runner's machine.
+ */
+const Model = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/[\]-]{0,199}$/, "a model name: letters, digits and . _ : / [ ] -, starting with a letter or digit, at most 200");
+/** The proof question an expert must answer before it answers anyone, and the answer expected. */
+const Proof = z.object({
+  question: z.string().trim().min(1).max(MAX_QUESTION_LENGTH),
+  answer: z.string().trim().min(1).max(MAX_EXPERT_ANSWER_LENGTH),
+});
+/** What an expert covers: folders and globs in its repo (AreaPathSchema). */
+const Area = z.array(AreaPathSchema).min(1).max(MAX_AREA_PATHS);
+
+/**
+ * A runner suggests creating an expert (protocol 0.15.0), once per session and folder, for a session
+ * in a repo the office takes. `session` is the session that showed the need (for an office-wide one,
+ * the latest that searched the area), `project` its repo, and `folder` the folder whose signals passed
+ * their threshold, which dismissals name. `scope`: `session`, from that session's own signals, or
+ * `office`, in answer to a `draft-office-wide-expert-creation-suggestion`, whose `request` is then its
+ * `id`. The draft: `key`, the expert's name (shown as `expertDisplayName(key)`), `subject`, `area`
+ * and `proof`, as the runner's local model wrote them and the secret check passed them. `why`, the
+ * signals that passed their thresholds, each other one 0: `share`, the share of the session's context
+ * spent reading and searching the folder (0 to 1), and `tokens`, those tokens, which are one signal;
+ * `minutes`, the time spent there; `corrections`, the person's corrections there. `at`: when it was
+ * suggested. Of its text, only these leave the machine, under ADR 0004's case for an expert creation
+ * suggestion's draft.
+ */
+export const ExpertCreationSuggestionMessageSchema = z.object({
+  type: z.literal("expert-creation-suggestion"),
+  v: Version,
+  id: ExpertCreationSuggestionId,
+  session: z.string().min(1),
+  project: ProjectSchema,
+  folder: AreaPathSchema,
+  scope: z.enum(["session", "office"]),
+  key: ExpertNameSchema,
+  subject: Subject,
+  area: Area,
+  proof: Proof,
+  why: z.object({
+    share: z.number().min(0).max(1),
+    tokens: z.number().int().nonnegative(),
+    minutes: z.number().nonnegative(),
+    corrections: z.number().int().nonnegative(),
+  }),
+  at: z.iso.datetime({ offset: true }),
+});
+
+/**
+ * A runner ends its expert creation suggestion `id` itself (protocol 0.15.0): `withdrawn`, it took the
+ * suggestion back before anyone created the expert or dismissed it; `no-draft`, it couldn't draft the
+ * office-wide suggestion the `draft-office-wide-expert-creation-suggestion` of that id asked for (the
+ * secret check matched, or its model gave no usable draft).
+ */
+export const RunnerExpertCreationSuggestionEndedMessageSchema = z.object({
+  type: z.literal("expert-creation-suggestion-ended"),
+  v: Version,
+  id: ExpertCreationSuggestionId,
+  why: z.enum(["withdrawn", "no-draft"]),
+});
+
+/**
+ * Where creating an expert stands on the runner that took the `create-expert-from-suggestion` request
+ * `request`, for the expert creation suggestion `expertCreationSuggestionId` (protocol 0.15.0), sent
+ * as each state is reached: `cloning`, it prepares the expert's own clone of the repo; `grounding`,
+ * the expert reads what its subject rests on, as any expert grounds (its area decides only which
+ * folders it covers, for expert creation suggestions); `proof`, it answers its
+ * proof question; `ready`, it answers questions; `failed`, it stopped, with `detail` in the runner's
+ * own words (no checkout of the repo on this machine, a key already used here, a failed proof).
+ */
+export const ExpertCreationProgressStateSchema = z.enum(["cloning", "grounding", "proof", "ready", "failed"]);
+export const ExpertCreationProgressMessageSchema = z.object({
+  type: z.literal("expert-creation-progress"),
+  v: Version,
+  request: RequestId,
+  expertCreationSuggestionId: ExpertCreationSuggestionId,
+  state: ExpertCreationProgressStateSchema,
+  detail: Detail.optional(),
+});
+
 const driven = { type: z.literal("driven"), v: Version };
 
 /**
@@ -691,6 +829,9 @@ export const DataLayerMessageSchema = z.discriminatedUnion("type", [
   ExpertsMessageSchema,
   AskExpertMessageSchema,
   ExpertSeniorMessageSchema,
+  ExpertCreationSuggestionMessageSchema,
+  RunnerExpertCreationSuggestionEndedMessageSchema,
+  ExpertCreationProgressMessageSchema,
 ]);
 
 // Office server → data layer.
@@ -1079,6 +1220,93 @@ export const DrivePolicyMessageSchema = z.object({
   bypassAllowed: z.array(z.string().min(1)).max(1000),
 });
 
+/**
+ * Create the expert the expert creation suggestion `expertCreationSuggestionId` drafted (protocol
+ * 0.15.0), as the person who confirmed it (`by`) set it on the floor, sent to the runner of the
+ * computer they chose, one of their own, which checks `by` is its own person. The runner finds its
+ * checkout of `project`, writes the expert file `key` with `subject`, `model`, `area` and `proof`, and
+ * answers with `expert-creation-progress` under `request`. Nothing is queued: the server refuses at
+ * once when that runner isn't linked.
+ */
+export const CreateExpertFromSuggestionMessageSchema = z.object({
+  type: z.literal("create-expert-from-suggestion"),
+  v: Version,
+  request: RequestId,
+  expertCreationSuggestionId: ExpertCreationSuggestionId,
+  key: ExpertNameSchema,
+  subject: Subject,
+  model: Model,
+  project: ProjectSchema,
+  area: Area,
+  proof: Proof,
+  by: Account,
+});
+
+/**
+ * Draft an office-wide expert creation suggestion on `folder` of `project` (protocol 0.15.0), which
+ * several sessions searched within the period: sent to the runner of the latest of them. `sessions`:
+ * those on this runner's machine, newest first, whose work in the folder the draft is made from; the
+ * first is the suggestion's `session`. The runner answers with `expert-creation-suggestion`, scope
+ * `office`, whose `id` is `request`, or with `expert-creation-suggestion-ended` `no-draft`.
+ * `searchedBySessions` and `searchWindowDays` let the runner say why it is office-wide.
+ */
+export const DraftOfficeWideExpertCreationSuggestionMessageSchema = z.object({
+  type: z.literal("draft-office-wide-expert-creation-suggestion"),
+  v: Version,
+  request: ExpertCreationSuggestionId,
+  project: ProjectSchema,
+  folder: AreaPathSchema,
+  sessions: z.array(z.string().min(1)).min(1).max(MAX_EXPERT_CREATION_SUGGESTION_SESSIONS),
+  /** How many sessions in the office, on any machine, searched the folder within the window. */
+  searchedBySessions: z.number().int().positive(),
+  /** The window, in days: the office's `officeWideSuggestionWindowDays`. */
+  searchWindowDays: z.number().positive(),
+});
+
+/**
+ * One area this runner's person dismissed: a folder of a project, by its id, lower-cased. "Not now"
+ * lasts `until` a time, after which the same area may be suggested again; "Don't suggest this again"
+ * lasts `forever`. Exactly one of the two.
+ */
+const ExpertCreationSuggestionDismissalSchema = z
+  .object({
+    project: z.string().min(1),
+    folder: AreaPathSchema,
+    until: z.iso.datetime({ offset: true }).optional(),
+    forever: z.literal(true).optional(),
+  })
+  .superRefine((dismissal, context) => {
+    if ((dismissal.until === undefined) === (dismissal.forever === undefined)) context.addIssue({ code: "custom", path: ["until"], message: "a dismissal lasts until a time, or forever: one of the two" });
+  });
+
+/**
+ * The areas this runner's person dismissed (protocol 0.15.0), the whole list each time: sent to a
+ * runner that said `canCreateExpertsFromSuggestions` once its hello is let in, even an empty one, and
+ * whenever the list changes. The runner suggests no expert on an area it lists, and sends none of its
+ * expert creation suggestion messages on a connection before the connection's first one (see
+ * `expert-creation-suggestion`).
+ */
+export const ExpertCreationSuggestionDismissalsMessageSchema = z.object({
+  type: z.literal("expert-creation-suggestion-dismissals"),
+  v: Version,
+  dismissals: z.array(ExpertCreationSuggestionDismissalSchema).max(MAX_EXPERT_CREATION_SUGGESTION_DISMISSALS),
+});
+
+const expertCreationSuggestionEnded = { type: z.literal("expert-creation-suggestion-ended"), v: Version, id: ExpertCreationSuggestionId };
+
+/**
+ * How the expert creation suggestion `id` ended (protocol 0.15.0), sent to the runner that sent it:
+ * `made`, once the expert `key` is created and ready (with the key the person set, which may differ
+ * from the draft's), so the runner can tell the session that showed the need; `dismissed`, by a person
+ * on the floor, and only that; `refused`, the office won't keep it (its repo isn't taken there, the
+ * session is someone else's, it names an id the office didn't ask for, and the like); `expired`,
+ * unopened or with no expert created for the period the server keeps expert creation suggestions.
+ */
+export const ServerExpertCreationSuggestionEndedMessageSchema = z.discriminatedUnion("why", [
+  z.object({ ...expertCreationSuggestionEnded, why: z.literal("made"), key: ExpertNameSchema }),
+  z.object({ ...expertCreationSuggestionEnded, why: z.enum(["dismissed", "refused", "expired"]) }),
+]);
+
 export const OfficeServerMessageSchema = z.discriminatedUnion("type", [
   RepairMessageSchema,
   WelcomeMessageSchema,
@@ -1096,6 +1324,10 @@ export const OfficeServerMessageSchema = z.discriminatedUnion("type", [
   DrivePolicyMessageSchema,
   ExpertRightsMessageSchema,
   HostingMessageSchema,
+  CreateExpertFromSuggestionMessageSchema,
+  DraftOfficeWideExpertCreationSuggestionMessageSchema,
+  ExpertCreationSuggestionDismissalsMessageSchema,
+  ServerExpertCreationSuggestionEndedMessageSchema,
 ]);
 
 export type HandoffRepo = z.infer<typeof HandoffRepoSchema>;
@@ -1150,6 +1382,15 @@ export type AskExpertMessage = z.infer<typeof AskExpertMessageSchema>;
 export type ExpertRightsMessage = z.infer<typeof ExpertRightsMessageSchema>;
 export type HostingMessage = z.infer<typeof HostingMessageSchema>;
 export type ExpertSeniorMessage = z.infer<typeof ExpertSeniorMessageSchema>;
+export type ExpertCreationSuggestionMessage = z.infer<typeof ExpertCreationSuggestionMessageSchema>;
+export type RunnerExpertCreationSuggestionEndedMessage = z.infer<typeof RunnerExpertCreationSuggestionEndedMessageSchema>;
+export type ExpertCreationProgressState = z.infer<typeof ExpertCreationProgressStateSchema>;
+export type ExpertCreationProgressMessage = z.infer<typeof ExpertCreationProgressMessageSchema>;
+export type CreateExpertFromSuggestionMessage = z.infer<typeof CreateExpertFromSuggestionMessageSchema>;
+export type DraftOfficeWideExpertCreationSuggestionMessage = z.infer<typeof DraftOfficeWideExpertCreationSuggestionMessageSchema>;
+export type ExpertCreationSuggestionDismissalsMessage = z.infer<typeof ExpertCreationSuggestionDismissalsMessageSchema>;
+export type ExpertCreationSuggestionDismissal = ExpertCreationSuggestionDismissalsMessage["dismissals"][number];
+export type ServerExpertCreationSuggestionEndedMessage = z.infer<typeof ServerExpertCreationSuggestionEndedMessageSchema>;
 /**
  * The reasons the floor shows for a refused drive request: a runner's, and `offline`, the server's
  * own, for a request it refused at once because the owner's runner isn't linked (nothing is queued).

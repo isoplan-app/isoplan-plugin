@@ -436,3 +436,30 @@ test("link: a throw in its socket handlers goes to onError, and that handler sen
   expect(types(s.got)).toEqual(["hello", "full 0", "changes 1"]);
   l.close();
 });
+
+test("link: a runner's passes the server's expert creation suggestion messages to onExpertCreationSuggestionMessages, and sends its own only while up; without onExpertCreationSuggestionMessages they are logged", async () => {
+  const runner = await server();
+  const runnerHello: RunnerHelloMessage = { type: "runner", v: PROTOCOL_VERSION, account: hello.account, machine: hello.machine, canCreateExpertsFromSuggestions: true };
+  const suggestionMessages: unknown[] = [];
+  const { link: l, lines } = link(runner.url, { hello: runnerHello, onExpertCreationSuggestionMessages: (m) => suggestionMessages.push(m) });
+  await until(() => runner.got.length === 1);
+  expect(runner.got[0]).toMatchObject({ type: "runner", canCreateExpertsFromSuggestions: true });
+  const dismissals = { type: "expert-creation-suggestion-dismissals", v: PROTOCOL_VERSION, dismissals: [] };
+  const ended = { type: "expert-creation-suggestion-ended", v: PROTOCOL_VERSION, id: "o1", why: "made", key: "pairing" };
+  for (const m of [dismissals, ended]) runner.sockets[0]!.send(JSON.stringify(m));
+  await until(() => suggestionMessages.length === 2);
+  expect(suggestionMessages).toEqual([dismissals, ended]);
+  const progress = { type: "expert-creation-progress", v: PROTOCOL_VERSION, request: "m1", expertCreationSuggestionId: "o1", state: "cloning" } as const;
+  expect(l.sendLive(progress)).toBe(true);
+  await until(() => runner.got.length === 2);
+  expect(runner.got[1]).toMatchObject(progress);
+  runner.sockets[0]!.terminate();
+  await until(() => lines.some((x) => x.type === "status" && x.state === "disconnected"));
+  expect(l.sendLive(progress)).toBe(false);
+
+  const plain = await server();
+  const { lines: plainLines } = link(plain.url, { hello: runnerHello });
+  await until(() => plain.got.length === 1);
+  plain.sockets[0]!.send(JSON.stringify(dismissals));
+  await until(() => plainLines.some((x) => x.type === "log" && x.text.includes("expert-creation-suggestion-dismissals message, which this data layer doesn't handle")));
+});

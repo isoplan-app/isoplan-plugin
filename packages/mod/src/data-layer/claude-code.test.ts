@@ -987,3 +987,187 @@ test("attribution, checkouts: a subagent working in a worktree of another repo i
   expect(read.checkouts).toEqual({ [cc("w")]: localProject(other).id });
   expect(byId(read.facts!.agents).w).toMatchObject({ checkout: normalize(otherWt), branch: "feat/x" });
 });
+
+// Areas: a tool call with its own id, and its result, `age` seconds ago.
+const call = (cwd: string, id: string, name: string, input: Record<string, unknown>, age: number) => ({ type: "assistant", cwd, timestamp: at(age), message: { role: "assistant", content: [{ type: "tool_use", id, name, input }] } });
+const result = (cwd: string, id: string, content: unknown, age: number, extra: { isError?: boolean; denial?: string } = {}) => ({
+  type: "user",
+  cwd,
+  timestamp: at(age),
+  message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content, is_error: extra.isError ?? false }] },
+  ...(extra.denial && { toolDenialKind: extra.denial }),
+});
+const interrupted = (cwd: string, age: number, forTool = false) => line.user(cwd, [{ type: "text", text: forTool ? "[Request interrupted by user for tool use]" : "[Request interrupted by user]" }], age);
+const REFUSAL = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.";
+const area = (folder: string, counts: Partial<{ reads: number; searches: number; tokens: number; ms: number; corrections: number }> = {}) => ({ folder, reads: 0, searches: 0, tokens: 0, ms: 0, corrections: 0, ...counts });
+
+test("areas: each Read, Grep and Glob counts in its folder and every folder above it, the root aside, with its result's size as tokens and the time to it", async () => {
+  const { home, main } = office();
+  const src = path.join(main, "packages", "mod", "src");
+  fs.mkdirSync(path.join(main, "packages", "mod", "node_modules", "zod"), { recursive: true });
+  fs.mkdirSync(src, { recursive: true });
+  session(home, "s", [
+    line.user(main, "how does pairing work?", 100),
+    call(main, "r1", "Read", { file_path: path.join(src, "pairing.ts") }, 90),
+    result(main, "r1", "x".repeat(4000), 85),
+    call(main, "g1", "Grep", { pattern: "pair", path: path.join(main, "packages", "mod") }, 80),
+    result(main, "g1", [{ type: "text", text: "y".repeat(400) }], 78),
+    call(main, "b1", "Glob", { pattern: "packages/mod/src/**/*.ts" }, 70),
+    result(main, "b1", "z".repeat(40), 70),
+    // At the root, nothing; inside node_modules, only the folders above it.
+    call(main, "r2", "Read", { file_path: path.join(main, "README.md") }, 60),
+    result(main, "r2", "w".repeat(400), 60),
+    call(main, "r3", "Read", { file_path: path.join(main, "packages", "mod", "node_modules", "zod", "index.js") }, 50),
+    result(main, "r3", "", 50),
+  ]);
+  expect((await factsOf(home, "s")).areas).toEqual([
+    area("packages", { reads: 2, searches: 2, tokens: 1110, ms: 7000 }),
+    area("packages/mod", { reads: 2, searches: 2, tokens: 1110, ms: 7000 }),
+    area("packages/mod/src", { reads: 1, searches: 1, tokens: 1010, ms: 5000 }),
+  ]);
+});
+
+test("areas: a Grep or Glob at the repo's root counts in the deepest folder holding all its results' files, when that isn't the root, else nowhere", async () => {
+  const { home, main } = office();
+  for (const dir of ["packages/mod/src", "packages/server", "docs"]) fs.mkdirSync(path.join(main, dir), { recursive: true });
+  session(home, "s", [
+    line.user(main, "where is pairing?", 100),
+    // No path: its files, relative to the session's folder, are all in packages/mod/src.
+    call(main, "g1", "Grep", { pattern: "pair" }, 90),
+    { ...result(main, "g1", "x".repeat(400), 88), toolUseResult: { mode: "files_with_matches", filenames: ["packages/mod/src/a.ts", "packages/mod/src/b.ts"], numFiles: 2 } },
+    // The root as its path, in content mode: each line starts with its file.
+    call(main, "g2", "Grep", { pattern: "pair", path: main, output_mode: "content" }, 80),
+    { ...result(main, "g2", "y".repeat(40), 80), toolUseResult: { mode: "content", filenames: [], content: "packages/server/x.ts:3:pair()\npackages/mod/src/a.ts:9:pair" } },
+    // Files across the root: nowhere.
+    call(main, "b1", "Glob", { pattern: "**/*.md" }, 70),
+    { ...result(main, "b1", "z".repeat(40), 70), toolUseResult: { filenames: [path.join(main, "docs", "a.md"), path.join(main, "README.md")], numFiles: 2 } },
+  ]);
+  expect((await factsOf(home, "s")).areas).toEqual([
+    area("packages", { searches: 2, tokens: 110, ms: 2000 }),
+    area("packages/mod", { searches: 1, tokens: 100, ms: 2000 }),
+    area("packages/mod/src", { searches: 1, tokens: 100, ms: 2000 }),
+  ]);
+});
+
+test("areas: a subagent's calls count to its session's areas, and still do once it has left the view", async () => {
+  const { home, main } = office();
+  const adr = path.join(main, "docs", "adr");
+  fs.mkdirSync(adr, { recursive: true });
+  session(home, "s", [line.user(main, "what do the ADRs say?", 60)], { age: 5 });
+  const sub = agent(home, "s", "a1", { agentType: "Explore" }, [line.user(main, "read the ADRs", 50), call(main, "r1", "Read", { file_path: path.join(adr, "0004.md") }, 40), result(main, "r1", "x".repeat(800), 39)], { age: 39 });
+  const read = sourceIn(home);
+  const expected = [area("docs", { reads: 1, tokens: 200, ms: 1000 }), area("docs/adr", { reads: 1, tokens: 200, ms: 1000 })];
+  expect((await read("s")).facts!.areas).toEqual(expected);
+  touch(sub, 3 * 3600);
+  const later = (await read("s")).facts!;
+  expect(later.agents.map((a) => a.id)).toEqual([cc("s:lead")]);
+  expect(later.areas).toEqual(expected);
+});
+
+test("areas: an interruption, a turned-down call and a message the local model calls a correction each count once in every folder their turn worked in", async () => {
+  const { home, main } = office();
+  for (const dir of ["a/b", "c"]) fs.mkdirSync(path.join(main, dir), { recursive: true });
+  const asked: [string, string, string | null][] = [];
+  const corrected = (key: string, text: string, reply: string | null) => (asked.push([key, text, reply]), text.startsWith("No,"));
+  session(home, "s", [
+    line.user(main, "fix the parser", 100),
+    call(main, "r1", "Read", { file_path: path.join(main, "a", "b", "p.ts") }, 95),
+    result(main, "r1", "x", 95),
+    line.text(main, "The parser is in p.ts.", 94),
+    call(main, "e1", "Edit", { file_path: path.join(main, "c", "q.ts") }, 94),
+    interrupted(main, 93),
+    { ...line.user(main, "No, the other parser", 90), uuid: "u1" },
+    call(main, "r2", "Read", { file_path: path.join(main, "a", "b", "p.ts") }, 85),
+    // Turned down, then the interruption Claude Code writes after it: one correction.
+    result(main, "r2", REFUSAL, 84, { isError: true, denial: "user-rejected" }),
+    interrupted(main, 84, true),
+    { ...line.user(main, "thanks, carry on", 80), uuid: "u2" },
+  ]);
+  const facts = (await factsOf(home, "s", { corrected })).areas;
+  expect(facts).toEqual([area("a", { reads: 1, corrections: 3 }), area("a/b", { reads: 1, corrections: 3 }), area("c", { corrections: 2 })]);
+  expect(asked).toEqual([
+    ["u1", "No, the other parser", "The parser is in p.ts."],
+    ["u2", "thanks, carry on", "The parser is in p.ts."],
+  ]);
+});
+
+test("areas: with no kind on the line, an error result saying the person turned the call down is one, unless an MCP tool wrote it; the call it turned down counts as no read", async () => {
+  const { home, main } = office();
+  fs.mkdirSync(path.join(main, "a"), { recursive: true });
+  const file = path.join(main, "a", "p.ts");
+  session(home, "s", [
+    line.user(main, "fix it", 100),
+    call(main, "r1", "Read", { file_path: file }, 95),
+    result(main, "r1", REFUSAL, 95, { isError: true }),
+    call(main, "m1", "mcp__notes__read", { file_path: file }, 94),
+    result(main, "m1", REFUSAL, 94, { isError: true }),
+    call(main, "e1", "Edit", { file_path: file }, 93),
+    result(main, "e1", "a permission rule refused it", 93, { isError: true, denial: "permission-rule" }),
+  ]);
+  expect((await factsOf(home, "s")).areas).toEqual([area("a", { corrections: 1 })]);
+});
+
+test("areas: with no kind on the line, a turned-down result among others in it leaves the others' reads, size and time counted, and only theirs", async () => {
+  const { home, main } = office();
+  fs.mkdirSync(path.join(main, "a"), { recursive: true });
+  const refusal = result(main, "r1", REFUSAL, 90, { isError: true });
+  const ok = result(main, "r2", "x".repeat(400), 90);
+  session(home, "s", [
+    line.user(main, "read both", 100),
+    { type: "assistant", cwd: main, timestamp: at(95), message: { role: "assistant", content: [{ type: "tool_use", id: "r1", name: "Read", input: { file_path: path.join(main, "a", "p.ts") } }, { type: "tool_use", id: "r2", name: "Read", input: { file_path: path.join(main, "a", "q.ts") } }] } },
+    { ...ok, message: { role: "user", content: [...refusal.message.content, ...ok.message.content] } },
+  ]);
+  expect((await factsOf(home, "s")).areas).toEqual([area("a", { reads: 1, tokens: 100, ms: 5000, corrections: 1 })]);
+});
+
+test("areas: a message counts once the local model has said it corrects, and is asked again until then; one after a turn in no folder isn't asked", async () => {
+  const { home, main } = office();
+  fs.mkdirSync(path.join(main, "a"), { recursive: true });
+  let verdict: boolean | null = null;
+  const keys: string[] = [];
+  const corrected = (key: string) => (keys.push(key), verdict);
+  session(home, "s", [
+    line.user(main, "hi", 100),
+    line.text(main, "Hello.", 99),
+    { ...line.user(main, "what's in a?", 98), uuid: "u1" },
+    call(main, "r1", "Read", { file_path: path.join(main, "a", "p.ts") }, 95),
+    result(main, "r1", "x", 95),
+    { ...line.user(main, "wrong file", 90), uuid: "u2" },
+  ]);
+  const read = sourceIn(home, { corrected });
+  expect((await read("s")).facts!.areas).toEqual([area("a", { reads: 1 })]);
+  verdict = true;
+  expect((await read("s")).facts!.areas).toEqual([area("a", { reads: 1, corrections: 1 })]);
+  verdict = false;
+  expect((await read("s")).facts!.areas).toEqual([area("a", { reads: 1, corrections: 1 })]);
+  expect(keys).toEqual(["u2", "u2"]);
+});
+
+test("areas: what the session said in its turns in a folder stays on the machine, the latest turns' words, a subagent's with its report", async () => {
+  const { home, main } = office();
+  for (const dir of ["a/b", "c"]) fs.mkdirSync(path.join(main, dir), { recursive: true });
+  session(home, "s", [
+    line.user(main, "how is b laid out?", 100),
+    call(main, "r1", "Read", { file_path: path.join(main, "a", "b", "p.ts") }, 95),
+    result(main, "r1", "x", 95),
+    line.text(main, "b holds the parser.", 94),
+    line.user(main, "and c?", 90),
+    call(main, "r2", "Read", { file_path: path.join(main, "c", "q.ts") }, 85),
+    result(main, "r2", "x", 85),
+  ]);
+  agent(home, "s", "a1", { agentType: "Explore" }, [line.user(main, "map a", 50), call(main, "g1", "Grep", { pattern: "x", path: path.join(main, "a") }, 40), result(main, "g1", "x", 40), line.text(main, "a has b in it.", 39)], { age: 39 });
+  const r = await sourceIn(home)("s");
+  expect(r.facts!.areas!.map((a) => a.folder).sort()).toEqual(["a", "a/b", "c"]);
+  expect(await r.said!(null, "a")).toEqual(["Asked: how is b laid out?\nAnswered: b holds the parser.", "Asked: map a\nAnswered: a has b in it."]);
+  expect(await r.said!(null, "a/b")).toEqual(["Asked: how is b laid out?\nAnswered: b holds the parser."]);
+  expect(await r.said!("github.com/team/web", "a")).toEqual([]);
+});
+
+test("areas: what the session said in another repo's folder is found whatever the letter case of that repo's id", async () => {
+  const { home, main, other } = office();
+  fs.mkdirSync(path.join(other, "a"), { recursive: true });
+  session(home, "s", [line.user(main, "how does a work?", 100), call(main, "r1", "Read", { file_path: path.join(other, "a", "p.ts") }, 95), result(main, "r1", "x", 95), line.text(main, "a parses.", 94)]);
+  const r = await sourceIn(home)("s", main);
+  const id = r.facts!.areas!.find((a) => a.folder === "a")!.project!.id;
+  expect(await r.said!(id.toUpperCase(), "a")).toEqual(["Asked: how does a work?\nAnswered: a parses."]);
+});

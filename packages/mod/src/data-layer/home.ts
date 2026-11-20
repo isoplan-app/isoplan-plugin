@@ -52,6 +52,7 @@ export function inRepos(facts: Facts): Facts {
     ...facts,
     edits: placed(facts.edits),
     reads: placed(facts.reads),
+    ...(facts.areas && { areas: placed(facts.areas) }),
     agents: facts.agents.map((a) => (a.doing && !a.doing.project && a.doing.file !== undefined ? { ...a, doing: { kind: a.doing.kind, since: a.doing.since } } : a)),
   };
 }

@@ -81,3 +81,13 @@ test("changes: a workflow upserts when it differs and is removed by its id", () 
   expect(diffFacts(withOne, { ...base, workflows: [ended] })).toEqual({ upsert: { workflows: [ended] }, remove: {} });
   expect(diffFacts(withOne, base)).toEqual({ upsert: {}, remove: { workflows: ["wf_1"] } });
 });
+
+test("changes: an area upserts by its folder and project when it differs, and is never removed", () => {
+  const web = { id: "github.com/team/web", name: "web" };
+  const area = { folder: "packages/server", reads: 3, searches: 1, tokens: 900, ms: 4000, corrections: 0 };
+  const withAreas: Facts = { ...base, areas: [area, { ...area, project: web, away: true }] };
+  expect(diffFacts(base, withAreas)).toEqual({ upsert: { areas: withAreas.areas }, remove: {} });
+  const grown = { ...area, reads: 4 };
+  expect(diffFacts(withAreas, { ...withAreas, areas: [grown, withAreas.areas![1]!] })).toEqual({ upsert: { areas: [grown] }, remove: {} });
+  expect(diffFacts(withAreas, base)).toBe(null);
+});

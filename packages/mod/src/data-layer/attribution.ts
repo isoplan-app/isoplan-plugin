@@ -54,6 +54,12 @@ export interface Attribution {
   file(path: string): Promise<Placed | null>;
   /** The repo a command run in `dir` works in: {} for the session's own, null when it is in none. */
   dir(dir: string): Promise<Omit<Placed, "file"> | null>;
+  /**
+   * The nearest folder that exists at or above absolute `path` (a folder, or a file in one),
+   * relative to its repo's root (`.` for the root itself), with the repo as for a file; null when
+   * it is in no repo and not in a workspace.
+   */
+  folder(path: string): Promise<(Omit<Placed, "file"> & { folder: string }) | null>;
 }
 
 /** One pass's: what folders are is remembered across passes in `cache`. */
@@ -72,20 +78,23 @@ export function createAttribution({ folder, where: home, resolve, projectOf, sta
   const homeFolder = realOf(folder);
 
   // `path`'s nearest folder that exists (`path` itself when it is one), with symlinks resolved and
-  // the rest of the path after it, and the repo git places it in.
-  async function locate(path: string, isDir: boolean): Promise<{ real: string; where: Where | null }> {
+  // the rest of the path after it, and the repo git places it in. `found` is that folder itself.
+  async function locate(path: string, isDir: boolean): Promise<{ real: string; found: string; where: Where | null }> {
     const p = normalize(path);
     let at = isDir ? p : dirname(p);
     while (!(await isThere(at))) {
       const up = dirname(at);
-      if (up === at) return { real: p, where: null };
+      if (up === at) return { real: p, found: p, where: null };
       at = up;
     }
     const realAt = await realOf(at);
     const rest = p.slice(at.length).replace(/^\/+/, "");
     const where = await resolve(realAt);
-    return { real: rest ? `${realAt.replace(/\/$/, "")}/${rest}` : realAt, where: where && { ...where, toplevel: await realOf(where.toplevel) } };
+    return { real: rest ? `${realAt.replace(/\/$/, "")}/${rest}` : realAt, found: realAt, where: where && { ...where, toplevel: await realOf(where.toplevel) } };
   }
+
+  // `dir` relative to `root`: `.` for the root itself, null outside it.
+  const under = (root: string, dir: string) => (pathKey(root) === pathKey(dir) ? "." : relativeTo(root, dir));
 
   async function elsewhere(where: Where, real: string): Promise<Omit<Placed, "file">> {
     if (home && pathKey(where.commonDir) === pathKey(home.commonDir)) return {};
@@ -109,11 +118,19 @@ export function createAttribution({ folder, where: home, resolve, projectOf, sta
       if (where) return elsewhere(where, d);
       return !home && (relativeTo(await homeFolder, d) !== null || pathKey(await homeFolder) === pathKey(d)) ? {} : null;
     },
+    async folder(path) {
+      const { found, where } = await locate(path, true);
+      const folder = where && under(where.toplevel, found);
+      if (where && folder) return { folder, ...(await elsewhere(where, found)) };
+      // A workspace's own folders, outside any of its repos.
+      const own = !home && under(await homeFolder, found);
+      return own ? { folder: own } : null;
+    },
   };
 }
 
 /**
- * The facts as they may leave the machine: a file, command or subagent's checkout in another repo
+ * The facts as they may leave the machine: a file, command, area or subagent's checkout in another repo
  * only when `projects`, the office's from the server's welcome, holds that repo. Without a welcome
  * (an older server, or none yet on this connection) none of them leave. `checkouts` names the
  * project of each subagent whose worktree is another repo's, by agent id.
@@ -135,5 +152,6 @@ export function forOffice(facts: Facts, projects: ReadonlySet<string> | null, ch
     }),
     edits: files(facts.edits),
     reads: files(facts.reads),
+    ...(facts.areas && { areas: facts.areas.every((a) => ok(a.project)) ? facts.areas : facts.areas.filter((a) => ok(a.project)) }),
   };
 }

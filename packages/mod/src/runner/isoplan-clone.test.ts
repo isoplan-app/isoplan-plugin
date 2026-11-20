@@ -63,12 +63,12 @@ test("a repo with no remote, or whose origin is a local path, is refused with a 
 test("a clone that fails, or a fetch that fails, is refused, its runner log saying why; a folder there already that isn't a clone is left as it is", async () => {
   const t = setUp();
   git(t.checkout, "remote", "set-url", "origin", path.join(t.root, "nowhere.git"));
-  expect(await t.clones(t.checkout, PROJECT)).toEqual({ problem: expect.stringContaining("couldn't be made") });
+  expect(await t.clones(t.checkout, PROJECT)).toEqual({ problem: expect.stringContaining("couldn't be made"), reason: expect.stringContaining("git failed: ") });
   expect(fs.existsSync(`${t.clone}.new`)).toBe(false);
   git(t.checkout, "remote", "set-url", "origin", t.remote);
   expect(await t.clones(t.checkout, PROJECT)).toBe(t.clone);
   git(t.checkout, "remote", "set-url", "origin", path.join(t.root, "nowhere.git"));
-  expect(await t.clones(t.checkout, PROJECT)).toEqual({ problem: expect.stringContaining("couldn't be brought up to date") });
+  expect(await t.clones(t.checkout, PROJECT)).toEqual({ problem: expect.stringContaining("couldn't be brought up to date"), reason: expect.stringContaining("git failed: ") });
   expect(t.logged.some((l) => l.includes("couldn't fetch origin"))).toBe(true);
 
   const other = path.join(clonesDir(t.claudeDir), cloneName("github.com/ada/other"));
@@ -77,6 +77,15 @@ test("a clone that fails, or a fetch that fails, is refused, its runner log sayi
   git(t.checkout, "remote", "set-url", "origin", t.remote);
   expect(await t.clones(t.checkout, "github.com/ada/other")).toEqual({ problem: expect.stringContaining("couldn't be made") });
   expect(fs.readdirSync(other)).toEqual(["keep.txt"]);
+}, 60000);
+
+test("with no checkout, it is cloned from an address, borrowing nothing, and one there already is fetched with its origin kept; a clone that fails says git's reason", async () => {
+  const t = setUp();
+  expect(await t.clones({ url: path.join(t.root, "nowhere.git") }, PROJECT)).toEqual({ problem: expect.stringContaining("couldn't be made"), reason: expect.stringContaining("git failed: ") });
+  expect(await t.clones({ url: t.remote }, PROJECT)).toBe(t.clone);
+  expect(git(t.clone, "symbolic-ref", "--short", "HEAD")).toBe("main");
+  expect(await t.clones({ url: "https://example.invalid/ada/app.git" }, PROJECT)).toBe(t.clone);
+  expect(git(t.clone, "remote", "get-url", "origin")).toBe(t.remote);
 }, 60000);
 
 test("two uses at once clone once", async () => {

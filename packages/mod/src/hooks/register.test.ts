@@ -364,7 +364,55 @@ test("hooks: a pairing link is in the status line while it waits, and in the tra
   ]);
 });
 
-const ASK = "mcp__plugin_isoplan__ask_earlier_session";
+const TEAM = "wss://office.team.example/data-layer";
+const expertCreationSuggestionLine = (server: string, id: string, key = "parser"): DataLayerLine => ({
+  type: "expert-creation-suggestion",
+  server,
+  id,
+  key,
+  name: key[0]!.toUpperCase() + key.slice(1) + " Expert",
+  folder: `src/${key}`,
+  url: `${server.startsWith("wss:") ? "https://office.team.example" : "http://127.0.0.1:4747"}/?expert-creation-suggestion=${id}`,
+  why: { share: 0.18, tokens: 36000, minutes: 12.4, corrections: 0 },
+});
+
+test("hooks: an open expert creation suggestion is in the status line after its office's part, and in the transcript once; its link goes when it ends", async () => {
+  const suggestion = expertCreationSuggestionLine("ws://127.0.0.1:4747/data-layer", "o1");
+  // The runner sends the suggestion again when the pipe's end reconnects: no second transcript line.
+  const h = await start([suggestion, connected, suggestion, { type: "expert-creation-suggestion-ended", server: "ws://127.0.0.1:4747/data-layer", id: "o1", why: "dismissed" }], { stays: true });
+  await vi.waitFor(() => expect(h.status).toHaveLength(4));
+  // Before its office's status, a suggestion shows nothing.
+  expect(h.status).toEqual([undefined, "Isoplan: dev ✓ · A Parser Expert could help · review: http://127.0.0.1:4747/?expert-creation-suggestion=o1", "Isoplan: dev ✓ · A Parser Expert could help · review: http://127.0.0.1:4747/?expert-creation-suggestion=o1", "Isoplan: dev ✓"]);
+  expect(h.logged).toEqual(["Isoplan: this session has spent about 12 minutes and 18% of its context on src/parser. A Parser Expert could answer questions about src/parser without searching it again. Review it: http://127.0.0.1:4747/?expert-creation-suggestion=o1 (or type /isoplan:review-expert-suggestion)"]);
+});
+
+test("hooks: a suggestion open in two offices shows once, after the first; each office shows its newest; a runner that comes back clears them until they come again", async () => {
+  const team: DataLayerLine = { type: "status", server: TEAM, label: "team", state: "connected" };
+  const h = await start([connected, team, expertCreationSuggestionLine(DEV, "o1"), expertCreationSuggestionLine(TEAM, "o1"), expertCreationSuggestionLine(TEAM, "o2", "billing"), { type: "runner", state: "down" }, { type: "runner", state: "up" }, connected], { stays: true });
+  await vi.waitFor(() => expect(h.status).toHaveLength(8));
+  expect(h.status.slice(2)).toEqual([
+    "Isoplan: dev ✓ · A Parser Expert could help · review: http://127.0.0.1:4747/?expert-creation-suggestion=o1 · team ✓",
+    "Isoplan: dev ✓ · A Parser Expert could help · review: http://127.0.0.1:4747/?expert-creation-suggestion=o1 · team ✓",
+    "Isoplan: dev ✓ · A Parser Expert could help · review: http://127.0.0.1:4747/?expert-creation-suggestion=o1 · team ✓ · A Billing Expert could help · review: https://office.team.example/?expert-creation-suggestion=o2",
+    "Isoplan: this session isn't reaching the office until Isoplan's runner is back; starting it",
+    undefined,
+    "Isoplan: dev ✓",
+  ]);
+  expect(h.logged).toHaveLength(2);
+});
+
+test("hooks: once the expert created from the session's suggestion is ready, its link goes and the lead's next tool result says to ask it, once", async () => {
+  const ready: DataLayerLine = { type: "expert-ready", server: DEV, id: "o1", key: "parser-rules", name: "Parser Rules Expert", folder: "src/parser" };
+  const h = await start([connected, expertCreationSuggestionLine(DEV, "o1"), ready, ready], { stays: true });
+  await vi.waitFor(() => expect(h.status).toHaveLength(4));
+  expect(h.status.at(-1)).toBe("Isoplan: dev ✓");
+  // A subagent's result doesn't carry it; the lead's next does, and only that one.
+  expect(await call(h, { agentId: "w1" })).toEqual({ result: "ok" });
+  expect(await call(h, {})).toEqual({ result: "ok", context: ["Isoplan: the Parser Rules Expert is ready. Ask it with ask_expert, expert \"parser-rules\", before you search src/parser again."] });
+  expect(await call(h, {})).toEqual({ result: "ok" });
+});
+
+const ASK ="mcp__plugin_isoplan__ask_earlier_session";
 const rightsLine = (granted: boolean): DataLayerLine => ({ type: "ask-rights", v: PROTOCOL_VERSION, room: "room:claude-code:a1", owner: { id: "p-adam", name: "Adam" }, granted });
 
 test("hooks: the ask_earlier_session tool is added only once the server says the session may ask, under the name registering answers, and runs the ask script as this session under the call's id", async () => {

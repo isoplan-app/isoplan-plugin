@@ -4,7 +4,7 @@
 // anything it sends back goes through a file the line names, which the runner reads. "The data
 // layer" below is the runner reporting the session (src/data-layer/report-session.ts).
 
-import type { AskedMessage, AskRightsMessage, ConflictMessage, ErrorMessage, ExpertRightsMessage } from "@isoplan/protocol";
+import type { AskedMessage, AskRightsMessage, ConflictMessage, ErrorMessage, ExpertCreationSuggestionMessage, ExpertRightsMessage } from "@isoplan/protocol";
 
 /**
  * The link to the office server. `waiting`: nothing to report yet, so not connected.
@@ -174,6 +174,67 @@ export interface RunnerLine {
   held?: "held-off" | "not-installed";
 }
 
+/**
+ * An expert creation suggestion is open for this session in one office (protocol 0.15.0, src/runner/expert-creation-suggestions.ts): an
+ * expert named `name` (expertDisplayName of `key`) could help with `folder`, a folder of the repo,
+ * relative to its root. `url` opens the suggestion's review on that office's floor (its http address and
+ * `/?expert-creation-suggestion=<id>`). Sent by the runner itself, not the data layer, once the office has kept the suggestion
+ * (it went there and the office didn't end it within the runner's KEPT_MS, as it ends one it won't
+ * keep), and again each time a hooks module connects for the session while it is open: one line per
+ * office it is open in. `server` is the office's data-layer address, `label` its short name, as on
+ * its status line. `why` is the signals that passed, as the suggestion gives them. The hooks module shows
+ * it until an ExpertCreationSuggestionEndedLine for the same `id` and `server` comes (the status line's link, and
+ * one transcript line, once per id).
+ */
+export interface ExpertCreationSuggestionLine {
+  type: "expert-creation-suggestion";
+  server: string;
+  label?: string;
+  id: string;
+  key: string;
+  name: string;
+  folder: string;
+  url: string;
+  why: ExpertCreationSuggestionMessage["why"];
+  /** An office-wide suggestion's: why it is office-wide, which its transcript line says. */
+  officeWideReason?: OfficeWideReason;
+}
+
+/** Why an office-wide suggestion was made: how many sessions in the office, on any machine, searched its folder within the last `searchWindowDays` days. */
+export interface OfficeWideReason {
+  searchedBySessions: number;
+  searchWindowDays: number;
+}
+
+/**
+ * The suggestion `id` is no longer open in the office `server`: an expert was `made` from it, someone
+ * `dismissed` it, it `expired`, that office `refused` to keep it (no dismissal: it may stay open in
+ * others), or the runner `withdrawn` it (it was made or dismissed in another office). The hooks
+ * module takes its link away.
+ */
+export interface ExpertCreationSuggestionEndedLine {
+  type: "expert-creation-suggestion-ended";
+  server: string;
+  id: string;
+  why: "made" | "dismissed" | "refused" | "expired" | "withdrawn";
+}
+
+/**
+ * The expert suggested to this session as `id` is made and ready, in the office `server`: `key` is its
+ * name as whoever made it set it (it may differ from the suggestion's), `name` how people read it. The
+ * hooks module tells the agent once, after a later tool's result, as it tells a late expert answer:
+ * it may ask it now, with ask_expert. Sent once to a connected hooks module; while none is
+ * connected it waits for the next one, in the runner's memory and expert-creation-suggestions.json.
+ */
+export interface ExpertReadyLine {
+  type: "expert-ready";
+  server: string;
+  id: string;
+  key: string;
+  name: string;
+  folder: string;
+}
+
 /** A problem worth a line in the debug log. */
 export interface LogLine {
   type: "log";
@@ -194,7 +255,7 @@ export interface TitleReply {
  * question the agent asked an expert, and `expert-rights` the experts the session may ask through
  * that office (protocol 0.13.0).
  */
-export type DataLayerLine = StatusLine | TitleAskLine | PairLine | WaitsLine | WindowLine | OwnerAnswerLine | UpdatedLine | SupersededLine | RunnerLine | OwnerMessageLine | LogLine | ConflictMessage | ErrorMessage | FromOffice<AskedMessage> | FromOffice<AskRightsMessage> | FromOffice<ExpertRightsMessage>;
+export type DataLayerLine = StatusLine | TitleAskLine | PairLine | WaitsLine | WindowLine | OwnerAnswerLine | UpdatedLine | SupersededLine | RunnerLine | OwnerMessageLine | LogLine | ExpertCreationSuggestionLine | ExpertCreationSuggestionEndedLine | ExpertReadyLine | ConflictMessage | ErrorMessage | FromOffice<AskedMessage> | FromOffice<AskRightsMessage> | FromOffice<ExpertRightsMessage>;
 
 /** A server's message, with the data-layer address of the office server that sent it; none from a data layer before #105. */
 export type FromOffice<M> = M & { server?: string };

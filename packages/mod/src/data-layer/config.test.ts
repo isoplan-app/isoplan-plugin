@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { expect, test } from "vitest";
-import { loadConfig, officeNamed, officesOf } from "./config.js";
+import { loadConfig, loadSettings, officeNamed, officesOf } from "./config.js";
 import { nodeIo } from "./io.js";
 import { defaults, modDir, tempRoot } from "./fixture.js";
 
@@ -89,4 +89,15 @@ test("config: --office names an office by its label in any case, its address or 
   expect(officeNamed(offices, "isoplan-internal.example")?.label).toBe("internal");
   expect(officeNamed(offices, "127.0.0.1:4747")?.label).toBe("dev");
   expect(officeNamed(offices, "elsewhere")).toBeUndefined();
+});
+
+test("settings: a block is overridden key by key, each key that doesn't fit keeping the mod's default", async () => {
+  const root = tempRoot();
+  const mod = path.join(root, "runner.json");
+  const user = path.join(root, "user.json");
+  fs.writeFileSync(mod, JSON.stringify({ maxForks: 2, expertCreationSuggestions: { tokens: 30000, minutes: 10, draftModel: "haiku" } }));
+  fs.writeFileSync(user, JSON.stringify({ expertCreationSuggestions: { tokens: 50000, minutes: -1, extra: true } }));
+  expect(await loadSettings(nodeIo(), mod, user)).toEqual({ maxForks: 2, expertCreationSuggestions: { tokens: 50000, minutes: 10, draftModel: "haiku" } });
+  fs.writeFileSync(user, JSON.stringify({ expertCreationSuggestions: "off" }));
+  expect(await loadSettings(nodeIo(), mod, user)).toEqual({ maxForks: 2, expertCreationSuggestions: { tokens: 30000, minutes: 10, draftModel: "haiku" } });
 });

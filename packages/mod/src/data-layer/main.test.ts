@@ -13,7 +13,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
-import { reportSession, sessionLog, startDetached, type ReportSessionOptions } from "./report-session.js";
+import { reportSession, sessionLog, startDetached, type ReportSessionOptions, type SessionAreas } from "./report-session.js";
 import type { DataLayerLine } from "../lines.js";
 import { WebSocketServer } from "ws";
 import { modDir, tempRoot } from "./fixture.js";
@@ -539,4 +539,32 @@ test("the runner refuses its owner's message for a session it reports and leaves
   await until(() => sent().some((m) => m.id === "m1"));
   expect(sent().find((m) => m.id === "m1")).toMatchObject({ type: "refusal", code: "detached" });
   expect(fs.existsSync(path.join(claudeDir, "isoplan", "messages"))).toBe(false);
+});
+
+test("the runner hears each pass's areas for every office that takes the repo, with what the session said in them, and asks it which messages correct the agent", async () => {
+  const o = await office();
+  o.state.repos = ["github.com/team/app"];
+  const root = tempRoot();
+  const claudeDir = path.join(root, "claude");
+  const repo = session(claudeDir, root, (repo, now) => {
+    fs.mkdirSync(path.join(repo, "docs"));
+    const at = { cwd: repo, timestamp: now };
+    return [
+      { ...at, type: "user", message: { role: "user", content: "what is in docs?" } },
+      { ...at, type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "r1", name: "Read", input: { file_path: path.join(repo, "docs", "a.md") } }] } },
+      { ...at, type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "r1", content: "x".repeat(40) }] } },
+      { ...at, type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "One page." }] } },
+      { ...at, type: "user", uuid: "u1", message: { role: "user", content: "no, the other docs" } },
+    ];
+  });
+  fs.writeFileSync(path.join(claudeDir, "isoplan", "config.json"), JSON.stringify({ server: o.url }));
+  const seen: SessionAreas[] = [];
+  const asked: string[] = [];
+  void inRunner(claudeDir, repo, { areas: (s) => void seen.push(s), corrected: (key) => (asked.push(key), true) });
+  await until(() => seen.some((s) => s.areas[0]?.corrections === 1));
+  const s = seen.at(-1)!;
+  expect(s).toMatchObject({ server: o.url, session: "claude-code:s1", bare: "s1", project: { id: "github.com/team/app" }, window: null });
+  expect(s.areas).toEqual([{ folder: "docs", reads: 1, searches: 0, tokens: 10, ms: 0, corrections: 1 }]);
+  expect(await s.said(null, "docs")).toEqual(["Asked: what is in docs?\nAnswered: One page."]);
+  expect(asked[0]).toBe("u1");
 });

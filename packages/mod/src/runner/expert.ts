@@ -71,6 +71,8 @@ export interface HostedExpert {
   state: ExpertState;
   /** It has a senior generation its junior can ask. */
   senior: boolean;
+  /** The folders and globs of its repo its file says it covers; absent when it names none. */
+  areas?: string[];
 }
 
 export interface ExpertOptions {
@@ -263,7 +265,7 @@ export function createExpert(o: ExpertOptions): Expert {
 
   const gen = (state: SavedGeneration["state"]) => saved.generations.find((g) => g.state === state) ?? null;
   const state = (): ExpertState => (gen("junior") ? "ready" : !groundingRun && lastFailed ? "failed" : "starting");
-  const hosted = (): HostedExpert => ({ name, repo: file.repo, subject: file.subject, state: state(), senior: !!gen("junior") && !!gen("senior") });
+  const hosted = (): HostedExpert => ({ name, repo: file.repo, subject: file.subject, state: state(), senior: !!gen("junior") && !!gen("senior"), ...(file.areas.length && { areas: [...file.areas] }) });
 
   // Wakes every question waiting for a junior, and tells the runner when the listing changed.
   function changed() {
