@@ -14695,17 +14695,14 @@ var PushFailed = class extends Error {};
 function createForkSlots() {
 	let forking = 0;
 	const waiting = [];
-	return {
-		async take(max) {
-			while (forking >= max) await new Promise((resolve) => waiting.push(resolve));
-			forking++;
-			return () => {
-				forking--;
-				waiting.shift()?.();
-			};
-		},
-		running: () => forking
-	};
+	return { async take(max) {
+		while (forking >= max) await new Promise((resolve) => waiting.push(resolve));
+		forking++;
+		return () => {
+			forking--;
+			waiting.shift()?.();
+		};
+	} };
 }
 const REMEMBER$1 = 200;
 const COMPACTED_NOTE = "Note from Isoplan: this session was compacted, so its earlier work survives only as a summary and the details may be thin.";

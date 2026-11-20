@@ -111,8 +111,6 @@ export interface RunnerOptions {
 /** The machine's fork slots: `take(max)` waits for one of `max`, and the function it returns gives it back. */
 export interface ForkSlots {
   take(max: number): Promise<() => void>;
-  /** Forks running now. */
-  running(): number;
 }
 
 export function createForkSlots(): ForkSlots {
@@ -127,7 +125,6 @@ export function createForkSlots(): ForkSlots {
         waiting.shift()?.();
       };
     },
-    running: () => forking,
   };
 }
 
