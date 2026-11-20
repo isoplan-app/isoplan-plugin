@@ -400,8 +400,9 @@ export function createExpert(o: ExpertOptions): Expert {
     transcripts.delete(g.trunk);
     if (!transcript) return;
     try {
-      await fs.rm(transcript, { force: true });
-      await fs.rm(path.join(path.dirname(transcript), g.trunk), { recursive: true, force: true });
+      // Tried again a few times: Windows holds a file or folder a moment while a scanner or a process in it lets go.
+      await fs.rm(transcript, { force: true, maxRetries: 5, retryDelay: 200 });
+      await fs.rm(path.join(path.dirname(transcript), g.trunk), { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
       log(`deleted generation ${n}'s trunk transcript, as it is ${g.state}`);
     } catch (err) {
       log(`couldn't delete generation ${n}'s trunk transcript: ${(err as Error).message}`);

@@ -1,4 +1,5 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -22,7 +23,8 @@ afterEach(async () => {
 
 function folder(): string {
   const dir = mkdtempSync(path.join(tmpdir(), "isoplan-approved-"));
-  cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+  // rmSync doesn't retry an EPERM from a scanner holding the folder, on Windows; this does.
+  cleanups.push(() => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
   return path.join(dir, "approved.json");
 }
 

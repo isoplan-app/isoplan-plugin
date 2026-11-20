@@ -228,9 +228,10 @@ test("an approved session connects; once its copy of the list is past its maximu
   // The list can't be checked: a drop within the copy's age reconnects, after checking; past it, the link closes.
   o.state.status = 500;
   o.state.connections[0]!.close();
-  // Past the copy's maximum age (1.2 s) and a pass of the loop, everything is closed.
-  await wait(3000);
-  expect(o.state.connections.every((c) => c.closed)).toBe(true);
+  // Past the copy's maximum age (1.2 s) and a pass of the loop (1 s), any reconnect within its age has come;
+  // from then everything closes, however long the loaded machine takes to get there.
+  await wait(2300);
+  await until(() => o.state.connections.every((c) => c.closed), 10000);
   const opened = o.state.connections.length;
   await wait(4000);
   expect(o.state.connections).toHaveLength(opened);

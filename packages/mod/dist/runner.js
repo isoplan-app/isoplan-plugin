@@ -7668,8 +7668,6 @@ const PAIRING_REFRESH_MS = 2e4;
 /** pairing.write.lock: free once this old, and waited for at most WRITE_WAIT_MS. */
 const WRITE_FRESH_MS = 1e4;
 const WRITE_WAIT_MS = 1e4;
-/** How often the callback tries to write the credential it got before saying it couldn't. */
-const WRITE_TRIES = 4;
 const pairingPath = (claudeDir) => path.join(claudeDir, "isoplan", "pairing.json");
 /** The office's pairing lock; for the server a version before #105 reports to, the one it uses, so the two never answer one pairing at once. */
 const pairingLockPath = (claudeDir, office) => office.legacy ? path.join(claudeDir, "isoplan", "pairing.lock") : path.join(officeDir(claudeDir, office.server), "pairing.lock");
@@ -7905,7 +7903,7 @@ function createPairing({ file, lock, writeLock, server, account, machine, emit, 
 		await releaseLock(lock, pid).catch(() => {});
 	}
 	async function keep(credential) {
-		for (let i = 0; i < WRITE_TRIES; i++) try {
+		for (let i = 0; i < 4; i++) try {
 			await update((e) => ({
 				entry: (({ waiting: _, email: __, ...rest }) => ({
 					...rest,
@@ -17335,7 +17333,8 @@ function createExpertCreationSuggestions(o) {
 			key: m.key,
 			since: expertCreation.since,
 			server,
-			wrote: false
+			wrote: false,
+			subject: m.subject
 		};
 		saved.expertCreations.push(kept);
 		save();
@@ -17454,8 +17453,14 @@ function createExpertCreationSuggestions(o) {
 			}
 			for (const r of saved.expertCreationSuggestions) for (const [server, state] of Object.entries(r.offices)) if (state === "sent") r.offices[server] = "pending";
 			await settings().then((t) => forget(t, now()), (err) => say(`couldn't read runner.json's expertCreationSuggestions as the expert creation suggestions started (${err.message}); it is read again on the next session's pass`));
-			started = true;
 			saved.expertCreations = saved.expertCreations.filter((k) => indexOf(k.server) >= 0);
+			for (const k of saved.expertCreations) {
+				if (k.wrote !== false || k.state || k.subject === void 0) continue;
+				const text = await fs.readFile(expertFile(k.key), "utf8").catch(() => null);
+				const parsed = text === null ? null : parseExpertFile(text, `${k.key}.json`);
+				if (parsed?.ok && parsed.expert.name === k.key && parsed.expert.subject === k.subject) k.wrote = true;
+			}
+			started = true;
 			for (const k of saved.expertCreations) {
 				const index = indexOf(k.server);
 				if (expertCreations.has(k.request)) continue;
@@ -22187,10 +22192,16 @@ function createExpert(o) {
 		transcripts.delete(g.trunk);
 		if (!transcript) return;
 		try {
-			await fs.rm(transcript, { force: true });
+			await fs.rm(transcript, {
+				force: true,
+				maxRetries: 5,
+				retryDelay: 200
+			});
 			await fs.rm(path.join(path.dirname(transcript), g.trunk), {
 				recursive: true,
-				force: true
+				force: true,
+				maxRetries: 5,
+				retryDelay: 200
 			});
 			log(`deleted generation ${n}'s trunk transcript, as it is ${g.state}`);
 		} catch (err) {

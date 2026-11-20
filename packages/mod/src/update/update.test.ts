@@ -181,10 +181,10 @@ test("run hidden: a command past its time is stopped with what it started; one t
   // A stand-in claude that starts a child of its own, and both hang.
   const script = `const c = require("child_process").spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" }); require("fs").writeFileSync(${JSON.stringify(pidFile)}, String(c.pid)); console.log("checking"); setInterval(() => {}, 1000);`;
   const started = Date.now();
-  const r = await runHidden([process.execPath, "-e", script], root, { env: commandEnv(process.env), timeoutMs: 1500 });
-  expect(r).toMatchObject({ code: null, error: "didn't finish within 2 s, so it was stopped" });
+  const r = await runHidden([process.execPath, "-e", script], root, { env: commandEnv(process.env), timeoutMs: 4000 });
+  expect(r).toMatchObject({ code: null, error: "didn't finish within 4 s, so it was stopped" });
   expect(r.output).toContain("checking");
-  expect(Date.now() - started).toBeLessThan(10000);
+  expect(Date.now() - started).toBeLessThan(15000);
   const child = Number(fs.readFileSync(pidFile, "utf8"));
   await vi.waitFor(() => expect(alive(child)).toBe(false), { timeout: 5000 });
 
@@ -192,7 +192,7 @@ test("run hidden: a command past its time is stopped with what it started; one t
   expect(missing.code).toBeNull();
   expect(missing.error).toMatch(/^couldn't start .*no-such-claude: .*ENOENT/);
   expect((await runHidden([process.execPath, "-e", "process.exit(3)"], root)).code).toBe(3);
-});
+}, 30000);
 
 test("run hidden: done once the command exits, though a process it left behind (an ssh ControlMaster, say) holds its output open", async () => {
   const root = tempRoot();

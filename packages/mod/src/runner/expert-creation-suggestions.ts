@@ -361,7 +361,7 @@ interface Saved {
   foldersAlreadySuggested: { session: string; project: string; folder: string; at: number; expertCreationSuggestionId?: string }[];
   expertCreationSuggestions: ExpertCreationSuggestionRecord[];
   /** The experts being made here, by the office the request came from, and for `rememberDays` once made or failed, with their last state, which goes again on each new connection. */
-  expertCreations: { request: string; expertCreationSuggestionId: string; key: string; since: number; server: string; state?: "ready" | "failed"; detail?: string; wrote?: boolean }[];
+  expertCreations: { request: string; expertCreationSuggestionId: string; key: string; since: number; server: string; state?: "ready" | "failed"; detail?: string; wrote?: boolean; subject?: string }[];
   /** Folders whose draft couldn't be made, by session, until they may be tried again. */
   held: { session: string; project: string; folder: string; until: number }[];
   /** The correction check's verdicts, by message, oldest first: a runner started again never checks a message twice. */
@@ -838,7 +838,8 @@ export function createExpertCreationSuggestions(o: ExpertCreationSuggestionsOpti
     const expertCreation: ExpertCreation = { index, request: m.request, expertCreationSuggestionId: m.expertCreationSuggestionId, key: m.key, since: now(), state: "cloning", sent: null, wrote: false, working: true, timer: null };
     expertCreations.set(m.request, expertCreation);
     // Kept from now until its last state went, whether or not it gets as far as writing its file.
-    const kept: Saved["expertCreations"][number] = { request: m.request, expertCreationSuggestionId: m.expertCreationSuggestionId, key: m.key, since: expertCreation.since, server, wrote: false };
+    // Its subject tells, from a runner started again, whether the expert file found for its key is the one it wrote.
+    const kept: Saved["expertCreations"][number] = { request: m.request, expertCreationSuggestionId: m.expertCreationSuggestionId, key: m.key, since: expertCreation.since, server, wrote: false, subject: m.subject };
     saved.expertCreations.push(kept);
     void save();
     const fail = (detail: string) => setExpertCreationProgress(expertCreation, "failed", detail);
@@ -965,10 +966,18 @@ export function createExpertCreationSuggestions(o: ExpertCreationSuggestionsOpti
         (t) => forget(t, now()),
         (err: Error) => say(`couldn't read runner.json's expertCreationSuggestions as the expert creation suggestions started (${err.message}); it is read again on the next session's pass`),
       );
+      saved.expertCreations = saved.expertCreations.filter((k) => indexOf(k.server) >= 0);
+      // The runner may have stopped after writing a creation's expert file but before saving that it had: the
+      // file for its key, with its subject, is the one it wrote. Looked at before anything new can be asked.
+      for (const k of saved.expertCreations) {
+        if (k.wrote !== false || k.state || k.subject === undefined) continue;
+        const text = await fs.readFile(expertFile(k.key), "utf8").catch(() => null);
+        const parsed = text === null ? null : parseExpertFile(text, `${k.key}.json`);
+        if (parsed?.ok && parsed.expert.name === k.key && parsed.expert.subject === k.subject) k.wrote = true;
+      }
       started = true;
       // The expertCreations under way when it stopped are followed again, on their requests, and one whose
       // last state hadn't gone is sent as it was; one for an office no longer listed goes.
-      saved.expertCreations = saved.expertCreations.filter((k) => indexOf(k.server) >= 0);
       for (const k of saved.expertCreations) {
         const index = indexOf(k.server);
         if (expertCreations.has(k.request)) continue;

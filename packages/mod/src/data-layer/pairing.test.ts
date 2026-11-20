@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
 import type { DataLayerLine } from "../lines.js";
-import { createPairing, httpUrl, readPairing, writePairing, type Pairing, type Post } from "./pairing.js";
+import { createPairing, httpUrl, readPairing, WRITE_TRIES, writePairing, type Pairing, type Post } from "./pairing.js";
 
 const SERVER = "wss://office.team.example/data-layer";
 const ADA = { id: "claude:4f9c", name: "Ada" };
@@ -325,7 +325,15 @@ test("a credential that can't be saved: the browser is still told, nothing crash
   const page = await server.approve();
   expect(page.status).toBe(400);
   expect(page.text).toContain("couldn't be saved");
-  expect(lines.filter((l) => l.type === "log" && l.text.startsWith("couldn't write this machine's credential"))).toHaveLength(4);
+  // Each try, and no more, is said.
+  expect(lines.filter((l) => l.type === "log" && l.text.startsWith("couldn't write this machine's credential"))).toHaveLength(WRITE_TRIES);
+  // Writable again: the machine asks to pair again, once the failed callback has stopped answering.
+  rmSync(blocked, { recursive: true, force: true });
+  for (let i = 0; i < 100 && server.state.asks.length < 2; i++) {
+    expect(await pairing.token()).toBeNull();
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  expect(server.state.asks).toHaveLength(2);
 });
 
 test("a pairing lock not kept fresh counts as free, though its pid looks alive", async () => {

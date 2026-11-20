@@ -50,7 +50,7 @@ test("one runner: of two starters taking a stale lock at once, exactly one wins"
     expect(won.filter(Boolean)).toHaveLength(1);
     expect(await lockHolder(m.lock)).toBe([OTHER + 1, OTHER + 2, OTHER + 3][won.indexOf(true)]);
   }
-  expect(fs.readdirSync(path.dirname(m.lock))).toEqual(["app", "lock.json"]);
+  expect(fs.readdirSync(path.dirname(m.lock)).sort()).toEqual(["app", "lock.json"]);
 });
 
 test("one runner: a lock not kept fresh is stale though its pid is live, so a reused pid is neither the runner nor killed", async () => {

@@ -185,8 +185,8 @@ const ackScript = (claudeDir: string, repo: string, url: string, question: strin
 test("ask_expert through the runner: the session's fact asks for rights, which reach its hooks module; a blocking question answered in time prints the answer and its citations; one answered after the wait tells the agent to explore, its answer comes down the session's link, and its ack reaches the office", async () => {
   const o = await office();
   const { claudeDir, repo } = machine(o.url);
-  // A short wait, so the second question runs past it quickly.
-  fs.writeFileSync(path.join(claudeDir, "isoplan", "runner.json"), JSON.stringify({ expertWaitSeconds: 2 }));
+  // A long wait for the first question, so it is answered in time however slow the runner's way to the office is.
+  fs.writeFileSync(path.join(claudeDir, "isoplan", "runner.json"), JSON.stringify({ expertWaitSeconds: 30 }));
   await runner(claudeDir);
   const h = hooksModule(claudeDir, repo);
   await until(() => o.links().length === 1);
@@ -211,6 +211,8 @@ test("ask_expert through the runner: the session's fact asks for rights, which r
 
   // Past the wait: explore meanwhile; the answer then comes down the session's own link, and its ack goes back.
   o.expert.now = false;
+  // A short wait, so the second question runs past it quickly; settings are read on every ask.
+  fs.writeFileSync(path.join(claudeDir, "isoplan", "runner.json"), JSON.stringify({ expertWaitSeconds: 2 }));
   const late = await askExpertScript(claudeDir, repo, o.url, "toolu_x2", "Where do usage events go?");
   expect(late.code).toBe(0);
   expect(late.said).toContain("the expert is still answering. Explore this yourself meanwhile");

@@ -51,11 +51,16 @@ test("pointer files: a detached HEAD has no branch; no repository resolves to nu
   const main = gitRepo(path.join(root, "main"));
   fs.writeFileSync(path.join(main, ".git", "HEAD"), "0123456789abcdef0123456789abcdef01234567\n");
   expect((await filesOnly().resolve(main))!.branch).toBe(null);
-  // The temp folder itself sits in no repository (unless the machine's temp dir is inside one).
+  // A folder with no .git in it or above it, whatever the machine's own folders hold.
   const bare = path.join(root, "plain");
-  fs.mkdirSync(bare);
-  const r = await filesOnly().resolve(bare);
-  if (r) expect(pathKey(r.toplevel)).not.toBe(pathKey(bare));
+  const noRepo = createGit({
+    run: null,
+    stat: (p) => (normalize(p) === normalize(bare) ? { isDir: true, mtimeMs: 0, size: 0 } : null),
+    read: () => {
+      throw new Error("unread");
+    },
+  });
+  expect(await noRepo.resolve(bare)).toBe(null);
 });
 
 test("pointer files: a removed worktree inside a checkout does not resolve to that checkout", async () => {

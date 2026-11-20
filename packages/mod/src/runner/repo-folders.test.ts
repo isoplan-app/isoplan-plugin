@@ -91,11 +91,20 @@ test.each([
 
 test("every repo's remote is asked at once: two slow ones hold the list up by one wait, not two, and the order is kept", async () => {
   const o = options({ homes: { "/code/app": APP, "/code/api": API } });
-  const delay = 300;
-  o.branches = (checkout) => new Promise((done) => setTimeout(() => done([pathKey(checkout).endsWith("app") ? "main" : "dev"]), delay));
-  const started = Date.now();
+  let inFlight = 0;
+  let most = 0;
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+  o.branches = async (checkout) => {
+    const app = pathKey(checkout).endsWith("app");
+    most = Math.max(most, ++inFlight);
+    // app, the most recent, answers after api, so the order below is the recency's, not the answers'.
+    await tick();
+    if (app) await tick();
+    inFlight--;
+    return [app ? "main" : "dev"];
+  };
   const repos = await repoFolders([{ folder: "/code/app", at: 2 }, { folder: "/code/api", at: 1 }], o);
-  expect(Date.now() - started).toBeLessThan(delay * 1.8);
+  expect(most).toBe(2);
   expect(repos).toEqual([
     { project: APP, folders: ["/code/app"], branches: ["main"] },
     { project: API, folders: ["/code/api"], branches: ["dev"] },

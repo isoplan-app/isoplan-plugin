@@ -134,6 +134,7 @@ test("link: an unreachable server is retried with growing, capped delays", async
 test("link: changes go no faster than once a second, carrying the latest facts", async () => {
   const s = await server();
   const { link: l } = link(s.url);
+  const t0 = Date.now();
   l.update(facts("active"));
   await until(() => s.got.length === 2);
   l.update(facts("idle"));
@@ -143,9 +144,9 @@ test("link: changes go no faster than once a second, carrying the latest facts",
   l.update(facts("idle", ["a.md", "b.md"]));
   await until(() => s.got.length === 4);
   expect(types(s.got)).toEqual(["hello", "full 0", "changes 1", "changes 2"]);
-  // Arrival times, less a little for the timers' and the socket's own rounding.
-  expect(s.got[2]!.at - s.got[1]!.at).toBeGreaterThanOrEqual(950);
-  expect(s.got[3]!.at - s.got[2]!.at).toBeGreaterThanOrEqual(950);
+  // The full went at t0 or later, so the first change no sooner than a second after t0, and the second a second after that.
+  expect(s.got[2]!.at - t0).toBeGreaterThanOrEqual(1000);
+  expect(s.got[3]!.at - t0).toBeGreaterThanOrEqual(2000);
   expect(s.got[2]).toMatchObject({ upsert: { session: facts("idle").session, edits: facts("idle", ["a.md"]).edits } });
 });
 
@@ -385,9 +386,10 @@ test("link: a token that runs out on a link that stayed up is renewed and the li
   });
   const tokens = ["first" + "-token", "second" + "-token"];
   const pairing = { token: async () => tokens.shift() ?? "second" + "-token", refused: async () => {}, close: async () => {} };
-  const { link: l, lines } = link(s.url, { pairing, retryBaseMs: 1000, retryCapMs: 1000 });
+  // A backoff this long can't finish inside the wait, so only the renewal's own reconnect gets there.
+  const { link: l, lines } = link(s.url, { pairing, retryBaseMs: 10000, retryCapMs: 10000 });
   l.update(facts("active"));
-  await until(() => s.got.filter((m) => m.type === "runner" || m.type === "hello").length === 2, 500);
+  await until(() => s.got.filter((m) => m.type === "runner" || m.type === "hello").length === 2);
   expect(s.got.filter((m) => m.type === "hello").map((m) => m.token)).toEqual(["first-token", "second-token"]);
   expect(lines.some((x) => x.type === "status" && x.state === "disconnected")).toBe(false);
 });

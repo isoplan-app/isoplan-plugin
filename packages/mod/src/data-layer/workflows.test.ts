@@ -155,15 +155,13 @@ test("each run id is its own workflow, and an ended one doesn't change again", a
   run(home, "s", "wf_bbbbbbbb-222", [{ ...FINISHED[1]!, id: "b876cf2ff1096c437", result: undefined }], { age: 20 });
   const read = sourceIn(home);
   const first = (await read("s")).facts!;
-  expect(first.workflows!.map((w) => [w.id, w.status])).toEqual([
-    ["wf_aaaaaaaa-111", "done"],
-    ["wf_bbbbbbbb-222", "running"],
-  ]);
+  // By id: the runs come in whatever order the folder lists them.
+  expect(Object.fromEntries(first.workflows!.map((w) => [w.id, w.status]))).toEqual({ "wf_aaaaaaaa-111": "done", "wf_bbbbbbbb-222": "running" });
   // A rewritten end record changes nothing of a run already seen ended.
   const rpath = path.join(sessionDir, "workflows", "wf_aaaaaaaa-111.json");
   fs.writeFileSync(rpath, JSON.stringify({ status: "failed", totalTokens: 99, workflowName: "renamed" }));
   touch(rpath, 5);
-  expect((await read("s")).facts!.workflows![0]).toEqual(first.workflows![0]);
+  expect(byId((await read("s")).facts!.workflows!)["wf_aaaaaaaa-111"]).toEqual(byId(first.workflows!)["wf_aaaaaaaa-111"]);
 });
 
 test("a workflow agent's transcript read by the lead is a check-in on it", async () => {
