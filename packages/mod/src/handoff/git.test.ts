@@ -161,7 +161,11 @@ test("git's environment: no prompts, the person's own ssh kept, and nothing poin
   // A repo whose config sets core.sshCommand keeps it.
   const { clone } = remoteAndClone(tempRoot());
   git(clone, "config", "core.sshCommand", "my-ssh -i key");
-  const shown = (cwd: string) => run(["-c", "alias.ssh-env=!echo \"[$GIT_SSH_COMMAND]\"", "ssh-env"], { cwd, timeoutMs: MS }).then((r) => r.stdout.trim());
+  // Run apart from this machine's own ssh variables and global or system git config, so only the repo's config counts.
+  const noConfig = path.join(tempRoot(), "gitconfig");
+  fs.writeFileSync(noConfig, "");
+  const isolated = createRunGit({ ...process.env, GIT_SSH_COMMAND: undefined, GIT_SSH: undefined, GIT_CONFIG_GLOBAL: noConfig, GIT_CONFIG_NOSYSTEM: "1" });
+  const shown = (cwd: string) => isolated(["-c", "alias.ssh-env=!echo \"[$GIT_SSH_COMMAND]\"", "ssh-env"], { cwd, timeoutMs: MS }).then((r) => r.stdout.trim());
   expect(await shown(clone)).toBe("[]");
   expect(await shown(path.dirname(clone))).toBe("[ssh -o BatchMode=yes]");
 });

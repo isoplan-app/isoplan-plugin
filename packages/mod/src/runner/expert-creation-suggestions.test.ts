@@ -33,6 +33,15 @@ const savedFile = (isoplanDir: string) => {
   }
 };
 
+// A session's file of its open suggestions, as it is on disk; null while it is missing or being replaced.
+const sessionFile = (isoplanDir: string, bare: string) => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(isoplanDir, "expert-creation-suggestions", `${bare}.json`), "utf8")) as { expertCreationSuggestions: { server: string; officeWideReason?: unknown }[] };
+  } catch {
+    return null;
+  }
+};
+
 async function until(check: () => boolean, ms = 5000) {
   const end = Date.now() + ms;
   while (!check()) {
@@ -215,7 +224,8 @@ test("a folder whose draft couldn't be made waits RETRY_MS for that session, wit
   h.state.draft = null;
   h.expertCreationSuggestions.seen(h.seen([area("src/parser", 35000)]));
   await until(() => h.logs.some((l) => l.includes("no usable draft came")));
-  await sleep(20);
+  // The hold is on disk before the runner stops.
+  await until(() => (savedFile(h.isoplanDir) as { held?: unknown[] } | null)?.held?.length === 1);
   h.expertCreationSuggestions.close();
   const again = await harness({ now: () => clock }, h.root);
   again.expertCreationSuggestions.take(0, dismissals());
@@ -289,8 +299,7 @@ test("a suggestion an office refused ends there alone: the session hears it ende
   h.expertCreationSuggestions.take(0, { type: "expert-creation-suggestion-ended", v: PROTOCOL_VERSION, id, why: "refused" });
   expect(h.lines.at(-1)!.line).toEqual({ type: "expert-creation-suggestion-ended", server: A, id, why: "refused" });
   expect(h.sent.slice(sent)).toEqual([]);
-  const file = path.join(h.isoplanDir, "expert-creation-suggestions", "s1.json");
-  await until(() => JSON.stringify(JSON.parse(fs.readFileSync(file, "utf8")).expertCreationSuggestions.map((x: { server: string }) => x.server)) === JSON.stringify([B]));
+  await until(() => JSON.stringify(sessionFile(h.isoplanDir, "s1")?.expertCreationSuggestions.map((x) => x.server)) === JSON.stringify([B]));
 });
 
 test("an expert-creation-suggestions.json that can't be read is said, and moved aside rather than overwritten; runner.json that can't be read as the expert creation suggestions start, or for a correction check, is said and tried again on the next pass", async () => {
@@ -385,7 +394,8 @@ test("the folder of a suggestion every office it went to refused may be suggeste
   await sleep(30);
   expect(h.drafts).toHaveLength(1);
   h.expertCreationSuggestions.take(1, { type: "expert-creation-suggestion-ended", v: PROTOCOL_VERSION, id, why: "refused" });
-  await sleep(20);
+  // The last refusal's time is on disk before the runner stops.
+  await until(() => typeof (savedFile(h.isoplanDir) as { expertCreationSuggestions?: { refusedAt?: number }[] } | null)?.expertCreationSuggestions?.[0]?.refusedAt === "number");
   h.expertCreationSuggestions.close();
   const again = await harness({ now: () => clock }, h.root);
   again.expertCreationSuggestions.take(0, dismissals());
@@ -428,7 +438,8 @@ test("draft-office-wide-expert-creation-suggestion: its session's line, and its 
   await until(() => h.lines.length === 1);
   const reason = { searchedBySessions: 3, searchWindowDays: 14 };
   expect(h.lines[0]!.line).toMatchObject({ type: "expert-creation-suggestion", id: "office-4", officeWideReason: reason });
-  expect(JSON.parse(fs.readFileSync(path.join(h.isoplanDir, "expert-creation-suggestions", "s1.json"), "utf8")).expertCreationSuggestions[0].officeWideReason).toEqual(reason);
+  await until(() => sessionFile(h.isoplanDir, "s1") !== null);
+  expect(sessionFile(h.isoplanDir, "s1")!.expertCreationSuggestions[0]!.officeWideReason).toEqual(reason);
   await sleep(30);
   const again = await harness({}, h.root);
   again.expertCreationSuggestions.rehooked("s1");
@@ -635,7 +646,8 @@ test("create-expert-from-suggestion: a runner started again goes on following th
   const h = await harness();
   h.expertCreationSuggestions.take(0, dismissals());
   h.expertCreationSuggestions.take(0, createExpertFromSuggestion("m1"));
-  await until(() => expertCreationProgress(h, "m1").length === 1 && savedFile(h.isoplanDir)?.expertCreations.length === 1);
+  // Stopped once it has saved that it wrote its expert file.
+  await until(() => expertCreationProgress(h, "m1").length === 1 && (savedFile(h.isoplanDir)?.expertCreations[0] as { wrote?: boolean } | undefined)?.wrote === true);
   h.expertCreationSuggestions.close();
   const again = await harness({}, h.root);
   again.expertCreationSuggestions.take(0, dismissals());

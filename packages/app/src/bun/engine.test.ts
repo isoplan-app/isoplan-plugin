@@ -38,6 +38,10 @@ function machine() {
 }
 
 const settle = () => new Promise((r) => setTimeout(r, 30));
+// Waits until the engine has spawned n workers, about 1.5 s at most.
+const workersSpawned = async (m: { workers: unknown[] }, n: number) => {
+  for (let i = 0; i < 50 && m.workers.length < n; i++) await settle();
+};
 
 test("engine: the app takes the runner's lock from a node runner, stopping it first, and runs the worker on the plugin's runner copy", async () => {
   const m = machine();
@@ -46,7 +50,7 @@ test("engine: the app takes the runner's lock from a node runner, stopping it fi
   // startRunner's record that it opened the app goes once the app is the runner.
   fs.writeFileSync(appOpenPath(m.claudeDir), JSON.stringify({ version: "0.1.0", openedAt: Date.now() }));
   const engine = m.start();
-  await settle();
+  await workersSpawned(m, 1);
   expect(fs.existsSync(appOpenPath(m.claudeDir))).toBe(false);
   expect(m.killed).toEqual([NODE]);
   expect(engine.state()).toBe("running");
@@ -75,7 +79,7 @@ test("engine: a second app finds the first running and ends without a worker", a
 test("engine: quit stops the worker and lets the lock go", async () => {
   const m = machine();
   const engine = m.start();
-  await settle();
+  await workersSpawned(m, 1);
   expect((await readLock(m.lock))?.pid).toBe(ME);
   expect(await engine.quit()).toBe("quit");
   expect(m.workers).toHaveLength(1);
@@ -89,9 +93,9 @@ test("engine: quit stops the worker and lets the lock go", async () => {
 test("engine: a crashed worker starts again; one that ends cleanly ends the app and its lock", async () => {
   const m = machine();
   const engine = m.start();
-  await settle();
+  await workersSpawned(m, 1);
   m.workers[0]!.exit(1);
-  await settle();
+  await workersSpawned(m, 2);
   expect(m.workers).toHaveLength(2);
   m.workers[1]!.exit(0);
   expect(await engine.ended).toBe("done");

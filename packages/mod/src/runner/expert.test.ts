@@ -394,10 +394,11 @@ test("promotion deletes the retired generation's transcript, the folder beside i
     file: expertFile({ promoteAtTokens: 150000 }),
     restored: { generations: [gen(1, T1, "senior"), gen(2, T2, "junior", { meter: 160000, notes: 1 })], indexes: { 1: { "src/relay.ts": C0 }, 2: { "src/relay.ts": C1 } } },
   });
-  fs.mkdirSync(path.join(path.dirname(t.transcript(T1)), T1, "subagents"), { recursive: true });
+  const beside = path.join(path.dirname(t.transcript(T1)), T1);
+  fs.mkdirSync(path.join(beside, "subagents"), { recursive: true });
   await until(() => /ready generation=3/.test(t.health()));
-  await until(() => !fs.existsSync(t.transcript(T1)));
-  expect(fs.existsSync(path.join(path.dirname(t.transcript(T1)), T1))).toBe(false);
+  // The folder goes after the transcript, so both are waited for.
+  await until(() => !fs.existsSync(t.transcript(T1)) && !fs.existsSync(beside));
   await until(() => !fs.existsSync(path.join(t.dir, "index-1.json")));
   expect(fs.existsSync(t.transcript(T2))).toBe(true);
   expect(fs.existsSync(path.join(t.dir, "index-2.json"))).toBe(true);
@@ -472,7 +473,8 @@ test("a promotion whose proof failed is tried again on its own, and the one befo
 
 test("a judge that crashed fails the generation for that, not as a failed proof", async () => {
   const t = await setUp({ rules: [{ kind: "judge", exit: true }, ...BASE] });
-  await until(() => t.expert.hosted().state === "failed");
+  // The health log is written a moment after the state turns.
+  await until(() => t.expert.hosted().state === "failed" && /generation generation=1 state=failed/.test(t.health()));
   expect(t.health()).toMatch(/generation generation=1 state=failed why="its proof's judge failed: claude exited/);
   expect(t.health()).not.toMatch(/proof generation=1/);
   t.ask("x-1");
@@ -766,7 +768,7 @@ test("a trunk changed by hand while its question waits for a fork slot isn't for
 
 test("the judge's verdict passes only with PASS as its first word and no FAIL in its first line", async () => {
   const t = await setUp({ rules: [{ kind: "judge", reply: "Pass? No: FAIL, it says forty-three." }, ...BASE] });
-  await until(() => t.expert.hosted().state === "failed");
+  await until(() => t.expert.hosted().state === "failed" && /proof generation=1/.test(t.health()));
   expect(t.health()).toMatch(/proof generation=1 result=fail/);
 });
 

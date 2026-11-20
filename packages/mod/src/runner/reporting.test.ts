@@ -132,12 +132,15 @@ test("a session whose hooks module is connected is reported for it at once, howe
   w.rehook("s1");
   w.rehook("s2");
   await until(() => started.filter((s) => s.hooks).length === 2);
-  expect(started.map((s) => [s.id, s.hooks?.name ?? null])).toEqual([
-    ["s2", null],
+  // s1 and s2 start again in whatever order the folder lists them: the code promises none between sessions.
+  expect(started).toHaveLength(3);
+  expect(started[0]).toMatchObject({ id: "s2", hooks: undefined });
+  expect(started.slice(1).map((s) => [s.id, s.hooks?.name]).sort()).toEqual([
     ["s1", "first"],
     ["s2", "s2's"],
   ]);
-  expect(started[1]!.cwd).toBe(first.cwd);
+  const s1First = started.find((s) => s.hooks?.name === "first")!;
+  expect(s1First.cwd).toBe(first.cwd);
   // Each report that stopped says why, for its log.
   expect(started[0]!.stoppedFor).toBe("its hooks module connected to the runner, which reports it for that hooks module now");
 
@@ -145,7 +148,7 @@ test("a session whose hooks module is connected is reported for it at once, howe
   hooked.set("s1", { cwd: m.repo, name: "later" });
   w.rehook("s1");
   await until(() => started.some((s) => s.hooks?.name === "later"));
-  expect(started[1]!.stoppedFor).toBe("another hooks module has the session now (another window, or a reload)");
+  expect(s1First.stoppedFor).toBe("another hooks module has the session now (another window, or a reload)");
 
   // Its hooks module goes: the report stops, and s1 is reported again only once its transcript moves.
   hooked.delete("s1");

@@ -121,7 +121,8 @@ test("identity: on this machine, a running process's start time and command line
   } finally {
     child.kill();
   }
-});
+  // Above processInfo's own 15 s limit for a cold PowerShell, so a slow machine fails on the assertion, not the clock.
+}, 30000);
 
 test("drivenName: the name the runner wrote from a driven session's first instruction, for its data layer; a take's name, or none, gives null", async () => {
   const file = registryPath(path.join(tempRoot(), ".claude"));
