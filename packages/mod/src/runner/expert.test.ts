@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { PROTOCOL_VERSION, RefusalMessageSchema, type RefusalMessage, type ReplyMessage } from "@isoplan/protocol";
@@ -409,6 +410,26 @@ test("promotion deletes the retired generation's transcript, the folder beside i
     [3, "junior"],
   ]);
 });
+
+test("a retired generation's folder held a moment by another process, as Windows does, is still deleted", async () => {
+  const t = await setUp({
+    file: expertFile({ promoteAtTokens: 150000 }),
+    restored: { generations: [gen(1, T1, "senior"), gen(2, T2, "junior", { meter: 160000, notes: 1 })], indexes: { 1: { "src/relay.ts": C0 }, 2: { "src/relay.ts": C1 } } },
+  });
+  const beside = path.join(path.dirname(t.transcript(T1)), T1);
+  const held = path.join(beside, "subagents");
+  fs.mkdirSync(held, { recursive: true });
+  // A process working in the folder: Windows refuses to remove it (EBUSY) until that process ends.
+  const holder = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { cwd: held, stdio: "ignore", windowsHide: true });
+  const ended = new Promise((r) => holder.once("exit", r));
+  // The folder's removal starts once the transcript is gone; the holder lets go a moment later.
+  await until(() => !fs.existsSync(t.transcript(T1)));
+  await new Promise((r) => setTimeout(r, 100));
+  holder.kill();
+  await ended;
+  await until(() => !fs.existsSync(beside), 5000);
+  expect(t.logs.some((l) => l.includes("couldn't delete generation 1's trunk transcript"))).toBe(false);
+}, 20000);
 
 test("the expert says it has a senior once a promotion makes one, and not before", async () => {
   const t = await setUp({ file: expertFile({ promoteAtTokens: 150000 }), restored: { generations: [gen(1, T1, "junior", { meter: 160000, notes: 1 })] } });

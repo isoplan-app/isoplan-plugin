@@ -666,6 +666,32 @@ test("create-expert-from-suggestion: a runner started again goes on following th
   await until(() => JSON.stringify(savedFile(again.isoplanDir)?.expertCreations.map((k) => [(k as { request: string }).request, (k as { state?: string }).state])) === JSON.stringify([["m2", "ready"]]));
 });
 
+test("create-expert-from-suggestion: a runner that stopped after writing the expert file but before saving that it had follows the creation on, since the file for its key has its subject; another subject there is someone else's, and fails it as before", async () => {
+  const h = await harness();
+  h.expertCreationSuggestions.take(0, dismissals());
+  h.expertCreationSuggestions.take(0, createExpertFromSuggestion("m1"));
+  await until(() => expertCreationProgress(h, "m1").length === 1 && (savedFile(h.isoplanDir)?.expertCreations[0] as { wrote?: boolean } | undefined)?.wrote === true);
+  h.expertCreationSuggestions.close();
+  // As the runner file was when it stopped: the save that says it wrote never landed. And another creation, of lexer, whose file is someone else's.
+  const runnerFile = path.join(h.isoplanDir, "runner", "expert-creation-suggestions.json");
+  const value = JSON.parse(fs.readFileSync(runnerFile, "utf8"));
+  value.expertCreations[0].wrote = false;
+  value.expertCreations.push({ ...value.expertCreations[0], request: "m9", expertCreationSuggestionId: "o9", key: "lexer" });
+  fs.writeFileSync(runnerFile, JSON.stringify(value));
+  fs.writeFileSync(path.join(h.isoplanDir, "experts", "lexer.json"), JSON.stringify({ version: 1, name: "lexer", repo: h.checkout, subject: "How the lexer splits text.", model: "sonnet", promoteAtTokens: 1, proof: DRAFT.proof, areas: ["src"] }));
+  const again = await harness({}, h.root);
+  again.expertCreationSuggestions.take(0, dismissals());
+  await until(() => expertCreationProgress(again, "m1").length === 1 && expertCreationProgress(again, "m9").length === 1);
+  expect(expertCreationProgress(again, "m1")).toEqual(["cloning"]);
+  expect(expertCreationProgress(again, "m9")).toEqual(["the runner on that computer stopped before its expert file was written; make it again"]);
+  const stateFile = path.join(again.isoplanDir, "experts", "parser", "state.json");
+  fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+  fs.writeFileSync(stateFile, JSON.stringify({ version: 1, fingerprint: "f", repo: again.checkout, branch: "main", generations: [{ n: 1, trunk: "t1", model: "m", commit: "a".repeat(40), groundedAt: Date.now(), meter: 0, notes: 0, state: "junior" }] }));
+  await until(() => expertCreationProgress(again, "m1").length === 2);
+  expect(expertCreationProgress(again, "m1")).toEqual(["cloning", "ready"]);
+  expect(fs.existsSync(path.join(again.isoplanDir, "experts", "lexer.json"))).toBe(true);
+});
+
 test("corrected: unknown until the local model has said, one check at a time and at most checksPerHour; its word is kept", async () => {
   const asked: string[] = [];
   let answer: (v: boolean) => void = () => {};
