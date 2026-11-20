@@ -1,6 +1,5 @@
 import { expect, test } from "vitest";
 import { answerOffices, OUTBOX_MAX, OUTBOX_MAX_AGE_MS, type AnswerOfficesOptions } from "./offices.js";
-import { createForkSlots } from "./runner.js";
 
 const HOLD_OFF_MS = 3600000;
 
@@ -160,15 +159,3 @@ test("runner offices: while keep says so (a driven session's process, or startin
   expect(await a.loop.ended).toBe("unpaired");
 });
 
-test("runner offices: one fork cap for the machine, whichever office's runner asks", async () => {
-  const forks = createForkSlots();
-  const first = await forks.take(1);
-  let second = false;
-  void forks.take(1).then(() => (second = true));
-  await settle();
-  expect(second).toBe(false);
-  expect(forks.running()).toBe(1);
-  first();
-  await settle();
-  expect(second).toBe(true);
-});

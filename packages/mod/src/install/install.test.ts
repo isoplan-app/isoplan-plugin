@@ -161,9 +161,8 @@ test("uninstall: with confirm, a session's files written again during it keep th
   const s = setup();
   await s.install();
   const live = path.join(s.claudeDir, "isoplan", "live");
-  let asked = 0;
-  // A session's data layer takes its lock again while the uninstall runs, after live/ went.
-  const confirm = async () => (++asked === 8 && fs.mkdirSync(live, { recursive: true }), true);
+  // A session still running the plugin: its data layer takes its lock again whenever the uninstall has taken live/ out.
+  const confirm = async () => (fs.mkdirSync(live, { recursive: true }), true);
   const first = await uninstall(s.paths, { confirm });
   expect(first.isDone).toBe(false);
   expect(first.changes[first.changes.length - 1]).toMatch(/wrote its files again; the hook stays/);

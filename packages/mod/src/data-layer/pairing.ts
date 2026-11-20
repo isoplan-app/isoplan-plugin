@@ -66,7 +66,7 @@ const PAIRING_REFRESH_MS = 20 * 1000;
 const WRITE_FRESH_MS = 10 * 1000;
 const WRITE_WAIT_MS = 10 * 1000;
 /** How often the callback tries to write the credential it got before saying it couldn't. */
-const WRITE_TRIES = 4;
+export const WRITE_TRIES = 4;
 
 /** The machine's pairing with one office, kept under the Claude login it was made under. */
 export interface PairingEntry {
