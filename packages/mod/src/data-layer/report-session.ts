@@ -486,7 +486,7 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
     said.add(text);
   };
   // What goes to an office's link: the reports its hold keeps held, the questions checked and
-  // marked, and the workflows' names, phases and labels checked (workflows.ts).
+  // marked, and the workflows' names, phases and labels and every subagent's task checked (workflows.ts).
   const outgoing = (run: OfficeRun, facts: Facts, patterns: Pattern[] | null) =>
     prepareWorkflows(prepareQuestions(run.hold.apply(facts, patterns), patterns, marks, patternLog, answersLate), patterns, patternLog);
   // The project of each subagent working in a worktree of another repo, from the latest read.
