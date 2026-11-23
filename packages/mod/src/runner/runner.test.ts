@@ -639,6 +639,14 @@ test("runner.json: the labelled defaults load, and the owner's file overrides th
   expect((await loadSettings<{ processRefreshSeconds: number }>(nodeIo(), path.join(modDir, "runner.json"), user)).processRefreshSeconds).toBe(1);
 });
 
+test("runner.json: the tray, its pairing window and the runner's session list refresh at most once a second", async () => {
+  const user = path.join(tempRoot(), "runner.json");
+  fs.writeFileSync(user, JSON.stringify({ trayRefreshSeconds: 0.001 }));
+  expect((await loadSettings<{ trayRefreshSeconds: number }>(nodeIo(), path.join(modDir, "runner.json"), user)).trayRefreshSeconds).toBe(2);
+  fs.writeFileSync(user, JSON.stringify({ trayRefreshSeconds: 1 }));
+  expect((await loadSettings<{ trayRefreshSeconds: number }>(nodeIo(), path.join(modDir, "runner.json"), user)).trayRefreshSeconds).toBe(1);
+});
+
 test("secret patterns: the owner's file adds patterns", async () => {
   const owner = path.join(tempRoot(), "secret-patterns.json");
   fs.writeFileSync(owner, JSON.stringify({ patterns: [{ name: "internal host", regex: "corp\.internal" }] }));
