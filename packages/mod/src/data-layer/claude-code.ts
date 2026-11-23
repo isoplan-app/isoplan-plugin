@@ -512,7 +512,8 @@ export function createClaudeCode(io: SourceIo) {
         usage: usageOf(a.t, a.mtimeMs),
         ...(worktree ? { checkout: worktree, branch: agentBranch } : {}),
         ...(wf ? { workflow: wf.workflow } : {}),
-        extra: { description: a.meta.description ?? null, ...(s.endState ? { endState: s.endState } : {}) },
+        // Only a text: prepareWorkflows secret-checks it before it leaves, and can't check anything else.
+        extra: { description: typeof a.meta.description === "string" ? a.meta.description : null, ...(s.endState ? { endState: s.endState } : {}) },
       });
       // Nobody waits on a workflow's agents: the Workflow tool returns as it launches them.
       if (live && !wf) {

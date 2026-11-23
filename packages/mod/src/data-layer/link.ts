@@ -39,8 +39,9 @@
 // `draft-office-wide-expert-creation-suggestion`, `create-expert-from-suggestion` and `expert-creation-suggestion-ended` (`onExpertCreationSuggestionMessages`), and sends its `expert-creation-suggestion`,
 // `expert-creation-suggestion-ended` and `expert-creation-progress` live as well (runner/expert-creation-suggestions.ts).
 //
-// Given `onError`, a throw in the link's socket handlers or its pacing timer (in `filter`, say) goes
-// to it, and that handler sends nothing more; without it, the throw reaches the process as before.
+// Given `onError`, a throw in any handler the link runs by itself (its socket handlers, its pacing
+// and retry timers, its callbacks on `admit` and `pairing`; in `filter` or `emit`, say) goes to it,
+// and that handler does nothing more; without it, the throw reaches the process as before.
 
 import {
   parseOfficeServerMessage,
@@ -124,7 +125,7 @@ export interface LinkOptions {
   /** How often a link waiting for its code to be approved asks again. */
   pairPollMs?: number;
   random?: () => number;
-  /** Told of a throw in the link's socket handlers or pacing timer, in place of the process. */
+  /** Told of a throw in any handler the link runs by itself (socket handlers, timers, promise callbacks), in place of the process. */
   onError?: (err: unknown) => void;
 }
 
@@ -201,7 +202,7 @@ export function createLink({
   let projects: ReadonlySet<string> | null = null; // the office's, from this connection's welcome
   let stable: ReturnType<typeof setTimeout> | null = null; // counts refusals from zero once the link has stayed up
 
-  // A socket handler or timer, whose throw goes to `onError` when there is one.
+  // A socket handler, timer or promise callback of the link's own, whose throw goes to `onError` when there is one.
   const contained =
     <A extends unknown[]>(fn: (...args: A) => void) =>
     (...args: A) => {
@@ -212,6 +213,7 @@ export function createLink({
         onError(err);
       }
     };
+  const reconnect = contained(() => connect());
 
   // Before every try, the first and each reconnect, `admit` may say no: then nothing is sent, and it
   // asks again after retryCapMs (the data layer closes a link whose repo has left the office).
@@ -219,15 +221,15 @@ export function createLink({
     retry = null;
     if (!admit) return proceed();
     admit().then(
-      (ok) => {
+      contained((ok: boolean) => {
         if (isClosed) return;
         if (ok) return proceed();
         emit({ type: "status", server: url, state: "not-approved" });
-        retry = setTimeout(connect, retryCapMs);
-      },
-      () => {
-        if (!isClosed) retry = setTimeout(connect, retryCapMs);
-      },
+        retry = setTimeout(reconnect, retryCapMs);
+      }),
+      contained(() => {
+        if (!isClosed) retry = setTimeout(reconnect, retryCapMs);
+      }),
     );
   }
 
@@ -236,17 +238,17 @@ export function createLink({
     void refusing
       .then(() => pairing.token())
       .then(
-        (token) => {
+        contained((token: string | null | undefined) => {
           if (isClosed) return;
           if (token !== null) return open(token);
           emit({ type: "status", server: url, state: "pairing" });
-          retry = setTimeout(connect, pairPollMs);
-        },
-        (err: unknown) => {
+          retry = setTimeout(reconnect, pairPollMs);
+        }),
+        contained((err: unknown) => {
           if (isClosed) return;
           emit({ type: "log", text: `couldn't pair with the office server: ${String((err as Error)?.message ?? err)}` });
           dropped();
-        },
+        }),
       );
   }
 
@@ -273,7 +275,7 @@ export function createLink({
     });
     // Either event is the drop, handled once per socket: Node 22's WebSocket fires only `error`
     // for a connection that never opened (refused, failed handshake), with no `close` after it.
-    ws.onerror = () => {
+    ws.onerror = contained(() => {
       if (socket !== ws) return;
       dropped();
       try {
@@ -281,10 +283,10 @@ export function createLink({
       } catch {
         // Not open yet: nothing to close.
       }
-    };
-    ws.onclose = () => {
+    });
+    ws.onclose = contained(() => {
       if (socket === ws) dropped();
-    };
+    });
   }
 
   function dropped() {
@@ -301,7 +303,7 @@ export function createLink({
     if (isTaken) {
       isTaken = false;
       emit({ type: "status", server: url, state: "taken" });
-      retry = setTimeout(connect, takenRetryMs);
+      retry = setTimeout(reconnect, takenRetryMs);
       return;
     }
     // Refusals back off on their own count: the socket opened each time, which resets `failures`.
@@ -310,19 +312,19 @@ export function createLink({
       // A token that ran out on a link that had stayed up is renewed at once, unseen.
       if (refusedFor === "token-expired" && refusals === 0) {
         refusals++;
-        retry = setTimeout(connect, 0);
+        retry = setTimeout(reconnect, 0);
         return;
       }
       const delay = Math.min(retryCapMs, retryBaseMs * 2 ** refusals++);
       emit({ type: "status", server: url, state: "disconnected", retryInMs: delay });
-      retry = setTimeout(connect, delay);
+      retry = setTimeout(reconnect, delay);
       return;
     }
     if (isUnwanted) {
       isUnwanted = false;
       failures = 0;
       emit({ type: "status", server: url, state: "not-wanted" });
-      retry = setTimeout(connect, notWantedRetryMs);
+      retry = setTimeout(reconnect, notWantedRetryMs);
       return;
     }
     const delay = Math.min(retryCapMs, retryBaseMs * 2 ** failures++);
@@ -330,7 +332,7 @@ export function createLink({
     // data layer at once.
     const retryInMs = Math.round(delay / 2 + (random() * delay) / 2);
     emit({ type: "status", server: url, state: "disconnected", retryInMs });
-    retry = setTimeout(connect, retryInMs);
+    retry = setTimeout(reconnect, retryInMs);
   }
 
   function send(message: DataLayerMessage) {
@@ -390,7 +392,7 @@ export function createLink({
       isRefused = true;
       refusedFor = message.code;
       refusing = pairing.refused(message.code, sentToken).catch(() => {});
-      if (message.code === "pairing-ended" && onPairingEnded) void refusing.then(onPairingEnded);
+      if (message.code === "pairing-ended" && onPairingEnded) void refusing.then(contained(onPairingEnded));
       // The server's own words on how to pair are passed on; a renewal is the link's own business.
       emit(message.code === "token-expired" ? { type: "log", text: "the office server says this machine's token has expired; renewing it" } : message);
     } else if (message.type === "error" && message.code === "forged-hello") {

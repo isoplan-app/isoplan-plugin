@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import http from "node:http";
-import fs$1, { realpath, statSync } from "node:fs";
+import fs$1, { realpath, statSync, watch } from "node:fs";
 import { promisify } from "node:util";
 import net from "node:net";
 //#region ../protocol/src/area-covers.ts
@@ -9007,10 +9007,11 @@ function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, 
 			onError(err);
 		}
 	};
+	const reconnect = contained(() => connect());
 	function connect() {
 		retry = null;
 		if (!admit) return proceed();
-		admit().then((ok) => {
+		admit().then(contained((ok) => {
 			if (isClosed) return;
 			if (ok) return proceed();
 			emit({
@@ -9018,14 +9019,14 @@ function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, 
 				server: url,
 				state: "not-approved"
 			});
-			retry = setTimeout(connect, retryCapMs);
-		}, () => {
-			if (!isClosed) retry = setTimeout(connect, retryCapMs);
-		});
+			retry = setTimeout(reconnect, retryCapMs);
+		}), contained(() => {
+			if (!isClosed) retry = setTimeout(reconnect, retryCapMs);
+		}));
 	}
 	function proceed() {
 		if (!pairing) return open(void 0);
-		refusing.then(() => pairing.token()).then((token) => {
+		refusing.then(() => pairing.token()).then(contained((token) => {
 			if (isClosed) return;
 			if (token !== null) return open(token);
 			emit({
@@ -9033,15 +9034,15 @@ function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, 
 				server: url,
 				state: "pairing"
 			});
-			retry = setTimeout(connect, pairPollMs);
-		}, (err) => {
+			retry = setTimeout(reconnect, pairPollMs);
+		}), contained((err) => {
 			if (isClosed) return;
 			emit({
 				type: "log",
 				text: `couldn't pair with the office server: ${String(err?.message ?? err)}`
 			});
 			dropped();
-		});
+		}));
 	}
 	function open(token) {
 		emit({
@@ -9075,16 +9076,16 @@ function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, 
 		ws.onmessage = contained((event) => {
 			if (socket === ws) receive(event.data);
 		});
-		ws.onerror = () => {
+		ws.onerror = contained(() => {
 			if (socket !== ws) return;
 			dropped();
 			try {
 				ws.close();
 			} catch {}
-		};
-		ws.onclose = () => {
+		});
+		ws.onclose = contained(() => {
 			if (socket === ws) dropped();
-		};
+		});
 	}
 	function dropped() {
 		socket = null;
@@ -9104,14 +9105,14 @@ function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, 
 				server: url,
 				state: "taken"
 			});
-			retry = setTimeout(connect, takenRetryMs);
+			retry = setTimeout(reconnect, takenRetryMs);
 			return;
 		}
 		if (isRefused) {
 			isRefused = false;
 			if (refusedFor === "token-expired" && refusals === 0) {
 				refusals++;
-				retry = setTimeout(connect, 0);
+				retry = setTimeout(reconnect, 0);
 				return;
 			}
 			const delay = Math.min(retryCapMs, retryBaseMs * 2 ** refusals++);
@@ -9121,7 +9122,7 @@ function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, 
 				state: "disconnected",
 				retryInMs: delay
 			});
-			retry = setTimeout(connect, delay);
+			retry = setTimeout(reconnect, delay);
 			return;
 		}
 		if (isUnwanted) {
@@ -9132,7 +9133,7 @@ function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, 
 				server: url,
 				state: "not-wanted"
 			});
-			retry = setTimeout(connect, notWantedRetryMs);
+			retry = setTimeout(reconnect, notWantedRetryMs);
 			return;
 		}
 		const delay = Math.min(retryCapMs, retryBaseMs * 2 ** failures++);
@@ -9143,7 +9144,7 @@ function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, 
 			state: "disconnected",
 			retryInMs
 		});
-		retry = setTimeout(connect, retryInMs);
+		retry = setTimeout(reconnect, retryInMs);
 	}
 	function send(message) {
 		socket.send(JSON.stringify(message));
@@ -9215,7 +9216,7 @@ function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, 
 			isRefused = true;
 			refusedFor = message.code;
 			refusing = pairing.refused(message.code, sentToken).catch(() => {});
-			if (message.code === "pairing-ended" && onPairingEnded) refusing.then(onPairingEnded);
+			if (message.code === "pairing-ended" && onPairingEnded) refusing.then(contained(onPairingEnded));
 			emit(message.code === "token-expired" ? {
 				type: "log",
 				text: "the office server says this machine's token has expired; renewing it"
@@ -10440,22 +10441,46 @@ function viewWorkflow(input) {
 		agents
 	};
 }
-/** What withheld workflow text says in its place. */
+/** What withheld workflow text, or a withheld task or description, says in its place. */
 const WORKFLOW_WITHHELD = "Hidden by the secret check";
 /**
-* The facts with each workflow's name, description, phase titles and details, and its agents'
-* labels, phases, tasks and descriptions, secret-checked: a text the scan matches, and every one
-* while `patterns` is null, goes out as WORKFLOW_WITHHELD. The task and description are checked on
-* their own: they come uncut from meta.json, while the label is cut and may come from the journal.
+* The facts with each workflow's name, description, phase titles and details, its agents' labels
+* and phases, and every subagent's task and description, workflow or not, secret-checked: a text
+* the scan matches, and every one while `patterns` is null, goes out as WORKFLOW_WITHHELD. The task
+* and description are checked on their own: they come uncut from meta.json, while a workflow
+* agent's label is cut and may come from the journal.
 */
 function prepareWorkflows(facts, patterns, log) {
-	if (!facts.workflows?.length) return facts;
 	const check = (value, what) => {
 		if (!value) return value;
 		const matched = scan(value, patterns);
 		if (!matched) return value;
 		log(`withheld ${what}: ${patterns ? `it matches the secret pattern "${matched}"` : "the secret patterns couldn't be read"}`);
 		return WORKFLOW_WITHHELD;
+	};
+	const agents = facts.agents.map((a) => {
+		const task = a.task === null ? null : check(a.task, `the task of ${a.id}`);
+		const said = a.extra?.description;
+		const description = typeof said === "string" ? check(said, `the description of ${a.id}`) : said;
+		const workflow = a.workflow && {
+			...a.workflow,
+			label: check(a.workflow.label, `the label of ${a.id}`),
+			phase: check(a.workflow.phase, `the phase of ${a.id}`)
+		};
+		if (task === a.task && description === said && workflow?.label === a.workflow?.label && workflow?.phase === a.workflow?.phase) return a;
+		return {
+			...a,
+			...workflow ? { workflow } : {},
+			task,
+			...description === said ? {} : { extra: {
+				...a.extra,
+				description
+			} }
+		};
+	});
+	if (!facts.workflows?.length) return {
+		...facts,
+		agents
 	};
 	const workflows = facts.workflows.map((w) => {
 		const { description, ...rest } = w;
@@ -10468,28 +10493,6 @@ function prepareWorkflows(facts, patterns, log) {
 				title: check(p.title, `phase ${i + 1}'s title in workflow ${w.id}`),
 				...p.detail === void 0 ? {} : { detail: check(p.detail, `phase ${i + 1}'s detail in workflow ${w.id}`) }
 			}))
-		};
-	});
-	const agents = facts.agents.map((a) => {
-		if (!a.workflow) return a;
-		const label = check(a.workflow.label, `the label of ${a.id}`);
-		const phase = check(a.workflow.phase, `the phase of ${a.id}`);
-		const task = a.task === null ? null : check(a.task, `the task of ${a.id}`);
-		const said = a.extra?.description;
-		const description = typeof said === "string" ? check(said, `the description of ${a.id}`) : said;
-		if (label === a.workflow.label && phase === a.workflow.phase && task === a.task && description === said) return a;
-		return {
-			...a,
-			workflow: {
-				...a.workflow,
-				label,
-				phase
-			},
-			task,
-			...description === said ? {} : { extra: {
-				...a.extra,
-				description
-			} }
 		};
 	});
 	return {
@@ -11084,7 +11087,7 @@ function createClaudeCode(io) {
 				} : {},
 				...wf ? { workflow: wf.workflow } : {},
 				extra: {
-					description: a.meta.description ?? null,
+					description: typeof a.meta.description === "string" ? a.meta.description : null,
 					...s.endState ? { endState: s.endState } : {}
 				}
 			});
@@ -19965,6 +19968,7 @@ function contained(patterns) {
 			why = patterns().catch(() => null).then((p) => `something went wrong in reporting it: ${errorText(err, p)}`);
 			failed();
 		},
+		message: (err) => patterns().catch(() => null).then((p) => errorText(String(err?.message ?? err), p)),
 		guard: (fn, fallback) => (...args) => {
 			try {
 				return fn(...args);
@@ -20036,17 +20040,17 @@ async function reporting(o, c) {
 	});
 	let downSince = Date.now();
 	let closedFor = null;
-	closed.then((reason) => void (closedFor = reason || null));
+	let stopped = false;
+	let wake = () => {};
+	const stop = () => (stopped = true, wake());
+	closed.then((reason) => (closedFor = reason || null, stop()));
+	c.failed.then(stop);
 	const emit = o.emit;
-	const wait = (ms) => {
-		let timer;
-		const timeUp = new Promise((resolve) => timer = setTimeout(() => resolve(true), ms));
-		return Promise.race([
-			timeUp,
-			closed.then(() => false),
-			c.failed.then(() => false)
-		]).finally(() => clearTimeout(timer));
-	};
+	const wait = (ms) => new Promise((resolve) => {
+		if (stopped) return resolve(false);
+		const timer = setTimeout(() => resolve(true), ms);
+		wake = () => (clearTimeout(timer), resolve(false));
+	});
 	let why = "it was stopped";
 	const stopping = (reason) => {
 		why = reason;
@@ -20151,9 +20155,9 @@ async function reporting(o, c) {
 				type: "log",
 				text: `update check: ${text}`
 			});
-		})().catch((err) => emit({
+		})().catch(async (err) => emit({
 			type: "log",
-			text: `couldn't check for a newer version of the plugin: ${String(err?.message ?? err)}`
+			text: `couldn't check for a newer version of the plugin: ${await c.message(err)}`
 		})).finally(() => checking = false));
 	};
 	checkUpdate(START_GAP_MS);
@@ -20253,9 +20257,9 @@ async function reporting(o, c) {
 						kind: "owner-answer",
 						late: true
 					});
-				}).finally(() => fs.rm(file, { force: true }).catch(() => {})).catch((err) => emit({
+				}).finally(() => fs.rm(file, { force: true }).catch(() => {})).catch(async (err) => emit({
 					type: "log",
-					text: `couldn't pass the owner's answer on: ${String(err?.message ?? err)}`
+					text: `couldn't pass the owner's answer on: ${await c.message(err)}`
 				})));
 				return;
 			}
@@ -20269,9 +20273,9 @@ async function reporting(o, c) {
 					file,
 					emit,
 					take: takeFile
-				}).then((answer) => run.gate.current()?.send(answer)).finally(() => fs.rm(file, { force: true }).catch(() => {})).catch((err) => emit({
+				}).then((answer) => run.gate.current()?.send(answer)).finally(() => fs.rm(file, { force: true }).catch(() => {})).catch(async (err) => emit({
 					type: "log",
-					text: `couldn't pass the owner's message on: ${String(err?.message ?? err)}`
+					text: `couldn't pass the owner's message on: ${await c.message(err)}`
 				})));
 				return;
 			}
@@ -20371,9 +20375,9 @@ async function reporting(o, c) {
 		dormancy: gated.dormancy,
 		projects,
 		workspace
-	})).catch((err) => emit({
+	})).catch(async (err) => emit({
 		type: "log",
-		text: `couldn't check which repos ${run.office.server} takes: ${String(err?.message ?? err)}`
+		text: `couldn't check which repos ${run.office.server} takes: ${await c.message(err)}`
 	})).finally(() => run.homing = null);
 	const apply = (run) => {
 		if (!run.result) return;
@@ -20620,7 +20624,7 @@ async function reporting(o, c) {
 		} catch (err) {
 			emit({
 				type: "log",
-				text: `couldn't send this session's facts to ${run.office.server}: ${String(err?.message ?? err)}`
+				text: `couldn't send this session's facts to ${run.office.server}: ${await c.message(err)}`
 			});
 		}
 		if (o.areas && facts.areas?.length) {
@@ -20646,7 +20650,7 @@ async function reporting(o, c) {
 				} catch (err) {
 					emit({
 						type: "log",
-						text: `couldn't look at this session's areas for an expert creation suggestion: ${String(err?.message ?? err)}`
+						text: `couldn't look at this session's areas for an expert creation suggestion: ${await c.message(err)}`
 					});
 				}
 			}
@@ -20775,6 +20779,7 @@ async function takeReply(file) {
 /** How long after a `superseded` line its hooks module tries again (src/hooks/register.ts). */
 const SUPERSEDED_RECHECK_MS = 6e4;
 const STOP_WAIT_MS = 5e3;
+const FULL_LOOK_MS = 6e4;
 const HEAD_BYTES = 65536;
 /** The first folder a transcript's lines name, from its first and last 64 KB. */
 async function cwdOf(io, file, size) {
@@ -20790,9 +20795,35 @@ async function cwdOf(io, file, size) {
 /** Why a report for hooks module `from` stops when the session has `to` (either none), as its log says it. */
 const changed = (from, to) => !to ? "its hooks module's link to the runner closed" : !from ? "its hooks module connected to the runner, which reports it for that hooks module now" : "another hooks module has the session now (another window, or a reload)";
 function watchSessions(o) {
-	const { claudeDir, io, isAlive = alive, pid = process.pid, gapMs = 250, stopWaitMs = STOP_WAIT_MS, recheckMs = SUPERSEDED_RECHECK_MS } = o;
+	const { claudeDir, io, isAlive = alive, pid = process.pid, gapMs = 250, stopWaitMs = STOP_WAIT_MS, recheckMs = SUPERSEDED_RECHECK_MS, fullLookMs = FULL_LOOK_MS } = o;
 	const projectsDir = path.join(claudeDir, "projects");
 	const seen = /* @__PURE__ */ new Map();
+	const folders = /* @__PURE__ */ new Map();
+	let fullAt = 0;
+	const unwatch = (folder) => {
+		folder.watcher?.close();
+		folder.watcher = null;
+	};
+	/** The folder, watched from now on if it can be. */
+	const watched = (name) => {
+		let folder = folders.get(name);
+		if (!folder) folders.set(name, folder = {
+			watcher: null,
+			written: null,
+			entries: null
+		});
+		if (folder.watcher || stopped) return folder;
+		const f = folder;
+		try {
+			f.watcher = watch(path.join(projectsDir, name), { persistent: false }, (_, file) => {
+				if (file && path.isAbsolute(file)) unwatch(f);
+				else if (file) f.written?.add(file);
+				else f.written = null;
+			}).on("error", () => unwatch(f));
+			f.written = null;
+		} catch {}
+		return f;
+	};
 	const rehooked = /* @__PURE__ */ new Set();
 	let first = true;
 	let stopped = false;
@@ -20836,7 +20867,7 @@ function watchSessions(o) {
 				s.holdOff = ended.holdOff;
 				s.notWanted = ended.holdOff.notWanted;
 			}
-		}, (err) => o.log(`couldn't report session ${id}: ${String(err?.stack ?? err)}`)).finally(async () => {
+		}, async (err) => o.log(`couldn't report session ${id}: ${errorText(err, await o.patterns().catch(() => null))}`)).finally(async () => {
 			if (hooks) {
 				const lock = await readLock(lockPath(claudeDir, id)).catch(() => null);
 				if (lock?.pid && lock.pid !== pid && isAlive(lock.pid)) s.tookBack = lock.pid;
@@ -20890,16 +20921,26 @@ function watchSessions(o) {
 		})());
 		const quiet = [];
 		const recent = [];
+		const full = first || now - fullAt >= fullLookMs;
+		if (full) fullAt = now;
+		const listed = /* @__PURE__ */ new Set();
 		for (const dir of await io.listDir(projectsDir)) {
 			if (!dir.isDir) continue;
-			for (const entry of await io.listDir(path.join(projectsDir, dir.name))) {
+			listed.add(dir.name);
+			const folder = watched(dir.name);
+			const written = full || !folder.watcher ? null : folder.written;
+			folder.written = /* @__PURE__ */ new Set();
+			const entries = written?.size === 0 && folder.entries || (folder.entries = await io.listDir(path.join(projectsDir, dir.name)));
+			for (const entry of entries) {
 				const id = entry.name.slice(0, -6);
 				if (entry.isDir || !entry.name.endsWith(".jsonl") || !/^[\w-]+$/.test(id)) continue;
 				if (o.ignored?.(id, seen.get(id)?.cwd ?? null)) continue;
+				const hooks = o.hooked?.(id) ?? null;
+				let s = seen.get(id);
+				if (written && !written.has(entry.name) && s && !s.running && !hooks && s.mtimeMs < now - windowMs) continue;
 				const file = path.join(projectsDir, dir.name, entry.name);
 				const st = await io.stat(file);
 				if (!st) continue;
-				let s = seen.get(id);
 				if (!s) seen.set(id, s = {
 					file,
 					mtimeMs: st.mtimeMs,
@@ -20921,7 +20962,6 @@ function watchSessions(o) {
 					mtimeMs: st.mtimeMs,
 					size: st.size
 				});
-				const hooks = o.hooked?.(id) ?? null;
 				const removedAt = removed.get(id);
 				if (removedAt !== void 0) {
 					if (!hooks && st.mtimeMs <= removedAt) continue;
@@ -20993,6 +21033,11 @@ function watchSessions(o) {
 				else start(id, s, s.cwd);
 			}
 		}
+		for (const [name, folder] of folders) {
+			if (listed.has(name)) continue;
+			unwatch(folder);
+			folders.delete(name);
+		}
 		if (first && (recent.length || quiet.length)) {
 			for (const [, s] of [...recent, ...quiet]) s.queued = true;
 			const startQueued = ([id, s, cwd]) => {
@@ -21013,7 +21058,7 @@ function watchSessions(o) {
 		first = false;
 	};
 	let looking = null;
-	const lookOnce = () => looking ??= look().finally(() => looking = null);
+	const lookOnce = () => looking ??= look().catch((err) => (fullAt = 0, Promise.reject(err))).finally(() => looking = null);
 	const next = async () => {
 		let seconds = 1;
 		try {
@@ -21062,6 +21107,7 @@ function watchSessions(o) {
 		async stop() {
 			stopped = true;
 			if (timer) clearTimeout(timer);
+			for (const folder of folders.values()) unwatch(folder);
 			const running = [...seen.values()].flatMap((s) => s.running ?? []);
 			for (const r of running) r.stop("the runner stopped");
 			let timeout;
@@ -23913,9 +23959,10 @@ async function supervisor() {
 	return 0;
 }
 async function worker() {
+	const errorPatterns = () => loadPatterns(path.join(appDir, "secret-patterns.json"), path.join(isoplanDir, "secret-patterns.json"), () => {});
 	onEscapes({
 		on: (event, handler) => void process.on(event, handler),
-		said: async (err) => errorText(err, await loadPatterns(path.join(appDir, "secret-patterns.json"), path.join(isoplanDir, "secret-patterns.json"), () => {})),
+		said: async (err) => errorText(err, await errorPatterns()),
 		log,
 		exit: () => void logging.then(() => process.exit(1))
 	});
@@ -24028,6 +24075,7 @@ async function worker() {
 		config,
 		isOff,
 		log,
+		patterns: errorPatterns,
 		ignored: expertIgnored(expertsDir, () => experts, clones.folders),
 		hooked: (id) => pipe?.hooked(id) ?? null,
 		removedFile: path.join(isoplanDir, "runner", "removed.json"),
@@ -24083,7 +24131,7 @@ async function worker() {
 					...expertCreationSuggestionSignals
 				});
 			} catch (err) {
-				said.say(`stopping: something went wrong: ${String(err?.stack ?? err)}`);
+				said.say(`stopping: something went wrong: ${errorText(err, await errorPatterns().catch(() => null))}`);
 				throw err;
 			} finally {
 				await said.flushed();

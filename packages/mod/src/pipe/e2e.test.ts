@@ -20,6 +20,7 @@ import { nodeIo } from "../data-layer/io.js";
 import { reportSession, sessionLog } from "../data-layer/report-session.js";
 import type { DataLayerLine } from "../lines.js";
 import { watchSessions } from "../runner/reporting.js";
+import { loadPatterns } from "../runner/scan.js";
 import { relay } from "./client.js";
 import { createPipeServer, type Hooked } from "./server.js";
 
@@ -121,6 +122,7 @@ async function runner(claudeDir: string) {
     config,
     isOff: async () => false,
     log: () => {},
+    patterns: () => loadPatterns(path.join(modDir, "secret-patterns.json"), path.join(claudeDir, "isoplan", "secret-patterns.json"), () => {}),
     hooked: (id) => pipe?.hooked(id) ?? null,
     held: (_id, hooks) => hooks.send({ type: "superseded", reason: "earlier" }),
     report: async ({ sessionId, cwd, closed, notWanted, hooks }) => {

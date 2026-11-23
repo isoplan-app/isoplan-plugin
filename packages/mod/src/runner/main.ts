@@ -193,9 +193,11 @@ async function supervisor(): Promise<number> {
 }
 
 async function worker(): Promise<number> {
+  // The patterns an error's text is checked against before the logs say it.
+  const errorPatterns = () => loadPatterns(path.join(appDir, "secret-patterns.json"), path.join(isoplanDir, "secret-patterns.json"), () => {});
   onEscapes({
     on: (event, handler) => void process.on(event, handler),
-    said: async (err) => errorText(err, await loadPatterns(path.join(appDir, "secret-patterns.json"), path.join(isoplanDir, "secret-patterns.json"), () => {})),
+    said: async (err) => errorText(err, await errorPatterns()),
     log,
     exit: () => void logging.then(() => process.exit(1)),
   });
@@ -293,6 +295,7 @@ async function worker(): Promise<number> {
     config,
     isOff,
     log,
+    patterns: errorPatterns,
     ignored: expertIgnored(expertsDir, () => experts, clones.folders),
     hooked: (id) => pipe?.hooked(id) ?? null,
     removedFile: path.join(isoplanDir, "runner", "removed.json"),
@@ -332,7 +335,7 @@ async function worker(): Promise<number> {
           }).finally(() => pairLinks.ended(sessionId, hooks.send));
         return await reportSession({ sessionId, cwd, by: "runner", appDir, emit: said.emit, closed, notWanted, isOff: () => isOff(cwd), shared: shares, titled, ...expertCreationSuggestionSignals });
       } catch (err) {
-        said.say(`stopping: something went wrong: ${String((err as Error)?.stack ?? err)}`);
+        said.say(`stopping: something went wrong: ${errorText(err, await errorPatterns().catch(() => null))}`);
         throw err;
       } finally {
         await said.flushed();

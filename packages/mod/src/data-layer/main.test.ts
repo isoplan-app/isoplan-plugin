@@ -205,6 +205,26 @@ test("the runner keeps the session's lock fresh each pass, and as it stops repor
   expect(logged()).toContain("stopping: the runner stopped");
 });
 
+test("pass after pass, the runner watches `closed` once for the session, not once a wait (#109)", async () => {
+  const o = await office();
+  o.state.repos = ["github.com/team/app"];
+  const root = tempRoot();
+  const claudeDir = path.join(root, "claude");
+  const repo = session(claudeDir, root);
+  fs.writeFileSync(path.join(claudeDir, "isoplan", "config.json"), JSON.stringify({ server: o.url, streamSeconds: 0.25 }));
+  let stop = () => {};
+  const closed = new Promise<void>((resolve) => (stop = resolve));
+  const watched = vi.spyOn(closed, "then");
+  let passes = 0;
+  const ended = inRunner(claudeDir, repo, { closed, isOff: async () => (passes++, false) });
+  await until(() => passes >= 3);
+  const once = watched.mock.calls.length;
+  await until(() => passes >= 10);
+  expect(watched.mock.calls.length).toBe(once);
+  stop();
+  expect((await ended).why).toBe("the runner stopped");
+});
+
 test("the runner hears the title each pass gives the office, for the desktop app's menu", async () => {
   const o = await office();
   o.state.repos = ["github.com/team/app"];
