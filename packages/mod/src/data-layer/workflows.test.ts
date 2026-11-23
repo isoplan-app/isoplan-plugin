@@ -236,6 +236,34 @@ test("an agent's task and description are checked on their own: a secret past th
   }
 });
 
+test("a planted secret in an ordinary subagent's task is hidden too, in a session with no workflow (#70)", async () => {
+  const root = tempRoot();
+  const home = path.join(root, "home");
+  const repo = gitRepo(path.join(root, "repo"));
+  const secret = "AKIAABCDEFGHIJKLMNOP";
+  session(home, "s", [line.user(repo, "go", 60), line.spawn(repo, "tu-1", { description: `push ${secret}` }, 50), line.spawn(repo, "tu-2", { description: "read the docs" }, 50)], { age: 10 });
+  agent(home, "s", "a0000000000000008", { agentType: "general-purpose", toolUseId: "tu-1", description: `push ${secret}` }, [line.text(repo, "on it", 20)], { age: 20 });
+  agent(home, "s", "a0000000000000009", { agentType: "general-purpose", toolUseId: "tu-2", description: "read the docs" }, [line.text(repo, "on it", 20)], { age: 20 });
+  agent(home, "s", "a0000000000000010", { agentType: "general-purpose", description: { said: secret } }, [line.text(repo, "on it", 20)], { age: 20 });
+  const facts = await factsOf(home, "s");
+  expect(facts.workflows ?? []).toEqual([]);
+  expect(byId(facts.agents).a0000000000000008!.task).toBe(`push ${secret}`);
+  const patterns = await loadPatterns(path.join(modDir, "secret-patterns.json"), path.join(root, "none.json"), () => {});
+  const logs: string[] = [];
+  const out = prepareWorkflows(facts, patterns, (t) => logs.push(t));
+
+  expect(JSON.stringify(out)).not.toContain(secret);
+  const agents = byId(out.agents);
+  expect([agents.a0000000000000008!.task, agents.a0000000000000008!.extra?.description]).toEqual([WORKFLOW_WITHHELD, WORKFLOW_WITHHELD]);
+  expect([agents.a0000000000000009!.task, agents.a0000000000000009!.extra?.description]).toEqual(["read the docs", "read the docs"]);
+  // A description that isn't a text is never read, so it can't go out unchecked.
+  expect([agents.a0000000000000010!.task, agents.a0000000000000010!.extra?.description]).toEqual([null, null]);
+  expect(logs).toEqual([`withheld the task of ${cc("a0000000000000008")}: it matches the secret pattern "AWS access key id"`, `withheld the description of ${cc("a0000000000000008")}: it matches the secret pattern "AWS access key id"`]);
+  // With the patterns unreadable, every task and description is hidden.
+  const blind = byId(prepareWorkflows(facts, null, () => {}).agents).a0000000000000009!;
+  expect([blind.task, blind.extra?.description]).toEqual([WORKFLOW_WITHHELD, WORKFLOW_WITHHELD]);
+});
+
 test("a run record with no start time starts the workflow at its launch", async () => {
   const root = tempRoot();
   const home = path.join(root, "home");
