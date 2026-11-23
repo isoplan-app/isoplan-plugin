@@ -20036,17 +20036,17 @@ async function reporting(o, c) {
 	});
 	let downSince = Date.now();
 	let closedFor = null;
-	closed.then((reason) => void (closedFor = reason || null));
+	let stopped = false;
+	let wake = () => {};
+	const stop = () => (stopped = true, wake());
+	closed.then((reason) => (closedFor = reason || null, stop()));
+	c.failed.then(stop);
 	const emit = o.emit;
-	const wait = (ms) => {
-		let timer;
-		const timeUp = new Promise((resolve) => timer = setTimeout(() => resolve(true), ms));
-		return Promise.race([
-			timeUp,
-			closed.then(() => false),
-			c.failed.then(() => false)
-		]).finally(() => clearTimeout(timer));
-	};
+	const wait = (ms) => new Promise((resolve) => {
+		if (stopped) return resolve(false);
+		const timer = setTimeout(() => resolve(true), ms);
+		wake = () => (clearTimeout(timer), resolve(false));
+	});
 	let why = "it was stopped";
 	const stopping = (reason) => {
 		why = reason;
