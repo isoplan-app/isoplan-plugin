@@ -10440,22 +10440,46 @@ function viewWorkflow(input) {
 		agents
 	};
 }
-/** What withheld workflow text says in its place. */
+/** What withheld workflow text, or a withheld task or description, says in its place. */
 const WORKFLOW_WITHHELD = "Hidden by the secret check";
 /**
-* The facts with each workflow's name, description, phase titles and details, and its agents'
-* labels, phases, tasks and descriptions, secret-checked: a text the scan matches, and every one
-* while `patterns` is null, goes out as WORKFLOW_WITHHELD. The task and description are checked on
-* their own: they come uncut from meta.json, while the label is cut and may come from the journal.
+* The facts with each workflow's name, description, phase titles and details, its agents' labels
+* and phases, and every subagent's task and description, workflow or not, secret-checked: a text
+* the scan matches, and every one while `patterns` is null, goes out as WORKFLOW_WITHHELD. The task
+* and description are checked on their own: they come uncut from meta.json, while a workflow
+* agent's label is cut and may come from the journal.
 */
 function prepareWorkflows(facts, patterns, log) {
-	if (!facts.workflows?.length) return facts;
 	const check = (value, what) => {
 		if (!value) return value;
 		const matched = scan(value, patterns);
 		if (!matched) return value;
 		log(`withheld ${what}: ${patterns ? `it matches the secret pattern "${matched}"` : "the secret patterns couldn't be read"}`);
 		return WORKFLOW_WITHHELD;
+	};
+	const agents = facts.agents.map((a) => {
+		const task = a.task === null ? null : check(a.task, `the task of ${a.id}`);
+		const said = a.extra?.description;
+		const description = typeof said === "string" ? check(said, `the description of ${a.id}`) : said;
+		const workflow = a.workflow && {
+			...a.workflow,
+			label: check(a.workflow.label, `the label of ${a.id}`),
+			phase: check(a.workflow.phase, `the phase of ${a.id}`)
+		};
+		if (task === a.task && description === said && workflow?.label === a.workflow?.label && workflow?.phase === a.workflow?.phase) return a;
+		return {
+			...a,
+			...workflow ? { workflow } : {},
+			task,
+			...description === said ? {} : { extra: {
+				...a.extra,
+				description
+			} }
+		};
+	});
+	if (!facts.workflows?.length) return {
+		...facts,
+		agents
 	};
 	const workflows = facts.workflows.map((w) => {
 		const { description, ...rest } = w;
@@ -10468,28 +10492,6 @@ function prepareWorkflows(facts, patterns, log) {
 				title: check(p.title, `phase ${i + 1}'s title in workflow ${w.id}`),
 				...p.detail === void 0 ? {} : { detail: check(p.detail, `phase ${i + 1}'s detail in workflow ${w.id}`) }
 			}))
-		};
-	});
-	const agents = facts.agents.map((a) => {
-		if (!a.workflow) return a;
-		const label = check(a.workflow.label, `the label of ${a.id}`);
-		const phase = check(a.workflow.phase, `the phase of ${a.id}`);
-		const task = a.task === null ? null : check(a.task, `the task of ${a.id}`);
-		const said = a.extra?.description;
-		const description = typeof said === "string" ? check(said, `the description of ${a.id}`) : said;
-		if (label === a.workflow.label && phase === a.workflow.phase && task === a.task && description === said) return a;
-		return {
-			...a,
-			workflow: {
-				...a.workflow,
-				label,
-				phase
-			},
-			task,
-			...description === said ? {} : { extra: {
-				...a.extra,
-				description
-			} }
 		};
 	});
 	return {
@@ -11084,7 +11086,7 @@ function createClaudeCode(io) {
 				} : {},
 				...wf ? { workflow: wf.workflow } : {},
 				extra: {
-					description: a.meta.description ?? null,
+					description: typeof a.meta.description === "string" ? a.meta.description : null,
 					...s.endState ? { endState: s.endState } : {}
 				}
 			});
