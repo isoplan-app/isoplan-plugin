@@ -1722,6 +1722,8 @@ const WRITTEN = [
 	"approved.json",
 	"update.json",
 	"update.lock",
+	"link-handler.lock",
+	"login-item.lock",
 	"starts",
 	"messages",
 	"remote-names.json",
