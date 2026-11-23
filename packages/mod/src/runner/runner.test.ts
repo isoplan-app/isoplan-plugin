@@ -647,6 +647,16 @@ test("runner.json: the tray, its pairing window and the runner's session list re
   expect((await loadSettings<{ trayRefreshSeconds: number }>(nodeIo(), path.join(modDir, "runner.json"), user)).trayRefreshSeconds).toBe(1);
 });
 
+test("runner.json: a wait too long for a timer waits about 12 days, even taken twice over, and a time in days is kept as it is (#53)", async () => {
+  const user = path.join(tempRoot(), "runner.json");
+  fs.writeFileSync(user, JSON.stringify({ drivenPromptMinutes: 40000, drivenIdleMinutes: 1440, drivenStartSeconds: 1e12, drivenCloseSeconds: 1e12, cloneSearchDays: 60, expertCreationSuggestions: { timeoutSeconds: 1e12 } }));
+  type Waits = { drivenPromptMinutes: number; drivenIdleMinutes: number; drivenStartSeconds: number; drivenCloseSeconds: number; cloneSearchDays: number; expertCreationSuggestions: { timeoutSeconds: number } };
+  const s = await loadSettings<Waits>(nodeIo(), path.join(modDir, "runner.json"), user);
+  expect([s.drivenPromptMinutes, s.drivenIdleMinutes, s.drivenStartSeconds, s.drivenCloseSeconds, s.cloneSearchDays, s.expertCreationSuggestions.timeoutSeconds]).toEqual([17895, 1440, 1073741, 1073741, 60, 1073741]);
+  // The menu's Close waits twice drivenCloseSeconds, and that still fits a timer.
+  expect(2 * s.drivenCloseSeconds * 1000).toBeLessThanOrEqual(2 ** 31 - 1);
+});
+
 test("secret patterns: the owner's file adds patterns", async () => {
   const owner = path.join(tempRoot(), "secret-patterns.json");
   fs.writeFileSync(owner, JSON.stringify({ patterns: [{ name: "internal host", regex: "corp\.internal" }] }));
