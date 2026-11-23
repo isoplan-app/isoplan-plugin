@@ -20665,7 +20665,12 @@ async function waitsOf(dir, facts) {
 	const out = /* @__PURE__ */ new Map();
 	for (const q of facts.questions ?? []) {
 		if (!/^[A-Za-z0-9_-]{1,200}$/.test(q.id)) continue;
-		const mark = await fs.readFile(path.join(dir, `${q.id}.json`), "utf8").then((text) => JSON.parse(text), () => null);
+		let mark;
+		try {
+			mark = JSON.parse(await fs.readFile(path.join(dir, `${q.id}.json`), "utf8"));
+		} catch {
+			continue;
+		}
 		if (mark?.question === q.id && typeof mark.waiting === "boolean") out.set(q.id, mark.waiting);
 	}
 	return out;

@@ -312,8 +312,8 @@ test("one office not wanting the session while no other takes its repo holds it 
   expect(internal.state.connections).toHaveLength(asked);
 });
 
-/** Two versions of the plugin in a throwaway plugin cache, Claude Code's record naming the newer, and a way to start either for session s1. */
-function versions(server = "ws://127.0.0.1:9/data-layer") {
+/** Two versions of the plugin in a throwaway plugin cache, Claude Code's record naming the newer, and a way to start either for session s1 (its transcript `lines`). */
+function versions(server = "ws://127.0.0.1:9/data-layer", lines = turn) {
   const root = tempRoot();
   const claudeDir = path.join(root, "claude");
   const plugins = path.join(claudeDir, "plugins");
@@ -328,7 +328,7 @@ function versions(server = "ws://127.0.0.1:9/data-layer") {
     fs.writeFileSync(path.join(folder(version), ".claude-plugin", "plugin.json"), JSON.stringify({ name: "isoplan", version }));
   }
   fs.writeFileSync(path.join(plugins, "installed_plugins.json"), JSON.stringify({ version: 2, plugins: { "isoplan@isoplan": [{ scope: "user", installPath: folder("0.3.0"), version: "0.3.0" }] } }));
-  const repo = session(claudeDir, root);
+  const repo = session(claudeDir, root, lines);
   fs.writeFileSync(path.join(claudeDir, "isoplan", "config.json"), JSON.stringify({ server }));
   const lock = path.join(claudeDir, "isoplan", "live", "s1.json");
   const run = (version: string, ...flags: string[]) => {
@@ -476,6 +476,39 @@ test("the session's context window reaches the office only once the hooks module
   expect(upserts()).toBe(before);
   fs.writeFileSync(file, JSON.stringify({ contextWindow: 200000 }));
   await until(() => sent().some((m) => m.upsert?.session?.contextWindow === 200000));
+});
+
+test("a question is answerable from the floor only while its wait mark says it waits; a mark emptied or half written mid-write leaves the data layer running (#68)", async () => {
+  const o = await office();
+  o.state.repos = ["github.com/team/app"];
+  const questions = [{ question: "Which branch?", header: "Branch", options: [{ label: "main", description: "Straight to main." }], multiSelect: false }];
+  const asking: Lines = (repo, now) => [
+    { type: "user", cwd: repo, timestamp: now, message: { role: "user", content: "fix the bug" } },
+    { type: "assistant", cwd: repo, timestamp: now, message: { role: "assistant", content: [{ type: "tool_use", id: "toolu_q1", name: "AskUserQuestion", input: { questions } }] } },
+  ];
+  const r = versions(o.url, asking).hooked("0.2.0");
+  await until(() => r.lines().some((l) => l.type === "waits"));
+  const mark = path.join((r.lines().find((l) => l.type === "waits") as { dir: string }).dir, "toolu_q1.json");
+  type Sent = { type: string; facts?: { questions?: { answerable?: true }[] }; upsert?: { questions?: { answerable?: true }[] } };
+  const sent = () => (o.state.connections[0]?.messages ?? []) as Sent[];
+  const answerable = () => sent().flatMap((m) => m.facts?.questions ?? m.upsert?.questions ?? []).at(-1)?.answerable === true;
+  await until(() => sent().some((m) => m.type === "full"));
+  expect(answerable()).toBe(false);
+
+  fs.writeFileSync(mark, JSON.stringify({ question: "toolu_q1", waiting: false }));
+  await wait(1500);
+  expect(answerable()).toBe(false);
+  fs.writeFileSync(mark, JSON.stringify({ question: "toolu_q1", waiting: true }));
+  await until(answerable);
+
+  // Emptied, written as null, or cut off mid-write: not marked for that pass, and the next whole mark counts.
+  for (const text of ["", "null", '{"questi']) {
+    fs.writeFileSync(mark, text);
+    await wait(700);
+  }
+  expect(answerable()).toBe(false);
+  fs.writeFileSync(mark, JSON.stringify({ question: "toolu_q1", waiting: true }));
+  await until(answerable);
 });
 
 test("a session whose hooks module can submit says it takes messages; its owner's message goes to the hooks module and the reply to the office, and anyone else's is refused", async () => {
