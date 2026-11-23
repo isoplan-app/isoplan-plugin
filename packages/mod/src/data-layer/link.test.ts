@@ -440,6 +440,38 @@ test("link: a throw in its socket handlers goes to onError, and that handler sen
   l.close();
 });
 
+test("link: a throw as it drops, or in the timer that connects it again, goes to onError too, and it tries no more (#112)", async () => {
+  const s = await server();
+  const errors: unknown[] = [];
+  // As it drops: the disconnected status line throws.
+  const { link: dropping } = link(s.url, {
+    emit: (line) => {
+      if (line.type === "status" && line.state === "disconnected") throw new Error("boom: on drop");
+    },
+    onError: (err) => errors.push(err),
+  });
+  await until(() => s.sockets.length === 1);
+  s.sockets[0]!.terminate();
+  await until(() => errors.length === 1);
+  expect(String(errors[0])).toBe("Error: boom: on drop");
+  dropping.close();
+  // As the retry timer connects it again: the connecting status line throws.
+  let connecting = 0;
+  const { link: l } = link(s.url, {
+    emit: (line) => {
+      if (line.type === "status" && line.state === "connecting" && connecting++ > 0) throw new Error("boom: on reconnect");
+    },
+    onError: (err) => errors.push(err),
+  });
+  await until(() => s.sockets.length === 2);
+  s.sockets[1]!.terminate();
+  await until(() => errors.length === 2);
+  expect(String(errors[1])).toBe("Error: boom: on reconnect");
+  await new Promise((r) => setTimeout(r, 300));
+  expect(s.sockets).toHaveLength(2);
+  l.close();
+});
+
 test("link: a runner's passes the server's expert creation suggestion messages to onExpertCreationSuggestionMessages, and sends its own only while up; without onExpertCreationSuggestionMessages they are logged", async () => {
   const runner = await server();
   const runnerHello: RunnerHelloMessage = { type: "runner", v: PROTOCOL_VERSION, account: hello.account, machine: hello.machine, canCreateExpertsFromSuggestions: true };

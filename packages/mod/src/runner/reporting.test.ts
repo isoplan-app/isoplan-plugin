@@ -19,8 +19,11 @@ import type { DataLayerLine } from "../lines.js";
 import { hookedEnv, reportSession, sessionLog, takesOver, type Ended, type ReportSessionOptions } from "../data-layer/report-session.js";
 import { lockPath } from "../wake/lock.js";
 import { watchSessions, type Reporting, type ToReport } from "./reporting.js";
+import { loadPatterns } from "./scan.js";
 
 vi.setConfig({ testTimeout: 30000 });
+
+const patterns = () => loadPatterns(path.join(modDir, "secret-patterns.json"), path.join(modDir, "missing.json"), () => {});
 
 const OTHER = 4242; // a pid that isn't this process
 const watching: Reporting[] = [];
@@ -74,7 +77,7 @@ function watch(m: ReturnType<typeof machine>, o: { isOff?: (folder: string) => P
       started.push(entry);
       void s.closed.then((why) => ((entry.stoppedFor = why), resolve({ why: "stopped" })));
     });
-  const w = watchSessions({ claudeDir: m.claudeDir, io: o.io ?? nodeIo(), config: async () => m.config, report, isOff: o.isOff ?? (async () => false), log: () => {}, gapMs: o.gapMs ?? 0, ...(o.recheckMs !== undefined && { recheckMs: o.recheckMs }), ...(o.removedFile && { removedFile: o.removedFile }), ...(o.isAlive && { isAlive: o.isAlive }), ...(o.ignored && { ignored: o.ignored }), ...(o.hooked && { hooked: (id: string) => o.hooked!.get(id) ?? null }), held: (id, hooks) => void told.push({ id, name: hooks.name }) });
+  const w = watchSessions({ claudeDir: m.claudeDir, io: o.io ?? nodeIo(), config: async () => m.config, report, isOff: o.isOff ?? (async () => false), log: () => {}, patterns, gapMs: o.gapMs ?? 0, ...(o.recheckMs !== undefined && { recheckMs: o.recheckMs }), ...(o.removedFile && { removedFile: o.removedFile }), ...(o.isAlive && { isAlive: o.isAlive }), ...(o.ignored && { ignored: o.ignored }), ...(o.hooked && { hooked: (id: string) => o.hooked!.get(id) ?? null }), held: (id, hooks) => void told.push({ id, name: hooks.name }) });
   watching.push(w);
   return { w, started, told, ids: () => started.map((s) => s.id) };
 }
@@ -449,7 +452,7 @@ test("a session whose last write and lock letting go fall between two looks isn'
 test("stop waits for a report stuck in a pass at most stopWaitMs", async () => {
   const m = machine();
   m.write("s1");
-  const w = watchSessions({ claudeDir: m.claudeDir, io: nodeIo(), config: async () => m.config, report: () => new Promise<Ended>(() => {}), isOff: async () => false, log: () => {}, gapMs: 0, stopWaitMs: 200 });
+  const w = watchSessions({ claudeDir: m.claudeDir, io: nodeIo(), config: async () => m.config, report: () => new Promise<Ended>(() => {}), isOff: async () => false, log: () => {}, patterns, gapMs: 0, stopWaitMs: 200 });
   await until(() => w.reporting().includes("s1"));
   const started = Date.now();
   await w.stop();
@@ -636,7 +639,7 @@ function runner(m: ReturnType<typeof machine>) {
     await log.flushed();
     return ended;
   };
-  const w = watchSessions({ claudeDir: m.claudeDir, io: nodeIo(), config: async () => m.config, report, isOff: async () => false, log: () => {} });
+  const w = watchSessions({ claudeDir: m.claudeDir, io: nodeIo(), config: async () => m.config, report, isOff: async () => false, log: () => {}, patterns });
   watching.push(w);
   return w;
 }
@@ -701,7 +704,7 @@ function runnerWith(m: ReturnType<typeof machine>, s1: { emit?: (line: DataLayer
     await log.flushed();
     return ended;
   };
-  const w = watchSessions({ claudeDir: m.claudeDir, io: nodeIo(), config: async () => m.config, report, isOff: async () => false, log: () => {} });
+  const w = watchSessions({ claudeDir: m.claudeDir, io: nodeIo(), config: async () => m.config, report, isOff: async () => false, log: () => {}, patterns });
   watching.push(w);
   return { w, started: (id: string) => starts.filter((s) => s === id).length };
 }
@@ -789,4 +792,38 @@ test("a session whose error text matches a secret pattern logs that it is left o
   await until(() => !w.reporting().includes("s1"));
   expect(logOf("s1")).toMatch(/something went wrong in reporting it: \(its text is left out: it matches the secret pattern /);
   expect(logOf("s1")).not.toContain(secret);
+});
+
+test("a session whose check of an office's list fails with a secret in the error logs that it is left out, not the text, and goes on (#108)", async () => {
+  const { o, m, logOf } = await twoSessions();
+  const secret = "ghp_" + "b".repeat(36);
+  const approved = {
+    repos: () => new Set(["github.com/team/app"]),
+    version: () => "v1",
+    problem: () => null,
+    // Each pass's check of the list rejects; the link's own forced check before it connects doesn't.
+    refresh: async (force?: boolean) => {
+      if (!force) throw new Error(`boom: ${secret}`);
+    },
+    ask: async () => "listed" as const,
+  };
+  const pairing = { token: async () => undefined, refused: async () => {}, close: async () => {} };
+  const { w } = runnerWith(m, { shared: () => ({ pairing, approved }) });
+  const said = () => (fs.existsSync(path.join(m.claudeDir, "isoplan", "logs", "s1.log")) ? logOf("s1") : "");
+  await until(() => said().includes("couldn't check which repos"));
+  expect(said()).toContain(`couldn't check which repos ${o.url} takes: (its text is left out: it matches the secret pattern `);
+  expect(said()).not.toContain(secret);
+  expect(w.reporting()).toContain("s1");
+});
+
+test("a report that rejects with a secret in the error: the runner's log says it is left out, not the text (#108)", async () => {
+  const m = machine();
+  const secret = "ghp_" + "c".repeat(36);
+  const logs: string[] = [];
+  m.write("s1");
+  const w = watchSessions({ claudeDir: m.claudeDir, io: nodeIo(), config: async () => m.config, report: async () => Promise.reject(new Error(`boom: ${secret}`)), isOff: async () => false, log: (text) => logs.push(text), patterns, gapMs: 0 });
+  watching.push(w);
+  await until(() => logs.some((text) => text.startsWith("couldn't report session s1")));
+  expect(logs.find((text) => text.startsWith("couldn't report session s1"))).toMatch(/^couldn't report session s1: \(its text is left out: it matches the secret pattern /);
+  expect(logs.join("\n")).not.toContain(secret);
 });
