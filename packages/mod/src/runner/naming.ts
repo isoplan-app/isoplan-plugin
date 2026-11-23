@@ -9,8 +9,9 @@
 // with the instruction on stdin between <instruction> and </instruction>, as the prompt says. Without
 // that fence and the prompt's examples, Haiku named its own directions: for the instruction in #145
 // ("Reply with one short sentence about what this repo is. Don't change any files and don't run
-// commands.") it wrote names like "Naming a session, not answering it: ..." in 10 of 10 tries; fenced,
-// with the examples, in none of 10 (23 Nov 2026, Claude Code 2.1.330).
+// commands.") it wrote names like "Naming a session, not carrying out the request: ..." in 3 of 10
+// tries, and fenced but without the examples and the prompt's "not for you", in 8 of 8; as it is now,
+// in none of 10 (23 Nov 2026, Claude Code 2.1.330, run from the OS's temp folder as here).
 //
 // As the answerer's fork (claude.ts), it has no tools and no MCP
 // servers, reads no settings file, so no plugin loads in it, runs no hook (NO_HOOKS, since the
