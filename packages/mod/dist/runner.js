@@ -16300,17 +16300,42 @@ function cleanTitle(reply) {
 }
 /**
 * The title call due now, or null: when the session is titled by its branch, its inputs changed
-* since its last written title, and its last ask was at least ASK_EVERY_MS ago.
+* since its last written title, and its last ask was at least ASK_EVERY_MS ago. An input the scan
+* matches is left out of it; with `patterns` null there is none.
 */
-function nextTitle(facts, cache, now) {
-	if (facts.session.titleFrom !== "branch") return null;
-	const inputs = titleInputs(facts);
+function nextTitle(facts, cache, now, patterns) {
+	if (facts.session.titleFrom !== "branch" || !patterns) return null;
+	const clean = (text) => !scan(text, patterns);
+	const all = titleInputs(facts);
+	const inputs = {
+		branch: all.branch && clean(all.branch) ? all.branch : null,
+		files: all.files.filter(clean),
+		types: all.types.filter(clean),
+		tasks: all.tasks.filter(clean)
+	};
 	if (!inputs.branch && !inputs.files.length && !inputs.tasks.length) return null;
 	const key = titleKey(inputs);
 	if (cache && (cache.key === key || now - cache.at < ASK_EVERY_MS)) return null;
 	return {
 		key,
 		prompt: titlePrompt(inputs)
+	};
+}
+/**
+* The facts with the session's title secret-checked: one the scan matches, and every one while
+* `patterns` is null, goes out as WORKFLOW_WITHHELD.
+*/
+function prepareTitle(facts, patterns, log) {
+	const title = facts.session.title;
+	const matched = title ? scan(title, patterns) : null;
+	if (!matched) return facts;
+	log(`withheld the session's title: ${patterns ? `it matches the secret pattern "${matched}"` : "the secret patterns couldn't be read"}`);
+	return {
+		...facts,
+		session: {
+			...facts.session,
+			title: WORKFLOW_WITHHELD
+		}
 	};
 }
 const cmp = (a, b) => a < b ? -1 : a > b ? 1 : 0;
@@ -20210,7 +20235,7 @@ async function reporting(o, c) {
 		});
 		said.add(text);
 	};
-	const outgoing = (run, facts, patterns) => prepareWorkflows(prepareQuestions(run.hold.apply(facts, patterns), patterns, marks, patternLog, answersLate), patterns, patternLog);
+	const outgoing = (run, facts, patterns) => prepareTitle(prepareWorkflows(prepareQuestions(run.hold.apply(facts, patterns), patterns, marks, patternLog, answersLate), patterns, patternLog), patterns, patternLog);
 	let checkouts = {};
 	let answered = (_id) => false;
 	let contextWindow = null;
@@ -20557,6 +20582,10 @@ async function reporting(o, c) {
 			continue;
 		}
 		factsSession = read.facts.session.id;
+		const patterns = await loadPatterns(modPatterns, ownerPatterns, patternLog).catch((err) => {
+			patternLog(`couldn't read the secret patterns, so every report is withheld: ${String(err?.message ?? err)}`);
+			return null;
+		});
 		const reply = await takeReply(titleFile);
 		if (reply) {
 			const text = reply.key === asked ? cleanTitle(reply.text) : null;
@@ -20567,7 +20596,7 @@ async function reporting(o, c) {
 			};
 		}
 		const named = read.facts.session.titleFrom === "branch" ? await drivenName(registryPath(claudeDir), read.facts.session.id) : null;
-		const ask = named ? null : nextTitle(read.facts, title, now);
+		const ask = named ? null : nextTitle(read.facts, title, now, patterns);
 		if (ask && await fs.mkdir(titlesDir, { recursive: true }).then(() => true, () => false)) {
 			title = {
 				key: title?.key ?? null,
@@ -20613,10 +20642,6 @@ async function reporting(o, c) {
 		if (facts.session.title) o.titled?.(facts.session.title);
 		checkouts = read.checkouts ?? {};
 		answered = read.answered ?? answered;
-		const patterns = await loadPatterns(modPatterns, ownerPatterns, patternLog).catch((err) => {
-			patternLog(`couldn't read the secret patterns, so every report is withheld: ${String(err?.message ?? err)}`);
-			return null;
-		});
 		marks = hooked ? await waitsOf(waitsDir, facts) : /* @__PURE__ */ new Map();
 		shown = [facts, patterns];
 		for (const run of taking) try {

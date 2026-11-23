@@ -17,6 +17,7 @@ import { reportSession, sessionLog, startDetached, systemPlaces, type ReportSess
 import type { DataLayerLine } from "../lines.js";
 import { WebSocketServer } from "ws";
 import { modDir, tempRoot } from "./fixture.js";
+import { WORKFLOW_WITHHELD } from "./workflows.js";
 
 vi.setConfig({ testTimeout: 30000 });
 
@@ -384,7 +385,7 @@ function versions(server = "ws://127.0.0.1:9/data-layer", lines = turn) {
     reporting.push({ stop, done });
     return { lines: () => out as (DataLayerLine & { text?: string })[], done, stop };
   };
-  return { claudeDir, lock, run, hooked, holder: () => (fs.existsSync(lock) ? (JSON.parse(fs.readFileSync(lock, "utf8")).pid as number) : null) };
+  return { claudeDir, repo, lock, run, hooked, holder: () => (fs.existsSync(lock) ? (JSON.parse(fs.readFileSync(lock, "utf8")).pid as number) : null) };
 }
 
 test("for a hooks module on a copy an update left behind, the runner says so once, installs nothing and checks for nothing; dist/data-layer.js started --detached by an older wake hook ends at once, saying why in the session's log", async () => {
@@ -508,6 +509,32 @@ test("the session's context window reaches the office only once the hooks module
   expect(upserts()).toBe(before);
   fs.writeFileSync(file, JSON.stringify({ contextWindow: 200000 }));
   await until(() => sent().some((m) => m.upsert?.session?.contextWindow === 200000));
+});
+
+test("a secret planted in a subagent's task can't come out in the session's title: the title call leaves the task out, and a title that carries it anyway reaches the office hidden (#189)", async () => {
+  const o = await office();
+  o.state.repos = ["github.com/team/app"];
+  const v = versions(o.url);
+  const secret = "AKIAABCDEFGHIJKLMNOP";
+  const subagents = path.join(v.claudeDir, "projects", v.repo.replace(/[^a-zA-Z0-9]/g, "-"), "s1", "subagents");
+  fs.mkdirSync(subagents, { recursive: true });
+  for (const [id, task] of [["a0000000000000001", `push with ${secret}`], ["a0000000000000002", "read the docs"]]) {
+    fs.writeFileSync(path.join(subagents, `agent-${id}.meta.json`), JSON.stringify({ agentType: "general-purpose", description: task }));
+    fs.writeFileSync(path.join(subagents, `agent-${id}.jsonl`), jsonl(turn(v.repo, new Date().toISOString())));
+  }
+  const r = v.hooked("0.2.0");
+  await until(() => r.lines().some((l) => l.type === "title-ask"));
+  const ask = r.lines().find((l) => l.type === "title-ask") as Extract<DataLayerLine, { type: "title-ask" }>;
+  expect(ask.prompt).toContain("- read the docs");
+  expect(ask.prompt).not.toContain(secret);
+
+  // A model that copied the secret into the title anyway, as the hooks module writes its reply.
+  fs.writeFileSync(ask.file, JSON.stringify({ key: ask.key, text: `Pushing ${secret}` }));
+  type Sent = { facts?: { session: Record<string, unknown> }; upsert?: { session?: Record<string, unknown> } };
+  const sent = () => (o.state.connections[0]?.messages ?? []) as Sent[];
+  await until(() => sent().some((m) => (m.facts ?? m.upsert)?.session?.title === WORKFLOW_WITHHELD));
+  expect(JSON.stringify(sent())).not.toContain(secret);
+  expect(r.lines()).toContainEqual({ type: "log", text: 'withheld the session\'s title: it matches the secret pattern "AWS access key id"' });
 });
 
 test("a question is answerable from the floor only while its wait mark says it waits; a mark emptied or half written mid-write leaves the data layer running (#68)", async () => {
