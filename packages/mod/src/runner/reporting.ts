@@ -4,6 +4,15 @@
 // and reports each session in its own process (report-session.ts), one link per session to each
 // office.
 //
+// A look reads the write time only of the transcripts that may have something to do (#105). Each
+// project folder is watched with fs.watch, not recursively: on Linux Node watches every file of the
+// tree for that. A transcript quiet past the look's window, not reported and with no hooks module,
+// is looked at again once its folder's watcher names it, and a folder whose watcher saw nothing is
+// listed again only at the next full look. Every look is full for a folder that can't be watched,
+// and every FULL_LOOK_MS for all of them, for a write a watcher missed (fs.watch misses changes on
+// some file systems). On Windows a folder removed while watched names itself over and over until
+// its watcher closes, so it closes at once.
+//
 // A session whose hooks module is connected (`hooked`) is reported for that hooks module as soon as
 // its transcript is there, however long ago it was written, and as long as the connection lasts.
 // When the session's hooks module connects, changes (another window, a reload) or goes, the report
@@ -54,11 +63,12 @@
 // trunks, which run under the experts folder and never leave this machine. It is asked first by id
 // (the folder may not be known yet), and again once the transcript names a folder.
 
+import { watch, type FSWatcher } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { approvedFiles, freshRepos, readApproved } from "../data-layer/approved-file.js";
 import { officesOf, type Config } from "../data-layer/config.js";
-import type { NodeIo } from "../data-layer/io.js";
+import type { DirEntry, NodeIo } from "../data-layer/io.js";
 import { hookedEnv, lockFreshMs, outdatedCopy, takesOver, type Ended } from "../data-layer/report-session.js";
 import { SUPERSEDED_RECHECK_MS } from "../lines.js";
 import { alive, lockPath, readLock } from "../wake/lock.js";
@@ -71,6 +81,8 @@ export const GAP_MS = 250;
 // How long stop() waits for its reports to end: one stuck in a pass (a slow git call or office)
 // is left behind, so the runner's worker still exits.
 export const STOP_WAIT_MS = 5000;
+// How often a look reads every transcript's write time, watched or not (see above).
+export const FULL_LOOK_MS = 60000;
 
 /** One session for `report`: it reports it until `closed` settles, or until it should stop. */
 export interface ToReport<H = unknown> {
@@ -119,6 +131,7 @@ export interface ReportingOptions<H extends HookedSession = HookedSession> {
   recheckMs?: number;
   /** Where the sessions ended and removed are kept, each with its transcript's write time then (see above). */
   removedFile?: string;
+  fullLookMs?: number;
 }
 
 export interface Reporting {
@@ -162,6 +175,14 @@ interface Seen {
   toldAt: number | null;
 }
 
+/** A project folder as the last look listed it, and what its watcher saw since. */
+interface Folder {
+  watcher: FSWatcher | null;
+  /** The names written since the last look; null for any of them (just watched, or a change it couldn't name). */
+  written: Set<string> | null;
+  entries: DirEntry[] | null;
+}
+
 const HEAD_BYTES = 65536;
 
 /** The first folder a transcript's lines name, from its first and last 64 KB. */
@@ -185,9 +206,33 @@ const changed = (from: unknown, to: unknown) =>
   !to ? "its hooks module's link to the runner closed" : !from ? "its hooks module connected to the runner, which reports it for that hooks module now" : "another hooks module has the session now (another window, or a reload)";
 
 export function watchSessions<H extends HookedSession>(o: ReportingOptions<H>): Reporting {
-  const { claudeDir, io, isAlive = alive, pid = process.pid, gapMs = GAP_MS, stopWaitMs = STOP_WAIT_MS, recheckMs = SUPERSEDED_RECHECK_MS } = o;
+  const { claudeDir, io, isAlive = alive, pid = process.pid, gapMs = GAP_MS, stopWaitMs = STOP_WAIT_MS, recheckMs = SUPERSEDED_RECHECK_MS, fullLookMs = FULL_LOOK_MS } = o;
   const projectsDir = path.join(claudeDir, "projects");
   const seen = new Map<string, Seen>();
+  const folders = new Map<string, Folder>();
+  let fullAt = 0;
+  const unwatch = (folder: Folder) => {
+    folder.watcher?.close();
+    folder.watcher = null;
+  };
+  /** The folder, watched from now on if it can be. */
+  const watched = (name: string) => {
+    let folder = folders.get(name);
+    if (!folder) folders.set(name, (folder = { watcher: null, written: null, entries: null }));
+    if (folder.watcher || stopped) return folder;
+    const f = folder;
+    try {
+      f.watcher = watch(path.join(projectsDir, name), { persistent: false }, (_, file) => {
+        if (file && path.isAbsolute(file)) unwatch(f); // removed, on Windows
+        else if (file) f.written?.add(file);
+        else f.written = null;
+      }).on("error", () => unwatch(f));
+      f.written = null;
+    } catch {
+      // Out of watches, say: its transcripts are looked at every look.
+    }
+    return f;
+  };
   // The sessions whose report stopped for a change of hooks module, to look again once it has ended.
   const rehooked = new Set<string>();
   let first = true;
@@ -290,20 +335,31 @@ export function watchSessions<H extends HookedSession>(o: ReportingOptions<H>): 
     })());
     const quiet: [string, Seen, string][] = [];
     const recent: [string, Seen, string][] = []; // on the first look, those to start once the hooks modules have said hello
+    const full = first || now - fullAt >= fullLookMs;
+    if (full) fullAt = now;
+    const listed = new Set<string>();
     for (const dir of await io.listDir(projectsDir)) {
       if (!dir.isDir) continue;
-      for (const entry of await io.listDir(path.join(projectsDir, dir.name))) {
+      listed.add(dir.name);
+      const folder = watched(dir.name);
+      // Taken before the folder is listed, so a write from now on is in the next look's.
+      const written = full || !folder.watcher ? null : folder.written;
+      folder.written = new Set();
+      const entries = (written?.size === 0 && folder.entries) || (folder.entries = await io.listDir(path.join(projectsDir, dir.name)));
+      for (const entry of entries) {
         const id = entry.name.slice(0, -".jsonl".length);
         // The id names a file in the live folder, so it must be a plain name.
         if (entry.isDir || !entry.name.endsWith(".jsonl") || !/^[\w-]+$/.test(id)) continue;
         if (o.ignored?.(id, seen.get(id)?.cwd ?? null)) continue;
+        const hooks = o.hooked?.(id) ?? null;
+        let s = seen.get(id);
+        // Not written since the last look, which left it as it would leave it now.
+        if (written && !written.has(entry.name) && s && !s.running && !hooks && s.mtimeMs < now - windowMs) continue;
         const file = path.join(projectsDir, dir.name, entry.name);
         const st = await io.stat(file);
         if (!st) continue;
-        let s = seen.get(id);
         if (!s) seen.set(id, (s = { file, mtimeMs: st.mtimeMs, size: st.size, cwd: null, running: null, endedFor: null, queued: false, endedAt: null, holdOff: null, notWanted: {}, held: false, tookBack: null, told: null, toldAt: null }));
         Object.assign(s, { file, mtimeMs: st.mtimeMs, size: st.size });
-        const hooks = o.hooked?.(id) ?? null;
         const removedAt = removed.get(id);
         if (removedAt !== undefined) {
           if (!hooks && st.mtimeMs <= removedAt) continue;
@@ -380,6 +436,11 @@ export function watchSessions<H extends HookedSession>(o: ReportingOptions<H>): 
         else start(id, s, s.cwd);
       }
     }
+    for (const [name, folder] of folders) {
+      if (listed.has(name)) continue;
+      unwatch(folder);
+      folders.delete(name);
+    }
     if (first && (recent.length || quiet.length)) {
       for (const [, s] of [...recent, ...quiet]) s.queued = true;
       const startQueued = ([id, s, cwd]: [string, Seen, string]) => {
@@ -402,7 +463,8 @@ export function watchSessions<H extends HookedSession>(o: ReportingOptions<H>): 
 
   // One look at a time: a look asked for while one is under way is that one.
   let looking: Promise<void> | null = null;
-  const lookOnce = () => (looking ??= look().finally(() => (looking = null)));
+  // One that failed may have taken writes its watchers saw: the next is full.
+  const lookOnce = () => (looking ??= look().catch((err: unknown) => ((fullAt = 0), Promise.reject(err))).finally(() => (looking = null)));
   const next = async () => {
     let seconds = 1;
     try {
@@ -449,6 +511,7 @@ export function watchSessions<H extends HookedSession>(o: ReportingOptions<H>): 
     async stop() {
       stopped = true;
       if (timer) clearTimeout(timer);
+      for (const folder of folders.values()) unwatch(folder);
       const running = [...seen.values()].flatMap((s) => s.running ?? []);
       for (const r of running) r.stop("the runner stopped");
       let timeout: ReturnType<typeof setTimeout> | undefined;

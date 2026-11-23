@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import http from "node:http";
-import fs$1, { realpath, statSync } from "node:fs";
+import fs$1, { realpath, statSync, watch } from "node:fs";
 import { promisify } from "node:util";
 import net from "node:net";
 //#region ../protocol/src/area-covers.ts
@@ -20804,6 +20804,7 @@ async function takeReply(file) {
 /** How long after a `superseded` line its hooks module tries again (src/hooks/register.ts). */
 const SUPERSEDED_RECHECK_MS = 6e4;
 const STOP_WAIT_MS = 5e3;
+const FULL_LOOK_MS = 6e4;
 const HEAD_BYTES = 65536;
 /** The first folder a transcript's lines name, from its first and last 64 KB. */
 async function cwdOf(io, file, size) {
@@ -20819,9 +20820,35 @@ async function cwdOf(io, file, size) {
 /** Why a report for hooks module `from` stops when the session has `to` (either none), as its log says it. */
 const changed = (from, to) => !to ? "its hooks module's link to the runner closed" : !from ? "its hooks module connected to the runner, which reports it for that hooks module now" : "another hooks module has the session now (another window, or a reload)";
 function watchSessions(o) {
-	const { claudeDir, io, isAlive = alive, pid = process.pid, gapMs = 250, stopWaitMs = STOP_WAIT_MS, recheckMs = SUPERSEDED_RECHECK_MS } = o;
+	const { claudeDir, io, isAlive = alive, pid = process.pid, gapMs = 250, stopWaitMs = STOP_WAIT_MS, recheckMs = SUPERSEDED_RECHECK_MS, fullLookMs = FULL_LOOK_MS } = o;
 	const projectsDir = path.join(claudeDir, "projects");
 	const seen = /* @__PURE__ */ new Map();
+	const folders = /* @__PURE__ */ new Map();
+	let fullAt = 0;
+	const unwatch = (folder) => {
+		folder.watcher?.close();
+		folder.watcher = null;
+	};
+	/** The folder, watched from now on if it can be. */
+	const watched = (name) => {
+		let folder = folders.get(name);
+		if (!folder) folders.set(name, folder = {
+			watcher: null,
+			written: null,
+			entries: null
+		});
+		if (folder.watcher || stopped) return folder;
+		const f = folder;
+		try {
+			f.watcher = watch(path.join(projectsDir, name), { persistent: false }, (_, file) => {
+				if (file && path.isAbsolute(file)) unwatch(f);
+				else if (file) f.written?.add(file);
+				else f.written = null;
+			}).on("error", () => unwatch(f));
+			f.written = null;
+		} catch {}
+		return f;
+	};
 	const rehooked = /* @__PURE__ */ new Set();
 	let first = true;
 	let stopped = false;
@@ -20919,16 +20946,26 @@ function watchSessions(o) {
 		})());
 		const quiet = [];
 		const recent = [];
+		const full = first || now - fullAt >= fullLookMs;
+		if (full) fullAt = now;
+		const listed = /* @__PURE__ */ new Set();
 		for (const dir of await io.listDir(projectsDir)) {
 			if (!dir.isDir) continue;
-			for (const entry of await io.listDir(path.join(projectsDir, dir.name))) {
+			listed.add(dir.name);
+			const folder = watched(dir.name);
+			const written = full || !folder.watcher ? null : folder.written;
+			folder.written = /* @__PURE__ */ new Set();
+			const entries = written?.size === 0 && folder.entries || (folder.entries = await io.listDir(path.join(projectsDir, dir.name)));
+			for (const entry of entries) {
 				const id = entry.name.slice(0, -6);
 				if (entry.isDir || !entry.name.endsWith(".jsonl") || !/^[\w-]+$/.test(id)) continue;
 				if (o.ignored?.(id, seen.get(id)?.cwd ?? null)) continue;
+				const hooks = o.hooked?.(id) ?? null;
+				let s = seen.get(id);
+				if (written && !written.has(entry.name) && s && !s.running && !hooks && s.mtimeMs < now - windowMs) continue;
 				const file = path.join(projectsDir, dir.name, entry.name);
 				const st = await io.stat(file);
 				if (!st) continue;
-				let s = seen.get(id);
 				if (!s) seen.set(id, s = {
 					file,
 					mtimeMs: st.mtimeMs,
@@ -20950,7 +20987,6 @@ function watchSessions(o) {
 					mtimeMs: st.mtimeMs,
 					size: st.size
 				});
-				const hooks = o.hooked?.(id) ?? null;
 				const removedAt = removed.get(id);
 				if (removedAt !== void 0) {
 					if (!hooks && st.mtimeMs <= removedAt) continue;
@@ -21022,6 +21058,11 @@ function watchSessions(o) {
 				else start(id, s, s.cwd);
 			}
 		}
+		for (const [name, folder] of folders) {
+			if (listed.has(name)) continue;
+			unwatch(folder);
+			folders.delete(name);
+		}
 		if (first && (recent.length || quiet.length)) {
 			for (const [, s] of [...recent, ...quiet]) s.queued = true;
 			const startQueued = ([id, s, cwd]) => {
@@ -21042,7 +21083,7 @@ function watchSessions(o) {
 		first = false;
 	};
 	let looking = null;
-	const lookOnce = () => looking ??= look().finally(() => looking = null);
+	const lookOnce = () => looking ??= look().catch((err) => (fullAt = 0, Promise.reject(err))).finally(() => looking = null);
 	const next = async () => {
 		let seconds = 1;
 		try {
@@ -21091,6 +21132,7 @@ function watchSessions(o) {
 		async stop() {
 			stopped = true;
 			if (timer) clearTimeout(timer);
+			for (const folder of folders.values()) unwatch(folder);
 			const running = [...seen.values()].flatMap((s) => s.running ?? []);
 			for (const r of running) r.stop("the runner stopped");
 			let timeout;
