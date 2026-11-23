@@ -657,6 +657,14 @@ test("runner.json: a wait too long for a timer waits about 12 days, even taken t
   expect(2 * s.drivenCloseSeconds * 1000).toBeLessThanOrEqual(2 ** 31 - 1);
 });
 
+test("runner.json: a session's name may be held to no fewer than 3 words, as the naming prompt asks for at least that many", async () => {
+  const user = path.join(tempRoot(), "runner.json");
+  fs.writeFileSync(user, JSON.stringify({ namingMaxWords: 2 }));
+  expect((await loadSettings<{ namingMaxWords: number }>(nodeIo(), path.join(modDir, "runner.json"), user)).namingMaxWords).toBe(6);
+  fs.writeFileSync(user, JSON.stringify({ namingMaxWords: 3 }));
+  expect((await loadSettings<{ namingMaxWords: number }>(nodeIo(), path.join(modDir, "runner.json"), user)).namingMaxWords).toBe(3);
+});
+
 test("secret patterns: the owner's file adds patterns", async () => {
   const owner = path.join(tempRoot(), "secret-patterns.json");
   fs.writeFileSync(owner, JSON.stringify({ patterns: [{ name: "internal host", regex: "corp\.internal" }] }));
