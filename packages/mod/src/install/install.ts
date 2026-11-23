@@ -270,11 +270,12 @@ async function finishOptOut({ claudeDir, settings }: Paths): Promise<string[]> {
 // handoffs' briefs and launchers (handoffs/), the hooks module's record of each session's context
 // window (windows/), each office's list of repos and pairing lock (offices/),
 // the one list and lock a version before #105 kept (approved.json, pairing.lock), the update
-// check's record and lock (src/update), the launchers and tasks of starts outside the floor
-// (starts/), owner messages waiting for their session (messages/), GitHub repos' current names
-// (remote-names.json), and the empty folder git runs with as its hooks (no-hooks/). Removed before
-// the hooks. clones/, experts/ and the folder runner.json's clonesFolder names are kept.
-const WRITTEN = ["runner", "pipe", "pairing.json", "pairing.lock", "pairing.write.lock", "live", "logs", "titles", "released", "waits", "answers", "handoffs", "windows", "offices", "approved.json", "update.json", "update.lock", "starts", "messages", "remote-names.json", "no-hooks"];
+// check's record and lock (src/update), the locks of a link handler's or login item's registration
+// that was killed part way (link-handler.lock, login-item.lock), the launchers and tasks of starts
+// outside the floor (starts/), owner messages waiting for their session (messages/), GitHub repos'
+// current names (remote-names.json), and the empty folder git runs with as its hooks (no-hooks/).
+// Removed before the hooks. clones/, experts/ and the folder runner.json's clonesFolder names are kept.
+const WRITTEN = ["runner", "pipe", "pairing.json", "pairing.lock", "pairing.write.lock", "live", "logs", "titles", "released", "waits", "answers", "handoffs", "windows", "offices", "approved.json", "update.json", "update.lock", "link-handler.lock", "login-item.lock", "starts", "messages", "remote-names.json", "no-hooks"];
 // What a session's data layer writes as it runs, so may come back during an uninstall.
 const SESSION_TRACES = ["live", "titles", "released", "waits", "answers", "windows", "offices", "approved.json", "update.json", "update.lock", "messages"];
 
