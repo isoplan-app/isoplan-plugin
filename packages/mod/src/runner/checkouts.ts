@@ -166,11 +166,9 @@ export async function branchFolder(run: RunGit, checkout: string, branch: string
   const git = (args: string[]) => run(args, { cwd: checkout, timeoutMs });
   const head = await git(["symbolic-ref", "-q", "--short", "HEAD"]);
   if (head.code === 0 && head.stdout.trim() === branch) return checkout;
+  // One on the branch whose folder was deleted by hand is pruned by worktreeOn, which frees the branch.
   const existing = await worktreeOn(run, checkout, branch, timeoutMs);
-  const isDir = (p: string) => fs.stat(p).then((s) => s.isDirectory(), () => false);
-  if (existing && (await isDir(existing))) return spelledAs(checkout, existing);
-  // A worktree on the branch whose folder was deleted by hand: git still holds the branch for it until pruned.
-  if (existing) await git(["worktree", "prune"]);
+  if (existing) return spelledAs(checkout, existing);
   const hooksOff = await noHooks();
   const main = normalize(checkout);
   const base = `${main}-branch-${asName(branch)}`;

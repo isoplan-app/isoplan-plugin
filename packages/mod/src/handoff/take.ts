@@ -10,7 +10,8 @@
 //    holds work that isn't in it: uncommitted changes to tracked files, or any commit that is neither
 //    in the new tip nor one of the commits this machine took of this handoff before (taken.json in
 //    the handoff's folder). Then it is left as it is and the take is refused with a note. A local
-//    branch is never reset over such commits.
+//    branch is never reset over such commits. One whose folder was deleted by hand is pruned from
+//    git's worktrees, which still hold its branch, and made again.
 // 3. The setup script (E11): `worktreeSetup` in isoplan.json at the repo's top, read from the
 //    receiver's own copy of the remote's default branch, and never from any other branch, so neither
 //    the handoff nor whatever the clone has checked out can change what runs. When the default branch
@@ -1159,19 +1160,28 @@ async function worktreeFor(run: RunGit, clone: string, remote: string, branch: s
       const extra = await ahead(run, clone, tip, exempt, `refs/heads/${branch}`, timeoutMs);
       if (extra !== 0) return { error: `The local branch ${branch} in ${clone} has ${extra ?? "some"} commit(s) that aren't in the handoff as handed over now, so no worktree was made over it. Push or move them, then take the handoff again.` };
     }
+    // A worktree whose folder was deleted by hand still holds its path and branch in git until pruned.
+    await run(["worktree", "prune"], { cwd: clone, timeoutMs });
     const r = await run([...hooksOff, "worktree", "add", "--track", "-B", branch, dir, `${remote}/${branch}`], { cwd: clone, timeoutMs, env: NO_LFS });
     return r.code === 0 ? dir : { error: `git worktree add ${dir} failed${r.timedOut ? " (it took too long)" : ""}:\n${r.stderr}` };
   }
   return { error: `${base} and the next eight names beside it are taken by other folders` };
 }
 
-/** The worktree, other than the main checkout, that has `branch` checked out, or null. */
+/**
+ * The worktree, other than the main checkout, that has `branch` checked out, or null. One whose
+ * folder was deleted by hand is pruned, so git no longer holds the branch for it, and isn't returned.
+ */
 export async function worktreeOn(run: RunGit, clone: string, branch: string, timeoutMs: number): Promise<string | null> {
   const listed = await run(["worktree", "list", "--porcelain"], { cwd: clone, timeoutMs });
   if (listed.code !== 0) return null;
   const blocks = listed.stdout.split(/\r?\n\r?\n/).slice(1).map((b) => b.split(/\r?\n/));
   const at = blocks.find((lines) => lines.includes(`branch refs/heads/${branch}`))?.find((line) => line.startsWith("worktree "));
-  return at ? path.resolve(at.slice("worktree ".length)) : null;
+  if (!at) return null;
+  const dir = path.resolve(at.slice("worktree ".length));
+  if (await fs.stat(dir).then((s) => s.isDirectory(), () => false)) return dir;
+  await run(["worktree", "prune"], { cwd: clone, timeoutMs });
+  return null;
 }
 
 // `dir` known to Orca as a project, added when it isn't: the problem, else null.
