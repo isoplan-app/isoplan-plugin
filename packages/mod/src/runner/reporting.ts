@@ -62,6 +62,7 @@ import type { NodeIo } from "../data-layer/io.js";
 import { hookedEnv, lockFreshMs, outdatedCopy, takesOver, type Ended } from "../data-layer/report-session.js";
 import { SUPERSEDED_RECHECK_MS } from "../lines.js";
 import { alive, lockPath, readLock } from "../wake/lock.js";
+import { errorText, type Pattern } from "./scan.js";
 
 // On its first look, the gap between starting two sessions that are already quiet, so each is
 // mostly reported before the next starts; those still at work start together, once the first look's
@@ -107,6 +108,8 @@ export interface ReportingOptions<H extends HookedSession = HookedSession> {
   /** Whether a session is never reported (an expert's trunk); `cwd` is null while its transcript names no folder yet. */
   ignored?: (sessionId: string, cwd: string | null) => boolean;
   log: (text: string) => void;
+  /** The secret patterns a report's error is checked against before `log` says it (scan.ts errorText). */
+  patterns: () => Promise<Pattern[] | null>;
   isAlive?: (pid: number) => boolean;
   /** This process's pid, which its sessions' locks name. */
   pid?: number;
@@ -230,7 +233,7 @@ export function watchSessions<H extends HookedSession>(o: ReportingOptions<H>): 
             s.notWanted = ended.holdOff.notWanted;
           }
         },
-        (err: unknown) => o.log(`couldn't report session ${id}: ${String((err as Error)?.stack ?? err)}`),
+        async (err: unknown) => o.log(`couldn't report session ${id}: ${errorText(err, await o.patterns().catch(() => null))}`),
       )
       .finally(async () => {
         if (hooks) {

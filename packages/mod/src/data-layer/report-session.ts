@@ -247,8 +247,8 @@ export interface Ended {
 
 /**
  * What keeps an error in reporting one session to that session, in the runner (#104): a throw in a
- * callback the session's links run or in a link's own socket handlers and pacing timer (onError in
- * link.ts), or the rejection of a promise nothing waits for, ends this
+ * callback the session's links run or in a link's own socket handlers, timers and promise callbacks
+ * (onError in link.ts, #112), or the rejection of a promise nothing waits for, ends this
  * session alone at its next wait, and a throw in its own loop at once; either way its links close,
  * its lock goes and its log says why, the error's text checked for secrets first.
  */
@@ -258,6 +258,8 @@ interface Containment {
   /** Why it ended; null while no error has ended it. */
   why(): Promise<string> | null;
   fail(err: unknown): void;
+  /** An error's message for a log line that doesn't end the session, checked for secrets as `fail`'s text is (#108). */
+  message(err: unknown): Promise<string>;
   /** `fn`, whose throw ends the session (`fallback` is returned in its place) rather than reaching the process. */
   guard<A extends unknown[], R = void>(fn: (...args: A) => R, fallback?: R): (...args: A) => R;
   /** A promise nothing waits for, whose rejection ends the session. */
@@ -279,6 +281,10 @@ function contained(patterns: () => Promise<Pattern[] | null>): Containment {
         .then((p) => `something went wrong in reporting it: ${errorText(err, p)}`);
       failed();
     },
+    message: (err) =>
+      patterns()
+        .catch(() => null)
+        .then((p) => errorText(String((err as Error)?.message ?? err), p)),
     guard:
       (fn, fallback) =>
       (...args) => {
@@ -439,7 +445,7 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
       const checked = await checkForUpdate({ claudeDir, settings: paths.settings, plugins: place.plugins, id: pluginId, cwd: project, claude: claudeCommand(binary), env: commandEnv(env, await gitChoices(project)), gapMs });
       for (const text of checked.said) emit({ type: "log", text: `update check: ${text}` });
     })()
-      .catch((err: unknown) => emit({ type: "log", text: `couldn't check for a newer version of the plugin: ${String((err as Error)?.message ?? err)}` }))
+      .catch(async (err: unknown) => emit({ type: "log", text: `couldn't check for a newer version of the plugin: ${await c.message(err)}` }))
       .finally(() => (checking = false)));
   };
   checkUpdate(START_GAP_MS);
@@ -526,7 +532,7 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
             })
             // A word that came later still, or not at all, is left over: it goes.
             .finally(() => fs.rm(file, { force: true }).catch(() => {}))
-            .catch((err: unknown) => emit({ type: "log", text: `couldn't pass the owner's answer on: ${String((err as Error)?.message ?? err)}` })));
+            .catch(async (err: unknown) => emit({ type: "log", text: `couldn't pass the owner's answer on: ${await c.message(err)}` })));
           return;
         }
         if (message.type === "request" && message.kind === "owner-message") {
@@ -535,7 +541,7 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
           c.watch(relayOwnerMessage(message, { detached: !hooked, takes: takesMessages, owner: account.id, session: sessionId, file, emit, take: takeFile })
             .then((answer) => run.gate.current()?.send(answer))
             .finally(() => fs.rm(file, { force: true }).catch(() => {}))
-            .catch((err: unknown) => emit({ type: "log", text: `couldn't pass the owner's message on: ${String((err as Error)?.message ?? err)}` })));
+            .catch(async (err: unknown) => emit({ type: "log", text: `couldn't pass the owner's message on: ${await c.message(err)}` })));
           return;
         }
         if (message.type !== "release") return emit({ type: "log", text: `the office server sent a ${message.type} message, which this data layer doesn't handle yet` });
@@ -613,7 +619,7 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
     (run.homing ??= run.gate
       .home(projects)
       .then((gated) => void (run.result = { dormancy: gated.dormancy, projects, workspace }))
-      .catch((err: unknown) => emit({ type: "log", text: `couldn't check which repos ${run.office.server} takes: ${String((err as Error)?.message ?? err)}` }))
+      .catch(async (err: unknown) => emit({ type: "log", text: `couldn't check which repos ${run.office.server} takes: ${await c.message(err)}` }))
       .finally(() => (run.homing = null)));
   const apply = (run: OfficeRun) => {
     if (!run.result) return;
@@ -790,7 +796,7 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
       try {
         run.gate.link()?.update((run.sent = outgoing(run, facts, patterns)));
       } catch (err) {
-        emit({ type: "log", text: `couldn't send this session's facts to ${run.office.server}: ${String((err as Error)?.message ?? err)}` });
+        emit({ type: "log", text: `couldn't send this session's facts to ${run.office.server}: ${await c.message(err)}` });
       }
     }
     // The areas each office may be told of, for the runner's expert creation suggestions: in a workspace only its
@@ -806,7 +812,7 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
         try {
           o.areas({ server: run.office.server, session: facts.session.id, bare: sessionId, project: run.home, checkout: facts.session.checkout ?? cwd, window: contextWindow, model, areas, said: read.said ?? (async () => []) });
         } catch (err) {
-          emit({ type: "log", text: `couldn't look at this session's areas for an expert creation suggestion: ${String((err as Error)?.message ?? err)}` });
+          emit({ type: "log", text: `couldn't look at this session's areas for an expert creation suggestion: ${await c.message(err)}` });
         }
       }
     }
