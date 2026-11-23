@@ -9,6 +9,10 @@
     "isolatedModules": true,
     "skipLibCheck": true,
     "declaration": true,
-    "sourceMap": true
+    "sourceMap": true,
+    // Typecheck against the protocol's source, not its dist/, so a fresh checkout typechecks with no build first.
+    "paths": {
+      "@isoplan/protocol": ["./packages/protocol/src/index.ts"]
+    }
   }
 }
