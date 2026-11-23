@@ -962,11 +962,17 @@ async function writeLog(file: string, text: string): Promise<void> {
 }
 
 // The open questions the hooks module marked, each in <dir>/<call id>.json, and whether it still waits on each.
+// A mark that doesn't parse may still be being written: it counts as not marked until the next pass.
 async function waitsOf(dir: string, facts: Facts): Promise<Map<string, boolean>> {
   const out = new Map<string, boolean>();
   for (const q of facts.questions ?? []) {
     if (!/^[A-Za-z0-9_-]{1,200}$/.test(q.id)) continue;
-    const mark = await fs.readFile(path.join(dir, `${q.id}.json`), "utf8").then((text) => JSON.parse(text) as Partial<WaitMark>, () => null);
+    let mark: Partial<WaitMark> | null;
+    try {
+      mark = JSON.parse(await fs.readFile(path.join(dir, `${q.id}.json`), "utf8"));
+    } catch {
+      continue;
+    }
     if (mark?.question === q.id && typeof mark.waiting === "boolean") out.set(q.id, mark.waiting);
   }
   return out;
