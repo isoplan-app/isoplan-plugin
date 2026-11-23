@@ -841,11 +841,20 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
 /** Starts `node <args>` detached and hidden, without waiting for it. */
 export const spawnHidden: StartOptions["spawn"] = (args, dir, env) => spawn(process.execPath, args, { cwd: dir, env, detached: true, stdio: "ignore", windowsHide: true }).on("error", () => {}).unref();
 
-/** Where this machine finds the claude binary, and keeps the isoplan:// link handler and the login item (src/install). */
+/**
+ * Where this machine finds the claude binary, and keeps the isoplan:// link handler and the login item (src/install).
+ * With $ISOPLAN_NO_OS_REGISTRATION set, as a test that runs a bundle sets it, neither is named, so the
+ * install registers nothing with the operating system: no registry key, LaunchAgent or desktop entry
+ * of the person running the tests is touched.
+ */
 export const systemPlaces = () => ({
   findClaude: () => findClaude(process.env, process.platform, os.homedir()),
-  linkHandler: { platform: process.platform, home: os.homedir(), dataHome: process.env.XDG_DATA_HOME, node: process.execPath },
-  loginItem: { platform: process.platform, home: os.homedir(), configHome: process.env.XDG_CONFIG_HOME, uid: process.getuid?.(), node: process.execPath },
+  ...(process.env.ISOPLAN_NO_OS_REGISTRATION
+    ? {}
+    : {
+        linkHandler: { platform: process.platform, home: os.homedir(), dataHome: process.env.XDG_DATA_HOME, node: process.execPath },
+        loginItem: { platform: process.platform, home: os.homedir(), configHome: process.env.XDG_CONFIG_HOME, uid: process.getuid?.(), node: process.execPath },
+      }),
 });
 
 export interface MachineStart {
