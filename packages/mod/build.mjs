@@ -7,9 +7,7 @@
 
 import { build } from "rolldown";
 
-// tsconfig: false keeps the tsconfig's `paths` (protocol's source, for the typecheck) out of the
-// bundle, which inlines protocol's built dist/ as before.
-const common = { platform: "node", cwd: import.meta.dirname, logLevel: "warn", tsconfig: false };
+const common = { platform: "node", cwd: import.meta.dirname, logLevel: "warn" };
 const output = { format: "esm", codeSplitting: false, sourcemap: false };
 
 await build([

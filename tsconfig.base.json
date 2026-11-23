@@ -10,7 +10,8 @@
     "skipLibCheck": true,
     "declaration": true,
     "sourceMap": true,
-    // Typecheck against the protocol's source, not its dist/, so a fresh checkout typechecks with no build first.
+    // The workspace uses the protocol's source, not its dist/, so a fresh checkout typechecks and
+    // bundles with no build first: tsc, rolldown (packages/mod/build.mjs) and Bun all read this.
     "paths": {
       "@isoplan/protocol": ["./packages/protocol/src/index.ts"]
     }

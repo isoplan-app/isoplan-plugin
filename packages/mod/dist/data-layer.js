@@ -5595,7 +5595,7 @@ function datetime(params) {
 	return /* @__PURE__ */ _isoDateTime(ZodISODateTime, params);
 }
 //#endregion
-//#region ../protocol/dist/facts.js
+//#region ../protocol/src/facts.ts
 /** ISO time, with Z or an offset. */
 const Time = datetime({ offset: true });
 /** Tool-specific detail that views never rely on. */

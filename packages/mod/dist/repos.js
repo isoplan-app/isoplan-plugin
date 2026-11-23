@@ -6309,7 +6309,7 @@ function datetime(params) {
 	return /* @__PURE__ */ _isoDateTime(ZodISODateTime, params);
 }
 //#endregion
-//#region ../protocol/dist/facts.js
+//#region ../protocol/src/facts.ts
 /** ISO time, with Z or an offset. */
 const Time = datetime({ offset: true });
 /** Tool-specific detail that views never rely on. */
@@ -7930,7 +7930,7 @@ discriminatedUnion("type", [
 	})])
 ]);
 //#endregion
-//#region ../protocol/dist/project-id.js
+//#region ../protocol/src/project-id.ts
 /**
 * A project's id and name. With a git remote the id is `host/owner/repo` (any deeper path kept, as
 * for GitLab subgroups), the same whichever form or letter case the remote is written in, so a
