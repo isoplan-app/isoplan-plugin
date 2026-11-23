@@ -422,10 +422,12 @@ async function worker(): Promise<number> {
   setInterval(() => void checkDesktop().then(() => claude.check()).catch(() => {}), DESKTOP_CHECK_MS).unref();
   // A GitHub repo's current name, asked for before a remote first seen is used (remote-names.ts).
   const names = askingRemoteNames(claudeDir);
-  const homeIo = machineHomeIo(first.workspaceRepos, names);
+  // Where a folder sits in git is looked up again once older than config.json's gitCacheSeconds, as a session's data layer does.
+  const gitCacheMs = first.gitCacheSeconds * 1000;
+  const homeIo = machineHomeIo(first.workspaceRepos, names, os.hostname(), false, gitCacheMs);
   // For experts alone, a git that can't read a repo's remote rejects rather than making it a local
   // project: their listing keeps the last one sent, and a question is refused so the server asks again.
-  const expertHomeIo = machineHomeIo(first.workspaceRepos, names, os.hostname(), true);
+  const expertHomeIo = machineHomeIo(first.workspaceRepos, names, os.hostname(), true, gitCacheMs);
   const ledger = await openLedger(path.join(isoplanDir, "runner", "ledger.json"));
   // What each brief's prepare found, by handoff, for its push and any push anyway after it.
   const preparedFor = new Map<string, Prepared>();

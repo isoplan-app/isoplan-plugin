@@ -8681,12 +8681,18 @@ const takesFrom = (io, repos) => async (dir) => {
 /**
 * A HomeIo on this machine, for the runner and the commands, naming GitHub repos as `names` does.
 * `strict` makes a git that can't read a remote reject rather than give a local project (identity.ts).
+* Where a folder sits in git is looked up again once older than `gitMaxAgeMs`, so the runner, which
+* keeps its HomeIo while it runs, sees a folder cloned into or `git init`-ed since (#87); a
+* command's lives only as long as the command, and keeps its answers.
 */
-function machineHomeIo(workspaceRepos, names = null, machine = os.hostname(), strict = false) {
+function machineHomeIo(workspaceRepos, names = null, machine = os.hostname(), strict = false, gitMaxAgeMs = Infinity) {
 	const io = nodeIo();
 	const git = createGit(io);
 	return {
-		resolve: (dir) => git.resolve(dir),
+		resolve: (dir) => git.resolve(dir, {
+			now: Date.now(),
+			maxAgeMs: gitMaxAgeMs
+		}),
 		projectOf: (where, dir) => projectOf(io.run, where, dir, machine, {
 			names,
 			strict
@@ -24129,8 +24135,9 @@ async function worker() {
 	await claude.check().catch((err) => log(`couldn't check for Claude Code here: ${err.message}`));
 	setInterval(() => void checkDesktop().then(() => claude.check()).catch(() => {}), DESKTOP_CHECK_MS).unref();
 	const names = askingRemoteNames(claudeDir);
-	const homeIo = machineHomeIo(first.workspaceRepos, names);
-	const expertHomeIo = machineHomeIo(first.workspaceRepos, names, os.hostname(), true);
+	const gitCacheMs = first.gitCacheSeconds * 1e3;
+	const homeIo = machineHomeIo(first.workspaceRepos, names, os.hostname(), false, gitCacheMs);
+	const expertHomeIo = machineHomeIo(first.workspaceRepos, names, os.hostname(), true, gitCacheMs);
 	const ledger = await openLedger(path.join(isoplanDir, "runner", "ledger.json"));
 	const preparedFor = /* @__PURE__ */ new Map();
 	const forks = createForkSlots();
