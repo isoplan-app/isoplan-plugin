@@ -1,10 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
+import { MAX_REPORT_LENGTH } from "@isoplan/protocol";
 import { expect, test } from "vitest";
+import { loadPatterns } from "../runner/scan.js";
 import { createClaudeCode } from "./claude-code.js";
 import { normalize, pathKey } from "./git.js";
 import { nodeIo } from "./io.js";
-import { NOW, tempRoot, gitRepo, gitWorktree, line, session, agent, sourceIn, factsOf, byId, cc, touch, at } from "./fixture.js";
+import { openReportHold } from "./reports.js";
+import { NOW, tempRoot, gitRepo, gitWorktree, line, session, agent, sourceIn, factsOf, byId, cc, touch, at, modDir } from "./fixture.js";
 
 // One project (a main checkout plus a linked worktree elsewhere on disk) and an unrelated repo.
 function office() {
@@ -248,6 +251,17 @@ test("foreground agent: working until the parent's tool_result says completed, t
   a = byId(f.agents).fg1!;
   expect([a.status, a.statusSince, a.doing, a.extra!.endState]).toEqual(["done", at(2), null, "completed"]);
   expect(f.reports).toEqual([{ agent: cc("fg1"), at: at(3), text: "Found it." }]);
+});
+
+test("a report past MAX_REPORT_LENGTH is cut as the facts are built, so the secret check and the hold read only what is sent", async () => {
+  const { home, main } = office();
+  session(home, "s", [line.spawn(main, "tu-fg1", { subagent_type: "researcher" }, 100), line.result(main, "tu-fg1", { status: "completed", agentType: "researcher", totalDurationMs: 9 }, 2)]);
+  const found = "Found it. ".repeat(MAX_REPORT_LENGTH / 10);
+  agent(home, "s", "fg1", { agentType: "researcher", toolUseId: "tu-fg1" }, [line.text(main, `${found}The key is AKIAIOSFODNN7EXAMPLE.`, 3)], { age: 3 });
+  const f = await factsOf(home, "s");
+  expect(f.reports).toEqual([{ agent: cc("fg1"), at: at(3), text: `${found.trimEnd()}…`, cut: true }]);
+  const hold = await openReportHold(path.join(home, "released.json"), () => {});
+  expect(hold.apply(f, await loadPatterns(path.join(modDir, "secret-patterns.json"), path.join(home, "none.json"), () => {}))).toBe(f);
 });
 
 test("a lead's last reply: its newest text as its turn ends, kept while the next turn runs", async () => {
