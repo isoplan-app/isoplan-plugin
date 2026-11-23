@@ -5,9 +5,15 @@
 //
 // The prompt is built only from the session's facts: the branch, its edited files, and its
 // subagents' types and task names. Never a user message, though the branch and task names can
-// carry a person's words.
+// carry a person's words. So each of them goes through the secret scan first: one it matches is left
+// out, and while the patterns can't be read no call is made, since the model could copy a secret into
+// the title, or reword or clip it past what the scan can see. Whatever wrote it (this call, Claude
+// Code's own ai-title, the branch stand-in, the runner's name for a driven session), the session's
+// title is scanned again as it goes to an office (`prepareTitle`).
 
 import type { Facts } from "@isoplan/protocol";
+import { scan, type Pattern } from "../runner/scan.js";
+import { WORKFLOW_WITHHELD } from "./workflows.js";
 
 const ASK_EVERY_MS = 10 * 60000; // at most one call in this long
 const MAX_FILES = 15;
@@ -81,15 +87,30 @@ export function cleanTitle(reply: string): string | null {
 
 /**
  * The title call due now, or null: when the session is titled by its branch, its inputs changed
- * since its last written title, and its last ask was at least ASK_EVERY_MS ago.
+ * since its last written title, and its last ask was at least ASK_EVERY_MS ago. An input the scan
+ * matches is left out of it; with `patterns` null there is none.
  */
-export function nextTitle(facts: Facts, cache: TitleCache | null, now: number): { key: string; prompt: string } | null {
-  if (facts.session.titleFrom !== "branch") return null;
-  const inputs = titleInputs(facts);
+export function nextTitle(facts: Facts, cache: TitleCache | null, now: number, patterns: Pattern[] | null): { key: string; prompt: string } | null {
+  if (facts.session.titleFrom !== "branch" || !patterns) return null;
+  const clean = (text: string) => !scan(text, patterns);
+  const all = titleInputs(facts);
+  const inputs: TitleInputs = { branch: all.branch && clean(all.branch) ? all.branch : null, files: all.files.filter(clean), types: all.types.filter(clean), tasks: all.tasks.filter(clean) };
   if (!inputs.branch && !inputs.files.length && !inputs.tasks.length) return null; // nothing to go on
   const key = titleKey(inputs);
   if (cache && (cache.key === key || now - cache.at < ASK_EVERY_MS)) return null;
   return { key, prompt: titlePrompt(inputs) };
+}
+
+/**
+ * The facts with the session's title secret-checked: one the scan matches, and every one while
+ * `patterns` is null, goes out as WORKFLOW_WITHHELD.
+ */
+export function prepareTitle(facts: Facts, patterns: Pattern[] | null, log: (text: string) => void): Facts {
+  const title = facts.session.title;
+  const matched = title ? scan(title, patterns) : null;
+  if (!matched) return facts;
+  log(`withheld the session's title: ${patterns ? `it matches the secret pattern "${matched}"` : "the secret patterns couldn't be read"}`);
+  return { ...facts, session: { ...facts.session, title: WORKFLOW_WITHHELD } };
 }
 
 const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
