@@ -365,13 +365,20 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
 
   let downSince: number | null = Date.now(); // since when no office's link has been connected; null while one is
   let closedFor: string | null = null; // why `closed` settled, once it has
-  void closed.then((reason) => void (closedFor = reason || null));
+  // A pass's wait ends early once `closed` settles or an error ends the session. Each is watched once
+  // for the session, not once a wait: a reaction on a promise that never settles is kept as long as it is (#109).
+  let stopped = false;
+  let wake = () => {};
+  const stop = () => ((stopped = true), wake());
+  void closed.then((reason) => ((closedFor = reason || null), stop()));
+  void c.failed.then(stop);
   const emit = o.emit;
-  const wait = (ms: number) => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeUp = new Promise<boolean>((resolve) => (timer = setTimeout(() => resolve(true), ms)));
-    return Promise.race([timeUp, closed.then(() => false), c.failed.then(() => false)]).finally(() => clearTimeout(timer));
-  };
+  const wait = (ms: number) =>
+    new Promise<boolean>((resolve) => {
+      if (stopped) return resolve(false);
+      const timer = setTimeout(() => resolve(true), ms);
+      wake = () => (clearTimeout(timer), resolve(false));
+    });
   let why = "it was stopped"; // why it ends, once it does
   const stopping = (reason: string) => {
     why = reason;
