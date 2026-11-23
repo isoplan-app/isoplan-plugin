@@ -64,7 +64,7 @@ function machine(settings: Partial<Config> = {}) {
 type Hooks = { cwd: string; name: string; root?: string; since?: number; env?: Record<string, string> };
 
 /** watchSessions with a stand-in report: each session it starts is kept, and ends when told (or when the runner stops). */
-function watch(m: ReturnType<typeof machine>, o: { isOff?: (folder: string) => Promise<boolean>; isAlive?: (pid: number) => boolean; gapMs?: number; io?: NodeIo; hooked?: Map<string, Hooks>; recheckMs?: number; removedFile?: string; ignored?: (id: string, cwd: string | null) => boolean } = {}) {
+function watch(m: ReturnType<typeof machine>, o: { isOff?: (folder: string) => Promise<boolean>; isAlive?: (pid: number) => boolean; gapMs?: number; io?: NodeIo; hooked?: Map<string, Hooks>; recheckMs?: number; removedFile?: string; ignored?: (id: string, cwd: string | null) => boolean; fullLookMs?: number } = {}) {
   // The hooks modules told an earlier version's data layer reports their session.
   const told: { id: string; name: string }[] = [];
   const started: { id: string; notWanted: Record<string, number>; hooks?: Hooks; cwd: string; end: (ended?: Ended) => void; stoppedFor?: string }[] = [];
@@ -74,7 +74,7 @@ function watch(m: ReturnType<typeof machine>, o: { isOff?: (folder: string) => P
       started.push(entry);
       void s.closed.then((why) => ((entry.stoppedFor = why), resolve({ why: "stopped" })));
     });
-  const w = watchSessions({ claudeDir: m.claudeDir, io: o.io ?? nodeIo(), config: async () => m.config, report, isOff: o.isOff ?? (async () => false), log: () => {}, gapMs: o.gapMs ?? 0, ...(o.recheckMs !== undefined && { recheckMs: o.recheckMs }), ...(o.removedFile && { removedFile: o.removedFile }), ...(o.isAlive && { isAlive: o.isAlive }), ...(o.ignored && { ignored: o.ignored }), ...(o.hooked && { hooked: (id: string) => o.hooked!.get(id) ?? null }), held: (id, hooks) => void told.push({ id, name: hooks.name }) });
+  const w = watchSessions({ claudeDir: m.claudeDir, io: o.io ?? nodeIo(), config: async () => m.config, report, isOff: o.isOff ?? (async () => false), log: () => {}, gapMs: o.gapMs ?? 0, ...(o.recheckMs !== undefined && { recheckMs: o.recheckMs }), ...(o.fullLookMs !== undefined && { fullLookMs: o.fullLookMs }), ...(o.removedFile && { removedFile: o.removedFile }), ...(o.isAlive && { isAlive: o.isAlive }), ...(o.ignored && { ignored: o.ignored }), ...(o.hooked && { hooked: (id: string) => o.hooked!.get(id) ?? null }), held: (id, hooks) => void told.push({ id, name: hooks.name }) });
   watching.push(w);
   return { w, started, told, ids: () => started.map((s) => s.id) };
 }
@@ -524,6 +524,59 @@ test("quiet past idleMinutes, the folder gone, or the plugin off for the folder:
   await until(() => ids().includes("on"));
   await w.look();
   expect(ids()).toEqual(["on"]);
+});
+
+/** nodeIo, keeping the session id of each transcript it reads the write time of. */
+function statsKept() {
+  const io = nodeIo();
+  const statted: string[] = [];
+  return { statted, io: { ...io, stat: (file: string) => (statted.push(path.basename(file, ".jsonl")), io.stat(file)) } };
+}
+
+test("a transcript quiet past idleMinutes isn't looked at again until its folder's watcher sees it written, when it is reported as before; nor is its folder listed again", async () => {
+  const m = machine({ idleMinutes: 30, lightsOffHours: 0 });
+  for (const id of ["q1", "q2", "q3"]) m.write(id, m.repo, 31);
+  m.write("on");
+  const { statted, io } = statsKept();
+  const listed: string[] = [];
+  const { w, ids } = watch(m, { io: { ...io, listDir: (dir) => (listed.push(path.basename(dir)), io.listDir(dir)) }, fullLookMs: 3600000 });
+  await until(() => ids().includes("on"));
+  await w.look();
+  statted.length = listed.length = 0;
+  await wait(300);
+  expect(statted.filter((id) => id !== "on")).toEqual([]);
+  expect(listed.length).toBeGreaterThan(0);
+  expect(listed.filter((dir) => dir !== "projects")).toEqual([]);
+  m.write("q2");
+  await until(() => ids().includes("q2"));
+  expect([...new Set(statted)].sort()).toEqual(["on", "q2"]);
+});
+
+test("every fullLookMs a look reads every transcript's write time, for a write a watcher missed", async () => {
+  const m = machine({ idleMinutes: 30, lightsOffHours: 0 });
+  m.write("q1", m.repo, 31);
+  const { statted, io } = statsKept();
+  const { w } = watch(m, { io, fullLookMs: 300 });
+  await w.look();
+  statted.length = 0;
+  await until(() => statted.includes("q1"));
+});
+
+test("a project folder removed while watched doesn't keep the runner busy (on Windows its watcher names the folder over and over until it closes), and the runner goes on", async () => {
+  const m = machine({ streamSeconds: 60 }); // no look to close it meanwhile
+  const gone = path.join(m.claudeDir, "projects", "-gone");
+  fs.mkdirSync(gone, { recursive: true });
+  fs.writeFileSync(path.join(gone, "s1.jsonl"), line(m.repo));
+  const { w, ids } = watch(m);
+  await until(() => ids().includes("s1"));
+  const cpu = process.cpuUsage();
+  execFileSync(process.execPath, ["-e", `require("fs").rmSync(${JSON.stringify(gone)}, { recursive: true })`]);
+  await wait(500);
+  const used = process.cpuUsage(cpu);
+  expect((used.user + used.system) / 1000).toBeLessThan(250);
+  m.write("s2");
+  await w.look();
+  expect(ids()).toContain("s2");
 });
 
 test("a session `ignored` says no to is never reported: by its id before its folder is known, and by its folder once it is; with a hooks module too", async () => {
