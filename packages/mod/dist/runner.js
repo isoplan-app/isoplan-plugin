@@ -7451,7 +7451,8 @@ const BYTE_KEYS = /* @__PURE__ */ new Set(["tailBytes"]);
 const FLOORS = /* @__PURE__ */ new Map([
 	["streamSeconds", .25],
 	["processRefreshSeconds", 1],
-	["trayRefreshSeconds", 1]
+	["trayRefreshSeconds", 1],
+	["namingMaxWords", 3]
 ]);
 const ZERO_OFF = /* @__PURE__ */ new Set(["lightsOffHours", "updateCheckHours"]);
 function fits(key, value, fallback) {
@@ -16332,8 +16333,11 @@ function namingArgs(model, system) {
 		"json"
 	];
 }
-/** The name from the call's output, the one JSON object `--output-format json` writes; null for a failure or nothing usable. */
-function nameFrom(stdout) {
+/**
+* The name from the call's output, the one JSON object `--output-format json` writes, cut to its first
+* `maxWords` words with no punctuation left trailing; null for a failure or nothing usable.
+*/
+function nameFrom(stdout, maxWords) {
 	let e;
 	try {
 		e = JSON.parse(stdout.trim());
@@ -16341,7 +16345,10 @@ function nameFrom(stdout) {
 		return null;
 	}
 	if (!e || e.type !== "result" || e.is_error === true || e.subtype !== "success" || typeof e.result !== "string") return null;
-	return cleanTitle(e.result);
+	const name = cleanTitle(e.result);
+	const words = name?.split(/\s+/) ?? [];
+	if (words.length <= maxWords) return name;
+	return words.slice(0, maxWords).join(" ").replace(/[\s,;:.\-–—]+$/, "") || null;
 }
 function createNamer(o) {
 	const spawn = o.spawn ?? hiddenSpawn;
@@ -16353,7 +16360,7 @@ function createNamer(o) {
 			const bin = await o.binary();
 			if (!bin) return null;
 			const st = await o.settings();
-			const system = (await o.system()).trim();
+			const system = fill((await o.system()).trim(), { maxWords: String(st.namingMaxWords) });
 			let child;
 			try {
 				child = spawn([...claudeCommand(bin), ...namingArgs(st.namingModel, system)], {
@@ -16387,10 +16394,10 @@ function createNamer(o) {
 				child.stdin.on("error", () => {});
 				child.on("error", (err) => finish(null, `claude failed: ${err.message}`));
 				child.on("close", (code) => {
-					const name = nameFrom(stdout);
+					const name = nameFrom(stdout, st.namingMaxWords);
 					finish(name, name ? void 0 : `claude exited${code === null ? "" : ` with code ${code}`} with no name${stderr.trim() ? `: ${stderr.trim().split("\n").slice(-2).join(" ")}` : ""}`);
 				});
-				child.stdin.end(`Instruction:\n${instruction.slice(0, INSTRUCTION_CHARS)}`);
+				child.stdin.end(`<instruction>\n${instruction.slice(0, INSTRUCTION_CHARS)}\n</instruction>`);
 			});
 		},
 		close() {
@@ -20718,7 +20725,12 @@ async function waitsOf(dir, facts) {
 	const out = /* @__PURE__ */ new Map();
 	for (const q of facts.questions ?? []) {
 		if (!/^[A-Za-z0-9_-]{1,200}$/.test(q.id)) continue;
-		const mark = await fs.readFile(path.join(dir, `${q.id}.json`), "utf8").then((text) => JSON.parse(text), () => null);
+		let mark;
+		try {
+			mark = JSON.parse(await fs.readFile(path.join(dir, `${q.id}.json`), "utf8"));
+		} catch {
+			continue;
+		}
 		if (mark?.question === q.id && typeof mark.waiting === "boolean") out.set(q.id, mark.waiting);
 	}
 	return out;

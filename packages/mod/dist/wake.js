@@ -34,7 +34,8 @@ const BYTE_KEYS = /* @__PURE__ */ new Set(["tailBytes"]);
 const FLOORS = /* @__PURE__ */ new Map([
 	["streamSeconds", .25],
 	["processRefreshSeconds", 1],
-	["trayRefreshSeconds", 1]
+	["trayRefreshSeconds", 1],
+	["namingMaxWords", 3]
 ]);
 const ZERO_OFF = /* @__PURE__ */ new Set(["lightsOffHours", "updateCheckHours"]);
 function fits(key, value, fallback) {

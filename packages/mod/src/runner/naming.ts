@@ -6,20 +6,30 @@
 //   claude -p --no-session-persistence --tools "" --setting-sources "" NO_HOOKS --strict-mcp-config
 //     --model <namingModel> --system-prompt <prompts/naming.md> --output-format json
 //
-// with the instruction on stdin. As the answerer's fork (claude.ts), it has no tools and no MCP
+// with the instruction on stdin between <instruction> and </instruction>, as the prompt says. Without
+// that fence and the prompt's examples, Haiku named its own directions: for the instruction in #145
+// ("Reply with one short sentence about what this repo is. Don't change any files and don't run
+// commands.") it wrote names like "Naming a session, not carrying out the request: ..." in 3 of 10
+// tries, and fenced but without the examples and the prompt's "not for you", in 8 of 8; as it is now,
+// in none of 10 (23 Nov 2026, Claude Code 2.1.330, run from the OS's temp folder as here).
+//
+// As the answerer's fork (claude.ts), it has no tools and no MCP
 // servers, reads no settings file, so no plugin loads in it, runs no hook (NO_HOOKS, since the
 // person's hooks run despite `--setting-sources ""`), and is never saved; it runs
 // hidden in the OS's temp folder, so no project's CLAUDE.md loads either. Probed the same day: Haiku
 // answered in about 3 s with one JSON object, `type` "result", `subtype` "success", `is_error`
 // false, its `result` the name ("Fix login 500 error for plus-sign emails"). One that takes longer
-// than `namingTimeoutSeconds` is ended with its process tree. The caller passes the name through the
-// secret scan before it goes anywhere.
+// than `namingTimeoutSeconds` is ended with its process tree. A name of more than `namingMaxWords`
+// words is cut to that many rather than dropped: a short name still tells sessions in one repo apart,
+// and the repo's name, shown in its place, would not. The caller passes the name through the secret
+// scan before it goes anywhere.
 
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import os from "node:os";
 import { cleanTitle } from "../data-layer/titles.js";
 import { claudeCommand } from "./claude-binary.js";
 import { forkEnv, hiddenSpawn, killTree, NO_HOOKS, type Spawn } from "./claude.js";
+import { fill } from "./prompts.js";
 
 /** What runner.json says of naming sessions. */
 export interface NamingSettings {
@@ -27,9 +37,11 @@ export interface NamingSettings {
   namingModel: string;
   /** How long the call may take before it is ended and the session keeps its folder's name. */
   namingTimeoutSeconds: number;
+  /** The most words a name may have: the prompt asks for 3 to this many, and a longer name is cut to this many. */
+  namingMaxWords: number;
 }
 
-// The start of the instruction the name is written from: plenty for 3 to 6 words.
+// The start of the instruction the name is written from: plenty for a name of a few words.
 const INSTRUCTION_CHARS = 2000;
 // The end of the call's stderr kept for the local log.
 const STDERR_CHARS = 500;
@@ -39,8 +51,11 @@ export function namingArgs(model: string, system: string): string[] {
   return ["-p", "--no-session-persistence", "--tools", "", "--setting-sources", "", ...NO_HOOKS, "--strict-mcp-config", "--model", model, "--system-prompt", system, "--output-format", "json"];
 }
 
-/** The name from the call's output, the one JSON object `--output-format json` writes; null for a failure or nothing usable. */
-export function nameFrom(stdout: string): string | null {
+/**
+ * The name from the call's output, the one JSON object `--output-format json` writes, cut to its first
+ * `maxWords` words with no punctuation left trailing; null for a failure or nothing usable.
+ */
+export function nameFrom(stdout: string, maxWords: number): string | null {
   let e: Record<string, unknown>;
   try {
     e = JSON.parse(stdout.trim());
@@ -48,7 +63,10 @@ export function nameFrom(stdout: string): string | null {
     return null;
   }
   if (!e || e.type !== "result" || e.is_error === true || e.subtype !== "success" || typeof e.result !== "string") return null;
-  return cleanTitle(e.result);
+  const name = cleanTitle(e.result);
+  const words = name?.split(/\s+/) ?? [];
+  if (words.length <= maxWords) return name;
+  return words.slice(0, maxWords).join(" ").replace(/[\s,;:.\-–—]+$/, "") || null;
 }
 
 export interface Namer {
@@ -81,7 +99,7 @@ export function createNamer(o: NamerOptions): Namer {
       const bin = await o.binary();
       if (!bin) return null;
       const st = await o.settings();
-      const system = (await o.system()).trim();
+      const system = fill((await o.system()).trim(), { maxWords: String(st.namingMaxWords) });
       let child: ChildProcessWithoutNullStreams;
       try {
         child = spawn([...claudeCommand(bin), ...namingArgs(st.namingModel, system)], { cwd: o.cwd ?? os.tmpdir(), env: forkEnv(env) });
@@ -112,10 +130,10 @@ export function createNamer(o: NamerOptions): Namer {
         child.stdin.on("error", () => {});
         child.on("error", (err) => finish(null, `claude failed: ${err.message}`));
         child.on("close", (code) => {
-          const name = nameFrom(stdout);
+          const name = nameFrom(stdout, st.namingMaxWords);
           finish(name, name ? undefined : `claude exited${code === null ? "" : ` with code ${code}`} with no name${stderr.trim() ? `: ${stderr.trim().split("\n").slice(-2).join(" ")}` : ""}`);
         });
-        child.stdin.end(`Instruction:\n${instruction.slice(0, INSTRUCTION_CHARS)}`);
+        child.stdin.end(`<instruction>\n${instruction.slice(0, INSTRUCTION_CHARS)}\n</instruction>`);
       });
     },
     close() {
