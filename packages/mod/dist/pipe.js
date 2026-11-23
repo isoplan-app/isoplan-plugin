@@ -29,7 +29,7 @@ const isBlock = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 function overridden(defaults, user) {
 	const config = {};
 	for (const [key, fallback] of Object.entries(defaults)) if (isBlock(fallback)) config[key] = overridden(fallback, isBlock(user[key]) ? user[key] : {});
-	else config[key] = fits(key, user[key], fallback) ? user[key] : fallback;
+	else config[key] = fits(key, user[key], fallback) ? atMostLongestWait(key, user[key]) : fallback;
 	return config;
 }
 const BYTE_KEYS = /* @__PURE__ */ new Set(["tailBytes"]);
@@ -48,6 +48,15 @@ function fits(key, value, fallback) {
 	}
 	if (Array.isArray(fallback)) return Array.isArray(value);
 	return value != null && typeof value === typeof fallback;
+}
+const LONGEST_WAIT_MS = (2 ** 31 - 1) / 2;
+const UNIT_MS = {
+	Seconds: 1e3,
+	Minutes: 6e4
+};
+function atMostLongestWait(key, value) {
+	const unit = /(Seconds|Minutes)$/.exec(key)?.[1];
+	return unit && typeof value === "number" ? Math.min(value, Math.floor(LONGEST_WAIT_MS / UNIT_MS[unit])) : value;
 }
 const LOOPBACK = /* @__PURE__ */ new Set([
 	"127.0.0.1",
