@@ -105,7 +105,8 @@ test("engine: a crashed worker starts again; one that ends cleanly ends the app 
 test("engine: new runner code from a plugin update starts the worker again on it", async () => {
   const m = machine();
   const engine = m.start(20);
-  await settle();
+  // The worker runs on the first code before the update comes.
+  await workersSpawned(m, 1);
   fs.writeFileSync(m.runner, "// v2, a plugin update");
   for (let i = 0; i < 50 && m.workers.length < 2; i++) await settle();
   expect(m.workers[0]?.killed).toBe(true);
