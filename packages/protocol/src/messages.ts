@@ -1113,8 +1113,9 @@ const drive = { type: z.literal("drive"), v: Version, id: DriveId, by: Account }
 export const DriveMessageSchema = z.discriminatedUnion("kind", [
   // Start a driven session for `room`, a room of `project` that `by` is in. It opens in the folder of
   // the first of `roomSessions` (the room's sessions on this machine, newest first) that the runner
-  // reports, by its own record of that folder, or else in a checkout of `project` it finds, as a take
-  // does. `instruction`, the first, is the turn named by this request's id. `permissions` is the mode
+  // has its own record of, still there and in a repo the office takes. With none, the start is
+  // refused `no-folder`: the runner doesn't look for some other checkout of `project`, as a take does.
+  // `instruction`, the first, is the turn named by this request's id. `permissions` is the mode
   // the person asked for; the runner runs `bypassPermissions` only where `drive-policy` allows it.
   // Or, with `folder` and no `room` or `roomSessions` (#67): a fresh session in a new room, in one of
   // the folders the runner's last `folders` listed for `project`, with nothing from any room passed
