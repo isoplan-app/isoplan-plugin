@@ -8,7 +8,7 @@ import http from "node:http";
 import fs$1, { realpath, statSync } from "node:fs";
 import { promisify } from "node:util";
 import net from "node:net";
-//#region ../protocol/dist/area-covers.js
+//#region ../protocol/src/area-covers.ts
 /**
 * Whether an expert's `areas` (AreaPathSchema: folders and globs) cover `folder`, relative to the
 * same repo's root: one area's part before its first wildcard part (one with any of `* ? [ ] { }`)
@@ -25,7 +25,7 @@ function areaCovers(areas, folder) {
 	});
 }
 //#endregion
-//#region ../protocol/dist/dismissals.js
+//#region ../protocol/src/dismissals.ts
 /**
 * Whether `list` holds a dismissal of `folder` (relative to the repo's root) of `project` at `now`
 * (ms since the epoch): one for the same project, its folder that folder or one it is in (`.` every
@@ -5679,7 +5679,7 @@ function datetime(params) {
 	return /* @__PURE__ */ _isoDateTime(ZodISODateTime, params);
 }
 //#endregion
-//#region ../protocol/dist/facts.js
+//#region ../protocol/src/facts.ts
 /** ISO time, with Z or an offset. */
 const Time = datetime({ offset: true });
 /** Tool-specific detail that views never rely on. */
@@ -7355,7 +7355,7 @@ function parse$2(schema, value) {
 	};
 }
 //#endregion
-//#region ../protocol/dist/project-id.js
+//#region ../protocol/src/project-id.ts
 /**
 * A project's id and name. With a git remote the id is `host/owner/repo` (any deeper path kept, as
 * for GitLab subgroups), the same whichever form or letter case the remote is written in, so a

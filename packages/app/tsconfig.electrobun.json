@@ -13,7 +13,8 @@
     "paths": {
       "electrobun": ["./.hutch/devkit/api/sdks/main/index.ts"],
       "electrobun/main": ["./.hutch/devkit/api/sdks/main/index.ts"],
-      "electrobun/view": ["./.hutch/devkit/api/browser/index.ts"]
+      "electrobun/view": ["./.hutch/devkit/api/browser/index.ts"],
+      "@isoplan/protocol": ["../protocol/src/index.ts"]
     }
   },
   "include": ["src/bun/index.ts", "src/shared", "src/pairing/main.ts", "src/pairing/vue.d.ts", "src/running/main.ts", "electrobun.config.ts", "vite.config.ts"]
