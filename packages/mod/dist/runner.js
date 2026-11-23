@@ -9007,10 +9007,11 @@ function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, 
 			onError(err);
 		}
 	};
+	const reconnect = contained(() => connect());
 	function connect() {
 		retry = null;
 		if (!admit) return proceed();
-		admit().then((ok) => {
+		admit().then(contained((ok) => {
 			if (isClosed) return;
 			if (ok) return proceed();
 			emit({
@@ -9018,14 +9019,14 @@ function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, 
 				server: url,
 				state: "not-approved"
 			});
-			retry = setTimeout(connect, retryCapMs);
-		}, () => {
-			if (!isClosed) retry = setTimeout(connect, retryCapMs);
-		});
+			retry = setTimeout(reconnect, retryCapMs);
+		}), contained(() => {
+			if (!isClosed) retry = setTimeout(reconnect, retryCapMs);
+		}));
 	}
 	function proceed() {
 		if (!pairing) return open(void 0);
-		refusing.then(() => pairing.token()).then((token) => {
+		refusing.then(() => pairing.token()).then(contained((token) => {
 			if (isClosed) return;
 			if (token !== null) return open(token);
 			emit({
@@ -9033,15 +9034,15 @@ function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, 
 				server: url,
 				state: "pairing"
 			});
-			retry = setTimeout(connect, pairPollMs);
-		}, (err) => {
+			retry = setTimeout(reconnect, pairPollMs);
+		}), contained((err) => {
 			if (isClosed) return;
 			emit({
 				type: "log",
 				text: `couldn't pair with the office server: ${String(err?.message ?? err)}`
 			});
 			dropped();
-		});
+		}));
 	}
 	function open(token) {
 		emit({
@@ -9075,16 +9076,16 @@ function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, 
 		ws.onmessage = contained((event) => {
 			if (socket === ws) receive(event.data);
 		});
-		ws.onerror = () => {
+		ws.onerror = contained(() => {
 			if (socket !== ws) return;
 			dropped();
 			try {
 				ws.close();
 			} catch {}
-		};
-		ws.onclose = () => {
+		});
+		ws.onclose = contained(() => {
 			if (socket === ws) dropped();
-		};
+		});
 	}
 	function dropped() {
 		socket = null;
@@ -9104,14 +9105,14 @@ function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, 
 				server: url,
 				state: "taken"
 			});
-			retry = setTimeout(connect, takenRetryMs);
+			retry = setTimeout(reconnect, takenRetryMs);
 			return;
 		}
 		if (isRefused) {
 			isRefused = false;
 			if (refusedFor === "token-expired" && refusals === 0) {
 				refusals++;
-				retry = setTimeout(connect, 0);
+				retry = setTimeout(reconnect, 0);
 				return;
 			}
 			const delay = Math.min(retryCapMs, retryBaseMs * 2 ** refusals++);
@@ -9121,7 +9122,7 @@ function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, 
 				state: "disconnected",
 				retryInMs: delay
 			});
-			retry = setTimeout(connect, delay);
+			retry = setTimeout(reconnect, delay);
 			return;
 		}
 		if (isUnwanted) {
@@ -9132,7 +9133,7 @@ function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, 
 				server: url,
 				state: "not-wanted"
 			});
-			retry = setTimeout(connect, notWantedRetryMs);
+			retry = setTimeout(reconnect, notWantedRetryMs);
 			return;
 		}
 		const delay = Math.min(retryCapMs, retryBaseMs * 2 ** failures++);
@@ -9143,7 +9144,7 @@ function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, 
 			state: "disconnected",
 			retryInMs
 		});
-		retry = setTimeout(connect, retryInMs);
+		retry = setTimeout(reconnect, retryInMs);
 	}
 	function send(message) {
 		socket.send(JSON.stringify(message));
@@ -9215,7 +9216,7 @@ function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, 
 			isRefused = true;
 			refusedFor = message.code;
 			refusing = pairing.refused(message.code, sentToken).catch(() => {});
-			if (message.code === "pairing-ended" && onPairingEnded) refusing.then(onPairingEnded);
+			if (message.code === "pairing-ended" && onPairingEnded) refusing.then(contained(onPairingEnded));
 			emit(message.code === "token-expired" ? {
 				type: "log",
 				text: "the office server says this machine's token has expired; renewing it"
@@ -19967,6 +19968,7 @@ function contained(patterns) {
 			why = patterns().catch(() => null).then((p) => `something went wrong in reporting it: ${errorText(err, p)}`);
 			failed();
 		},
+		message: (err) => patterns().catch(() => null).then((p) => errorText(String(err?.message ?? err), p)),
 		guard: (fn, fallback) => (...args) => {
 			try {
 				return fn(...args);
@@ -20153,9 +20155,9 @@ async function reporting(o, c) {
 				type: "log",
 				text: `update check: ${text}`
 			});
-		})().catch((err) => emit({
+		})().catch(async (err) => emit({
 			type: "log",
-			text: `couldn't check for a newer version of the plugin: ${String(err?.message ?? err)}`
+			text: `couldn't check for a newer version of the plugin: ${await c.message(err)}`
 		})).finally(() => checking = false));
 	};
 	checkUpdate(START_GAP_MS);
@@ -20255,9 +20257,9 @@ async function reporting(o, c) {
 						kind: "owner-answer",
 						late: true
 					});
-				}).finally(() => fs.rm(file, { force: true }).catch(() => {})).catch((err) => emit({
+				}).finally(() => fs.rm(file, { force: true }).catch(() => {})).catch(async (err) => emit({
 					type: "log",
-					text: `couldn't pass the owner's answer on: ${String(err?.message ?? err)}`
+					text: `couldn't pass the owner's answer on: ${await c.message(err)}`
 				})));
 				return;
 			}
@@ -20271,9 +20273,9 @@ async function reporting(o, c) {
 					file,
 					emit,
 					take: takeFile
-				}).then((answer) => run.gate.current()?.send(answer)).finally(() => fs.rm(file, { force: true }).catch(() => {})).catch((err) => emit({
+				}).then((answer) => run.gate.current()?.send(answer)).finally(() => fs.rm(file, { force: true }).catch(() => {})).catch(async (err) => emit({
 					type: "log",
-					text: `couldn't pass the owner's message on: ${String(err?.message ?? err)}`
+					text: `couldn't pass the owner's message on: ${await c.message(err)}`
 				})));
 				return;
 			}
@@ -20373,9 +20375,9 @@ async function reporting(o, c) {
 		dormancy: gated.dormancy,
 		projects,
 		workspace
-	})).catch((err) => emit({
+	})).catch(async (err) => emit({
 		type: "log",
-		text: `couldn't check which repos ${run.office.server} takes: ${String(err?.message ?? err)}`
+		text: `couldn't check which repos ${run.office.server} takes: ${await c.message(err)}`
 	})).finally(() => run.homing = null);
 	const apply = (run) => {
 		if (!run.result) return;
@@ -20622,7 +20624,7 @@ async function reporting(o, c) {
 		} catch (err) {
 			emit({
 				type: "log",
-				text: `couldn't send this session's facts to ${run.office.server}: ${String(err?.message ?? err)}`
+				text: `couldn't send this session's facts to ${run.office.server}: ${await c.message(err)}`
 			});
 		}
 		if (o.areas && facts.areas?.length) {
@@ -20648,7 +20650,7 @@ async function reporting(o, c) {
 				} catch (err) {
 					emit({
 						type: "log",
-						text: `couldn't look at this session's areas for an expert creation suggestion: ${String(err?.message ?? err)}`
+						text: `couldn't look at this session's areas for an expert creation suggestion: ${await c.message(err)}`
 					});
 				}
 			}
@@ -20838,7 +20840,7 @@ function watchSessions(o) {
 				s.holdOff = ended.holdOff;
 				s.notWanted = ended.holdOff.notWanted;
 			}
-		}, (err) => o.log(`couldn't report session ${id}: ${String(err?.stack ?? err)}`)).finally(async () => {
+		}, async (err) => o.log(`couldn't report session ${id}: ${errorText(err, await o.patterns().catch(() => null))}`)).finally(async () => {
 			if (hooks) {
 				const lock = await readLock(lockPath(claudeDir, id)).catch(() => null);
 				if (lock?.pid && lock.pid !== pid && isAlive(lock.pid)) s.tookBack = lock.pid;
@@ -23915,9 +23917,10 @@ async function supervisor() {
 	return 0;
 }
 async function worker() {
+	const errorPatterns = () => loadPatterns(path.join(appDir, "secret-patterns.json"), path.join(isoplanDir, "secret-patterns.json"), () => {});
 	onEscapes({
 		on: (event, handler) => void process.on(event, handler),
-		said: async (err) => errorText(err, await loadPatterns(path.join(appDir, "secret-patterns.json"), path.join(isoplanDir, "secret-patterns.json"), () => {})),
+		said: async (err) => errorText(err, await errorPatterns()),
 		log,
 		exit: () => void logging.then(() => process.exit(1))
 	});
@@ -24030,6 +24033,7 @@ async function worker() {
 		config,
 		isOff,
 		log,
+		patterns: errorPatterns,
 		ignored: expertIgnored(expertsDir, () => experts, clones.folders),
 		hooked: (id) => pipe?.hooked(id) ?? null,
 		removedFile: path.join(isoplanDir, "runner", "removed.json"),
@@ -24085,7 +24089,7 @@ async function worker() {
 					...expertCreationSuggestionSignals
 				});
 			} catch (err) {
-				said.say(`stopping: something went wrong: ${String(err?.stack ?? err)}`);
+				said.say(`stopping: something went wrong: ${errorText(err, await errorPatterns().catch(() => null))}`);
 				throw err;
 			} finally {
 				await said.flushed();
