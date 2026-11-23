@@ -92,16 +92,20 @@ function fake(mode = "") {
   const cwd = fs.mkdtempSync(path.join(root, "lead-"));
   const lead: Lead = { cwd, working: false, compacted: false, context: 572000, lastActive: Date.now() };
   const tracked: { kind: string; session: string; folder: string }[] = [];
+  let exited: Promise<unknown> = Promise.resolve();
   const answerer = createClaudeAnswerer({
     claudeDir: path.join(root, ".claude"),
     binary: async () => bin,
     model: async () => "opus",
     config: async () => ({ tailBytes: 1048576, stalledMinutes: 5 }),
     env: { ...process.env, FAKE_LOG: logFile, FAKE_MODE: mode, CLAUDECODE: "1", CLAUDE_CODE_ENTRYPOINT: "cli" },
-    track: (_child, about) => void tracked.push(about),
+    track: (child, about) => {
+      tracked.push(about);
+      exited = new Promise((r) => child.once("close", r));
+    },
   });
   const logged = () => fs.readFileSync(logFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
-  return { answerer, lead, logged, cwd, logFile, tracked };
+  return { answerer, lead, logged, cwd, logFile, tracked, exited: () => exited };
 }
 
 const ask = { instructions: "Reply with only the word: ready", request: "What was the coverage?", timeoutMs: 10000 };
@@ -110,6 +114,8 @@ test("fork: turn 2 goes after turn 1's real result, stdin closes, and the last r
   const f = fake();
   const answered = await f.answerer.ask("claude-code:e8fd707b", f.lead, ask);
   expect(answered).toEqual({ ok: true, text: "It was 79.16%.", usage: { input: 5, output: 304, cacheRead: 574700, cacheWrite: 570400 } });
+  // The answer is taken on turn 2's result, which can come before the fake sees stdin close: its log is whole once it exits.
+  await f.exited();
   const [start, ...rest] = f.logged();
   expect(start.argv).toEqual(forkArgs("e8fd707b", "opus"));
   expect(fs.realpathSync(start.cwd)).toBe(fs.realpathSync(f.cwd));
