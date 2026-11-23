@@ -214,14 +214,25 @@ export const WaitFactSchema = z.object({
 });
 
 /**
+ * The longest report text a data layer sends (protocol 0.15.1). It is MAX_REPLY_LENGTH, because
+ * the floor's session view shows a lead's report as its latest reply, beside its driven turns' replies.
+ */
+export const MAX_REPORT_LENGTH = 20000;
+
+/**
  * An agent's final report. One the secret scan matched, and its owner hasn't released, is
  * `withheld`: its `text` then only says so, and the report follows once the owner releases it by
  * `withheld.id`, a random id for this one text. A newer report of the same agent gets a new id.
+ * `cut` (protocol 0.15.1 on): the text was longer than MAX_REPORT_LENGTH, so the data layer kept
+ * its start, cut it to fit and ended it in "…", before the secret scan. A longer `text` still
+ * parses, because a data layer before 0.15.1 sends the whole report, and a server refuses a facts
+ * message that doesn't parse.
  */
 export const ReportFactSchema = z.object({
   agent: z.string().min(1),
   at: Time,
   text: z.string(),
+  cut: z.literal(true).optional(),
   withheld: z.object({ id: z.string().min(1) }).optional(),
   extra: Extra,
 });

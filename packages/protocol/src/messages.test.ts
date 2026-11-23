@@ -20,6 +20,7 @@ import {
   MAX_PROMPT_LENGTH,
   MAX_QUESTION_LENGTH,
   MAX_REPLY_LENGTH,
+  MAX_REPORT_LENGTH,
   MAX_REPO_BRANCHES,
   MAX_REPO_FOLDERS,
   MAX_ROOM_SESSIONS,
@@ -636,6 +637,13 @@ test("a withheld report parses with its hold id, and not without one", () => {
   expect(parseDataLayerMessage({ ...valid.full, facts: { ...facts, reports: [report] } })).toMatchObject({ ok: true });
   expect(parseDataLayerMessage({ ...valid.full, facts: { ...facts, reports: [{ ...report, withheld: true }] } })).toMatchObject({ ok: false, kind: "invalid" });
   expect(parseDataLayerMessage({ ...valid.full, facts: { ...facts, reports: [{ ...report, withheld: { id: "" } }] } })).toMatchObject({ ok: false, kind: "invalid" });
+});
+
+test("a report cut to MAX_REPORT_LENGTH parses marked cut; one longer, as an older data layer sends, still parses", () => {
+  const report = { agent: worker.id, at, text: "x".repeat(MAX_REPORT_LENGTH - 1) + "…", cut: true };
+  expect(parseDataLayerMessage({ ...valid.full, facts: { ...facts, reports: [report] } })).toMatchObject({ ok: true });
+  expect(parseDataLayerMessage({ ...valid.full, facts: { ...facts, reports: [{ ...report, cut: false }] } })).toMatchObject({ ok: false, kind: "invalid" });
+  expect(parseDataLayerMessage({ ...valid.full, facts: { ...facts, reports: [{ agent: worker.id, at, text: "x".repeat(MAX_REPORT_LENGTH * 2) }] } })).toMatchObject({ ok: true });
 });
 
 test("an owner-answer reply parses with closed or late, and not with either false", () => {

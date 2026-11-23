@@ -1,10 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { Facts } from "@isoplan/protocol";
+import { MAX_REPORT_LENGTH, type Facts } from "@isoplan/protocol";
 import { expect, test } from "vitest";
-import { loadPatterns } from "../runner/scan.js";
+import { loadPatterns, scan } from "../runner/scan.js";
 import { at, modDir, tempRoot } from "./fixture.js";
-import { openReportHold, releasedPath, WITHHELD_TEXT } from "./reports.js";
+import { cutReport, openReportHold, releasedPath, WITHHELD_TEXT } from "./reports.js";
 
 const patterns = await loadPatterns(path.join(modDir, "secret-patterns.json"), path.join(modDir, "missing.json"), () => {});
 const KEY = "aws_access_key_id = AKIAIOSFODNN7EXAMPLE";
@@ -102,4 +102,15 @@ test("reports: a release on one office's floor lets the report out to that offic
   const again = { a: await open(releasedPath(claudeDir, internal, "s1")), b: await open(releasedPath(claudeDir, dev, "s1")) };
   expect(again.a.hold.apply(facts, patterns).reports[0]!.text).toBe(facts.reports[0]!.text);
   expect(again.b.hold.apply(facts, patterns).reports[0]!.text).toBe(WITHHELD_TEXT);
+});
+
+test("a report past MAX_REPORT_LENGTH is cut at the last whitespace that fits, so a secret across the limit is left out whole; with none, at the limit", () => {
+  const report = { agent: "claude-code:a1", at: at(5), text: "x".repeat(MAX_REPORT_LENGTH) };
+  expect(cutReport(report)).toBe(report);
+  // Cut at the limit, this would keep "postgres://admin:hunter2hunter", which no pattern matches.
+  const text = `${"x".repeat(MAX_REPORT_LENGTH - 32)} postgres://admin:hunter2hunter2@db.example.com/app and the rest`;
+  expect(scan(text.slice(0, MAX_REPORT_LENGTH - 1), patterns)).toBeNull();
+  expect(cutReport({ ...report, text })).toEqual({ ...report, text: "x".repeat(MAX_REPORT_LENGTH - 32) + "…", cut: true });
+  expect(cutReport({ ...report, text: "x".repeat(MAX_REPORT_LENGTH + 1) }).text).toBe("x".repeat(MAX_REPORT_LENGTH - 1) + "…");
+  expect(cutReport({ ...report, text: "x".repeat(MAX_REPORT_LENGTH - 2) + "\u{1F600}x" }).text).toBe("x".repeat(MAX_REPORT_LENGTH - 2) + "…");
 });
