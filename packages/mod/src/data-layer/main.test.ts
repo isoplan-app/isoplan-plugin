@@ -13,7 +13,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
-import { reportSession, sessionLog, startDetached, type ReportSessionOptions, type SessionAreas } from "./report-session.js";
+import { reportSession, sessionLog, startDetached, systemPlaces, type ReportSessionOptions, type SessionAreas } from "./report-session.js";
 import type { DataLayerLine } from "../lines.js";
 import { WebSocketServer } from "ws";
 import { modDir, tempRoot } from "./fixture.js";
@@ -321,8 +321,8 @@ function versions(server = "ws://127.0.0.1:9/data-layer") {
   for (const version of ["0.2.0", "0.3.0"]) {
     fs.mkdirSync(path.join(folder(version), "dist"), { recursive: true });
     fs.mkdirSync(path.join(folder(version), ".claude-plugin"), { recursive: true });
-    // Never the runner's files: without them a copy that installs fails before it reaches the link
-    // handler and the login item, which point at this machine's real home and registry (systemPlaces).
+    // Never the runner's files: without them a copy that installs puts no runner in place, so it
+    // starts none that outlives the test.
     for (const file of ["data-layer.js", "wake.js", "hooks.js"]) fs.copyFileSync(path.join(modDir, "dist", file), path.join(folder(version), "dist", file));
     fs.copyFileSync(path.join(modDir, "config.json"), path.join(folder(version), "config.json"));
     fs.writeFileSync(path.join(folder(version), ".claude-plugin", "plugin.json"), JSON.stringify({ name: "isoplan", version }));
@@ -331,11 +331,15 @@ function versions(server = "ws://127.0.0.1:9/data-layer") {
   const repo = session(claudeDir, root);
   fs.writeFileSync(path.join(claudeDir, "isoplan", "config.json"), JSON.stringify({ server }));
   const lock = path.join(claudeDir, "isoplan", "live", "s1.json");
+  const home = path.join(root, "home");
+  fs.mkdirSync(home);
   const run = (version: string, ...flags: string[]) => {
     const child = spawn(process.execPath, [path.join(folder(version), "dist", "data-layer.js"), "--session", "s1", "--cwd", repo, ...flags], {
       cwd: repo,
-      // No update check runs against a real Claude Code here.
-      env: { ...process.env, CLAUDE_CONFIG_DIR: claudeDir, CLAUDE_CODE_PLUGIN_CACHE_DIR: "", DISABLE_AUTOUPDATER: "1", FORCE_AUTOUPDATE_PLUGINS: "" },
+      // No update check runs against a real Claude Code here, and it gets a home of its own and
+      // registers nothing with the operating system (systemPlaces): the person running the tests
+      // keeps their own link handler and login item.
+      env: { ...process.env, CLAUDE_CONFIG_DIR: claudeDir, HOME: home, USERPROFILE: home, ISOPLAN_NO_OS_REGISTRATION: "1", CLAUDE_CODE_PLUGIN_CACHE_DIR: "", DISABLE_AUTOUPDATER: "1", FORCE_AUTOUPDATE_PLUGINS: "" },
       stdio: ["ignore", "pipe", "ignore"],
       windowsHide: true,
     });
@@ -393,6 +397,14 @@ test("started --detached by an earlier version's wake hook, it puts this version
   expect(fs.readFileSync(path.join(claudeDir, "settings.json"), "utf8")).toContain("wake.mjs");
   expect(spawned.map(({ args, cwd }) => ({ args: args.map((a) => (a.startsWith("--") ? a : path.resolve(a))), cwd: path.resolve(cwd) }))).toEqual([{ args: [wake.runner, "--claude-dir", path.resolve(claudeDir), "--inherited-env"], cwd: path.resolve(claudeDir) }]);
   expect(fs.readFileSync(path.join(claudeDir, "isoplan", "logs", "s1.log"), "utf8")).toContain("the runner reports it now, so this data layer ends (started the runner)");
+});
+
+// What keeps a bundle that versions() runs off the registry and login items of the person running the tests (#49).
+test("with ISOPLAN_NO_OS_REGISTRATION set, a data layer's system places name no link handler and no login item, so its install registers nothing with the operating system", () => {
+  vi.stubEnv("ISOPLAN_NO_OS_REGISTRATION", "");
+  expect(Object.keys(systemPlaces()).sort()).toEqual(["findClaude", "linkHandler", "loginItem"]);
+  vi.stubEnv("ISOPLAN_NO_OS_REGISTRATION", "1");
+  expect(Object.keys(systemPlaces())).toEqual(["findClaude"]);
 });
 
 test("the runner, reporting a session whose plugin is turned off for its folder, says so in the session's log as it stops", async () => {
