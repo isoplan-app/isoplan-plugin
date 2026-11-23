@@ -24,7 +24,8 @@
 // carries the session's context window once its hooks module has written the size to the file the
 // `window` line names; without one there is none. A Claude Code workflow's name,
 // description, phases and agents' labels are secret-checked too, and one that matches goes out as a
-// placeholder (src/data-layer/workflows.ts); its agents' results are reports like any other.
+// placeholder (src/data-layer/workflows.ts); its agents' results are reports like any other. So is
+// the session's title, and what a room title is written from (src/data-layer/titles.ts).
 // For a hooks module the session fact says `hooks`. For one that can submit a prompt
 // (`takesMessages`), it says `takesMessages` too, and a message its owner sends from the floor goes
 // to that hooks module, which submits it as the session's next turn (src/data-layer/owner-messages.ts);
@@ -105,7 +106,7 @@ import { relayOwnerMessage } from "./owner-messages.js";
 import { createPairing, pairingLockPath, pairingPath, pairingWriteLockPath, type Pairing } from "./pairing.js";
 import { askingRemoteNames } from "./remote-names.js";
 import { openReportHold, releasedPath, type ReportHold } from "./reports.js";
-import { cleanTitle, nextTitle, TITLE_SYSTEM, type TitleCache } from "./titles.js";
+import { cleanTitle, nextTitle, prepareTitle, TITLE_SYSTEM, type TitleCache } from "./titles.js";
 import { prepareWorkflows } from "./workflows.js";
 
 // A session's log starts over once it is this big.
@@ -479,9 +480,10 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
     said.add(text);
   };
   // What goes to an office's link: the reports its hold keeps held, the questions checked and
-  // marked, and the workflows' names, phases and labels and every subagent's task checked (workflows.ts).
+  // marked, the workflows' names, phases and labels and every subagent's task checked (workflows.ts),
+  // and the session's title checked, whatever wrote it (titles.ts).
   const outgoing = (run: OfficeRun, facts: Facts, patterns: Pattern[] | null) =>
-    prepareWorkflows(prepareQuestions(run.hold.apply(facts, patterns), patterns, marks, patternLog, answersLate), patterns, patternLog);
+    prepareTitle(prepareWorkflows(prepareQuestions(run.hold.apply(facts, patterns), patterns, marks, patternLog, answersLate), patterns, patternLog), patterns, patternLog);
   // The project of each subagent working in a worktree of another repo, from the latest read.
   let checkouts: Record<string, string> = {};
   // Whether a question got an answer, from the latest read, so one that closed says how.
@@ -753,6 +755,11 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
       continue;
     }
     factsSession = read.facts.session.id;
+    // Read before the title call, which leaves out what they match.
+    const patterns = await loadPatterns(modPatterns, ownerPatterns, patternLog).catch((err: unknown) => {
+      patternLog(`couldn't read the secret patterns, so every report is withheld: ${String((err as Error)?.message ?? err)}`);
+      return null;
+    });
 
     // A written title replaces the branch stand-in; the hooks module writes the reply to a file.
     const reply = await takeReply(titleFile);
@@ -762,7 +769,7 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
     }
     // A session driven from the floor has the name its runner wrote from its first instruction (runner/naming.ts), which replaces the branch stand-in too.
     const named: string | null = read.facts.session.titleFrom === "branch" ? await drivenName(registryPath(claudeDir), read.facts.session.id) : null;
-    const ask: ReturnType<typeof nextTitle> = named ? null : nextTitle(read.facts, title, now);
+    const ask: ReturnType<typeof nextTitle> = named ? null : nextTitle(read.facts, title, now, patterns);
     if (ask && (await fs.mkdir(titlesDir, { recursive: true }).then(() => true, () => false))) {
       title = { key: title?.key ?? null, title: title?.title ?? null, at: now };
       asked = ask.key;
@@ -779,10 +786,6 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
     checkouts = read.checkouts ?? {};
     answered = read.answered ?? answered;
 
-    const patterns = await loadPatterns(modPatterns, ownerPatterns, patternLog).catch((err: unknown) => {
-      patternLog(`couldn't read the secret patterns, so every report is withheld: ${String((err as Error)?.message ?? err)}`);
-      return null;
-    });
     marks = hooked ? await waitsOf(waitsDir, facts) : new Map();
     shown = [facts, patterns];
     // One office's failure never ends the loop for the others.
