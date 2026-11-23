@@ -29,7 +29,7 @@ const isBlock = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 function overridden(defaults, user) {
 	const config = {};
 	for (const [key, fallback] of Object.entries(defaults)) if (isBlock(fallback)) config[key] = overridden(fallback, isBlock(user[key]) ? user[key] : {});
-	else config[key] = fits(key, user[key], fallback) ? user[key] : fallback;
+	else config[key] = fits(key, user[key], fallback) ? atMostLongestWait(key, user[key]) : fallback;
 	return config;
 }
 const BYTE_KEYS = /* @__PURE__ */ new Set(["tailBytes"]);
@@ -48,6 +48,15 @@ function fits(key, value, fallback) {
 	}
 	if (Array.isArray(fallback)) return Array.isArray(value);
 	return value != null && typeof value === typeof fallback;
+}
+const LONGEST_WAIT_MS = (2 ** 31 - 1) / 2;
+const UNIT_MS = {
+	Seconds: 1e3,
+	Minutes: 6e4
+};
+function atMostLongestWait(key, value) {
+	const unit = /(Seconds|Minutes)$/.exec(key)?.[1];
+	return unit && typeof value === "number" ? Math.min(value, Math.floor(LONGEST_WAIT_MS / UNIT_MS[unit])) : value;
 }
 const LOOPBACK = /* @__PURE__ */ new Set([
 	"127.0.0.1",
@@ -5838,11 +5847,16 @@ const WaitFactSchema = object({
 * An agent's final report. One the secret scan matched, and its owner hasn't released, is
 * `withheld`: its `text` then only says so, and the report follows once the owner releases it by
 * `withheld.id`, a random id for this one text. A newer report of the same agent gets a new id.
+* `cut` (protocol 0.15.1 on): the text was longer than MAX_REPORT_LENGTH, so the data layer kept
+* its start, cut it to fit and ended it in "…", before the secret scan. A longer `text` still
+* parses, because a data layer before 0.15.1 sends the whole report, and a server refuses a facts
+* message that doesn't parse.
 */
 const ReportFactSchema = object({
 	agent: string().min(1),
 	at: Time,
 	text: string(),
+	cut: literal(true).optional(),
 	withheld: object({ id: string().min(1) }).optional(),
 	extra: Extra
 });
@@ -8981,21 +8995,28 @@ const spawnHidden = (args, dir, env) => spawn(process.execPath, args, {
 	stdio: "ignore",
 	windowsHide: true
 }).on("error", () => {}).unref();
-/** Where this machine finds the claude binary, and keeps the isoplan:// link handler and the login item (src/install). */
+/**
+* Where this machine finds the claude binary, and keeps the isoplan:// link handler and the login item (src/install).
+* With $ISOPLAN_NO_OS_REGISTRATION set, as a test that runs a bundle sets it, neither is named, so the
+* install registers nothing with the operating system: no registry key, LaunchAgent or desktop entry
+* of the person running the tests is touched.
+*/
 const systemPlaces = () => ({
 	findClaude: () => findClaude(process.env, process.platform, os.homedir()),
-	linkHandler: {
-		platform: process.platform,
-		home: os.homedir(),
-		dataHome: process.env.XDG_DATA_HOME,
-		node: process.execPath
-	},
-	loginItem: {
-		platform: process.platform,
-		home: os.homedir(),
-		configHome: process.env.XDG_CONFIG_HOME,
-		uid: process.getuid?.(),
-		node: process.execPath
+	...process.env.ISOPLAN_NO_OS_REGISTRATION ? {} : {
+		linkHandler: {
+			platform: process.platform,
+			home: os.homedir(),
+			dataHome: process.env.XDG_DATA_HOME,
+			node: process.execPath
+		},
+		loginItem: {
+			platform: process.platform,
+			home: os.homedir(),
+			configHome: process.env.XDG_CONFIG_HOME,
+			uid: process.getuid?.(),
+			node: process.execPath
+		}
 	}
 });
 /** This computer, for the desktop app. */

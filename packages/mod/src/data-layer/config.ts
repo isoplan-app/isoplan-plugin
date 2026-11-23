@@ -116,7 +116,7 @@ function overridden(defaults: Record<string, unknown>, user: Record<string, unkn
   const config: Record<string, unknown> = {};
   for (const [key, fallback] of Object.entries(defaults)) {
     if (isBlock(fallback)) config[key] = overridden(fallback, isBlock(user[key]) ? user[key] : {});
-    else config[key] = fits(key, user[key], fallback) ? user[key] : fallback;
+    else config[key] = fits(key, user[key], fallback) ? atMostLongestWait(key, user[key]) : fallback;
   }
   return config;
 }
@@ -146,6 +146,19 @@ function fits(key: string, value: unknown, fallback: unknown): boolean {
   }
   if (Array.isArray(fallback)) return Array.isArray(value);
   return value != null && typeof value === typeof fallback;
+}
+
+// A key in seconds or minutes may be how long a timer waits, and setTimeout waits at most 2^31-1 ms
+// (about 24.8 days): past that it fires at once (#53). So such a key is at most half that, in its
+// unit, since runnerRetrySeconds and drivenCloseSeconds are each waited on twice over: a huge number
+// set to mean "never" waits about 12 days. A key in hours or days is an age compared with the clock,
+// never a timer's wait, so it may run longer.
+const LONGEST_WAIT_MS = (2 ** 31 - 1) / 2;
+const UNIT_MS = { Seconds: 1000, Minutes: 60000 };
+
+function atMostLongestWait(key: string, value: unknown): unknown {
+  const unit = /(Seconds|Minutes)$/.exec(key)?.[1] as keyof typeof UNIT_MS | undefined;
+  return unit && typeof value === "number" ? Math.min(value, Math.floor(LONGEST_WAIT_MS / UNIT_MS[unit])) : value;
 }
 
 // wss:// anywhere; cleartext ws:// only to this machine, since the facts name files and agents' work.

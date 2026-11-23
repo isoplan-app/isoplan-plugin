@@ -17,13 +17,30 @@
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { Facts } from "@isoplan/protocol";
+import { MAX_REPORT_LENGTH, type Facts, type ReportFact } from "@isoplan/protocol";
 import { officeDir } from "./approved-file.js";
 import { scan, type Pattern } from "../runner/scan.js";
 
 /** Where the reports released on one office's floor are kept for `session`; the server a version before #105 reports to keeps the old place. */
 export const releasedPath = (claudeDir: string, office: { server: string; legacy?: boolean }, session: string) =>
   path.join(office.legacy ? path.join(claudeDir, "isoplan") : officeDir(claudeDir, office.server), "released", `${session}.json`);
+
+/**
+ * `report` within MAX_REPORT_LENGTH (#71). The facts are cut as they are built, so the secret
+ * check and the hold read only what is sent. A longer report keeps its start, up to the last
+ * whitespace that fits, ends in "…" and is marked `cut`. It is cut at whitespace so that no token,
+ * address or assigned value is split: the first part of a split secret matches no pattern, so the
+ * check would let it out. A text with no whitespace within the limit is cut at the limit.
+ */
+export function cutReport(report: ReportFact): ReportFact {
+  const { text } = report;
+  if (text.length <= MAX_REPORT_LENGTH) return report;
+  const room = MAX_REPORT_LENGTH - 1; // one character for the "…"
+  let end = room; // text[end] is the first character left out
+  while (end >= 0 && !/\s/.test(text[end]!)) end--;
+  if (end < 0) end = /[\ud800-\udbff]/.test(text[room - 1]!) ? room - 1 : room;
+  return { ...report, text: text.slice(0, end).trimEnd() + "…", cut: true };
+}
 
 /** What a withheld report says in place of its text. */
 export const WITHHELD_TEXT = "Held for its owner to check: the secret check found what may be a secret in this report.";

@@ -254,8 +254,9 @@ test("one runner: a starter acting on an old read doesn't stop the runner anothe
   const m = await machine();
   await m.hold(OTHER);
   const old = { pid: OTHER, code: await runnerCode(m.runnerJs) };
-  // Starter A replaces the outdated runner with S1, on new code.
-  fs.writeFileSync(m.runnerJs, "// v2");
+  // Starter A replaces the outdated runner with S1, on new code. Its size differs from v1's, so its
+  // code does too: a write in the same clock tick as v1's can keep the same write time.
+  fs.writeFileSync(m.runnerJs, "// v2, from a plugin update");
   expect(await m.start()).toBe("started");
   await m.hold(OTHER + 1);
   // Starter B judged OTHER outdated before that, and only now gets to stop it.

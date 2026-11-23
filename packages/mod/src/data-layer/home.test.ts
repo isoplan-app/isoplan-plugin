@@ -1,7 +1,8 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { expect, test } from "vitest";
-import { candidatesOf, commandHome, inRepos, type HomeIo } from "./home.js";
+import { expect, test, vi } from "vitest";
+import { candidatesOf, commandHome, inRepos, machineHomeIo, type HomeIo } from "./home.js";
 import { gitRepo, tempRoot } from "./fixture.js";
 import { createGit } from "./git.js";
 import { projectOf } from "./identity.js";
@@ -35,6 +36,22 @@ test("a repo's folder reports as its repo; a workspace as its repos, by name; th
   fs.mkdirSync(plain);
   expect((await candidatesOf(plain, io)).projects.map((p) => p.id)).toEqual([id(plain)]);
   expect((await candidatesOf(ws, { ...io, home: ws })).workspace).toBe(false);
+});
+
+test("the runner's HomeIo asks git again once gitMaxAgeMs has passed: a folder git init-ed since is a repo (#87)", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  try {
+    const folder = path.join(tempRoot(), "later");
+    fs.mkdirSync(folder);
+    const io = machineHomeIo(12, null, "desk", false, MINUTE);
+    expect(await io.resolve(folder)).toBe(null);
+    execFileSync("git", ["init", "-q"], { cwd: folder });
+    expect(await io.resolve(folder)).toBe(null);
+    vi.setSystemTime(Date.now() + MINUTE + 1);
+    expect((await io.resolve(folder))?.toplevel).toMatch(/\/later$/);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 function list(file: string, repos: string[], checked: number) {

@@ -235,6 +235,18 @@ test("into Orca, a clone whose core.hooksPath is set gets the take's own worktre
   expect(orca.calls()[1]).toEqual(["worktree", "show", "--worktree", `path:${dir}`]);
 });
 
+test("into Orca, a re-take after Orca's worktree was deleted by hand gets the take's own worktree, which Orca finds by its path", async () => {
+  const t = await handedOver("h2r");
+  const { orca, options } = intoOrca(t);
+  expect((await takeHandoff({ handoff: t.handoff, mode: "orca", session: SESSION }, options)).failures).toEqual([]);
+  fs.rmSync(path.join(orca.workspaces, "handoff-h2r"), { recursive: true, force: true });
+  expect((await takeHandoff({ handoff: t.handoff, mode: "orca", session: SESSION }, options)).failures).toEqual([]);
+  const dir = `${t.receiver.clone}-handoff-h2r`;
+  expect(git(dir, "branch", "--show-current")).toBe("isoplan/handoff/h2r");
+  expect(orca.calls().slice(4).map((c) => c.slice(0, 2).join(" "))).toEqual(["repo show", "worktree show", "terminal create"]);
+  expect(orca.calls()[5]).toEqual(["worktree", "show", "--worktree", `path:${dir}`]);
+});
+
 test("into Orca without Orca on the machine: nothing is made or opened, and the take says so", async () => {
   const t = await handedOver("h2q");
   const taken = await takeHandoff({ handoff: t.handoff, mode: "orca", session: SESSION }, { ...t.options, orca: async () => null });
@@ -269,8 +281,8 @@ test("into the Claude app: the same worktree and setup, the worktree alone trust
   expect(calls.map((c) => c.args[0])).toEqual(["--version", "auth", expect.stringMatching(/^Isoplan handoff h2d: you are taking this work over\. Read its brief in /), "--desktop"]);
   const [, , print, desktop] = calls;
   expect(print!.cwd).toBe(dir);
-  // The default permission mode, whatever the branch's settings say, and a bounded number of turns.
-  expect(print!.args.slice(1, -1)).toEqual(["--print", "--output-format", "json", "--permission-mode", "default", "--max-turns", "10", "--session-id", SESSION, "--name", "Isoplan handoff h2d", "--add-dir"]);
+  // Manual (Claude Code's default) permission mode, whatever the branch's settings say, and a bounded number of turns.
+  expect(print!.args.slice(1, -1)).toEqual(["--print", "--output-format", "json", "--permission-mode", "manual", "--max-turns", "10", "--session-id", SESSION, "--name", "Isoplan handoff h2d", "--add-dir"]);
   expect(desktop).toEqual({ args: ["--desktop", "--resume", SESSION], cwd: dir });
   // No window of Isoplan's own, and no background session.
   expect(t.opened).toEqual([]);
@@ -423,6 +435,16 @@ test("a re-take never drops the receiver's work: a worktree with commits or chan
   expect(fs.existsSync(path.join(dir, "setup-ran.txt"))).toBe(true);
   // Four takes of real git: past vitest's 5 s default on a loaded Windows machine.
 }, 30000);
+
+test("a re-take after the worktree's folder was deleted by hand makes it again in the same place", async () => {
+  const t = await handedOver("h6d");
+  expect((await takeHandoff({ handoff: t.handoff, mode: "terminal" }, t.options)).failures).toEqual([]);
+  const dir = `${t.receiver.clone}-handoff-h6d`;
+  fs.rmSync(dir, { recursive: true, force: true });
+  expect((await takeHandoff({ handoff: t.handoff, mode: "terminal" }, t.options)).failures).toEqual([]);
+  expect(git(dir, "branch", "--show-current")).toBe("isoplan/handoff/h6d");
+  expect(fs.readFileSync(path.join(dir, "app.js"), "utf8")).toBe("console.log('handed over');\n");
+});
 
 test("with no clone of the repo on the machine, no session opens and the failure says what to do", async () => {
   const t = await handedOver("h7");

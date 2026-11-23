@@ -5860,11 +5860,16 @@ const WaitFactSchema = object({
 * An agent's final report. One the secret scan matched, and its owner hasn't released, is
 * `withheld`: its `text` then only says so, and the report follows once the owner releases it by
 * `withheld.id`, a random id for this one text. A newer report of the same agent gets a new id.
+* `cut` (protocol 0.15.1 on): the text was longer than MAX_REPORT_LENGTH, so the data layer kept
+* its start, cut it to fit and ended it in "…", before the secret scan. A longer `text` still
+* parses, because a data layer before 0.15.1 sends the whole report, and a server refuses a facts
+* message that doesn't parse.
 */
 const ReportFactSchema = object({
 	agent: string().min(1),
 	at: Time,
 	text: string(),
+	cut: literal$1(true).optional(),
 	withheld: object({ id: string().min(1) }).optional(),
 	extra: Extra
 });
@@ -7439,7 +7444,7 @@ const isBlock = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 function overridden(defaults, user) {
 	const config = {};
 	for (const [key, fallback] of Object.entries(defaults)) if (isBlock(fallback)) config[key] = overridden(fallback, isBlock(user[key]) ? user[key] : {});
-	else config[key] = fits(key, user[key], fallback) ? user[key] : fallback;
+	else config[key] = fits(key, user[key], fallback) ? atMostLongestWait(key, user[key]) : fallback;
 	return config;
 }
 const BYTE_KEYS = /* @__PURE__ */ new Set(["tailBytes"]);
@@ -7458,6 +7463,15 @@ function fits(key, value, fallback) {
 	}
 	if (Array.isArray(fallback)) return Array.isArray(value);
 	return value != null && typeof value === typeof fallback;
+}
+const LONGEST_WAIT_MS = (2 ** 31 - 1) / 2;
+const UNIT_MS = {
+	Seconds: 1e3,
+	Minutes: 6e4
+};
+function atMostLongestWait(key, value) {
+	const unit = /(Seconds|Minutes)$/.exec(key)?.[1];
+	return unit && typeof value === "number" ? Math.min(value, Math.floor(LONGEST_WAIT_MS / UNIT_MS[unit])) : value;
 }
 const LOOPBACK$1 = /* @__PURE__ */ new Set([
 	"127.0.0.1",
@@ -8672,12 +8686,18 @@ const takesFrom = (io, repos) => async (dir) => {
 /**
 * A HomeIo on this machine, for the runner and the commands, naming GitHub repos as `names` does.
 * `strict` makes a git that can't read a remote reject rather than give a local project (identity.ts).
+* Where a folder sits in git is looked up again once older than `gitMaxAgeMs`, so the runner, which
+* keeps its HomeIo while it runs, sees a folder cloned into or `git init`-ed since (#87); a
+* command's lives only as long as the command, and keeps its answers.
 */
-function machineHomeIo(workspaceRepos, names = null, machine = os.hostname(), strict = false) {
+function machineHomeIo(workspaceRepos, names = null, machine = os.hostname(), strict = false, gitMaxAgeMs = Infinity) {
 	const io = nodeIo();
 	const git = createGit(io);
 	return {
-		resolve: (dir) => git.resolve(dir),
+		resolve: (dir) => git.resolve(dir, {
+			now: Date.now(),
+			maxAgeMs: gitMaxAgeMs
+		}),
 		projectOf: (where, dir) => projectOf(io.run, where, dir, machine, {
 			names,
 			strict
@@ -9443,6 +9463,149 @@ function forOffice$1(facts, projects, checkouts = {}) {
 	};
 }
 //#endregion
+//#region src/runner/scan.ts
+/** What `scan` names as the match when the patterns couldn't be read. */
+const UNREADABLE = "unreadable patterns: everything is held";
+/** The patterns in `file`: [] when the owner's is missing, and null, logged, when it can't be used. */
+async function readPatterns(file, optional, log) {
+	const unusable = (why) => {
+		if (!optional) throw new Error(`${file}: ${why}`);
+		log(`${file} can't be used, so every answer, brief and report is held: ${why}`);
+		return null;
+	};
+	let value;
+	try {
+		value = JSON.parse(await fs.readFile(file, "utf8"));
+	} catch (err) {
+		if (optional && err.code === "ENOENT") return [];
+		if (!optional) throw err;
+		return unusable(err.message);
+	}
+	const list = value?.patterns;
+	if (!Array.isArray(list)) return unusable("it has no \"patterns\" list");
+	const out = [];
+	for (const p of list) {
+		const name = typeof p?.name === "string" && p.name ? p.name : String(p?.regex);
+		try {
+			if (typeof p?.regex !== "string" || !p.regex) throw new Error("no regex");
+			const flags = typeof p.flags === "string" ? p.flags : "";
+			if (!/^[imsu]*$/.test(flags)) throw new Error(`flags "${flags}" aren't any of i, m, s and u`);
+			out.push({
+				name,
+				regex: new RegExp(p.regex, flags)
+			});
+		} catch (err) {
+			return unusable(`the secret pattern "${name}" doesn't compile: ${err.message}`);
+		}
+	}
+	return out;
+}
+/** The mod's patterns and the owner's, or null when the owner's can't be used. */
+async function loadPatterns(modFile, ownerFile, log) {
+	const mod = await readPatterns(modFile, false, log);
+	const owner = await readPatterns(ownerFile, true, log);
+	return owner && [...mod, ...owner];
+}
+/** The name of the first pattern `text` matches, or null when it matches none; UNREADABLE when `patterns` is null. */
+function scan(text, patterns) {
+	if (!patterns) return UNREADABLE;
+	return patterns.find((p) => p.regex.test(text))?.name ?? null;
+}
+/** An error's stack (or its text) to log; in its place, a note when it matches a secret pattern, or the patterns can't be read. */
+function errorText(err, patterns) {
+	const text = String(err?.stack ?? err);
+	const hit = scan(text, patterns);
+	return hit === null ? text : hit === "unreadable patterns: everything is held" ? "(its text is left out: the secret patterns can't be read)" : `(its text is left out: it matches the secret pattern ${hit})`;
+}
+//#endregion
+//#region src/data-layer/reports.ts
+/** Where the reports released on one office's floor are kept for `session`; the server a version before #105 reports to keeps the old place. */
+const releasedPath = (claudeDir, office, session) => path.join(office.legacy ? path.join(claudeDir, "isoplan") : officeDir(claudeDir, office.server), "released", `${session}.json`);
+/**
+* `report` within MAX_REPORT_LENGTH (#71). The facts are cut as they are built, so the secret
+* check and the hold read only what is sent. A longer report keeps its start, up to the last
+* whitespace that fits, ends in "…" and is marked `cut`. It is cut at whitespace so that no token,
+* address or assigned value is split: the first part of a split secret matches no pattern, so the
+* check would let it out. A text with no whitespace within the limit is cut at the limit.
+*/
+function cutReport(report) {
+	const { text } = report;
+	if (text.length <= 2e4) return report;
+	const room = 19999;
+	let end = room;
+	while (end >= 0 && !/\s/.test(text[end])) end--;
+	if (end < 0) end = /[\ud800-\udbff]/.test(text[19998]) ? 19998 : room;
+	return {
+		...report,
+		text: text.slice(0, end).trimEnd() + "…",
+		cut: true
+	};
+}
+/** What a withheld report says in place of its text. */
+const WITHHELD_TEXT = "Held for its owner to check: the secret check found what may be a secret in this report.";
+const hash = (agent, text) => createHash("sha256").update(`${agent}
+${text}`).digest("hex");
+async function openReportHold(file, log) {
+	const released = new Set(await readReleased(file));
+	let held = /* @__PURE__ */ new Map();
+	let ids = /* @__PURE__ */ new Map();
+	const told = /* @__PURE__ */ new Set();
+	return {
+		apply(facts, patterns) {
+			held = /* @__PURE__ */ new Map();
+			const kept = /* @__PURE__ */ new Map();
+			const reports = facts.reports.map((report) => {
+				const h = hash(report.agent, report.text);
+				if (released.has(h)) return report;
+				const matched = patterns ? scan(report.text, patterns) : null;
+				if (patterns && !matched) return report;
+				const id = ids.get(h) ?? kept.get(h) ?? randomUUID();
+				kept.set(h, id);
+				held.set(id, {
+					agent: report.agent,
+					hash: h
+				});
+				if (!told.has(h)) {
+					told.add(h);
+					log(`withheld the report of ${report.agent}: ${matched ? `it matches the secret pattern "${matched}"` : "the secret patterns couldn't be read"}; its owner can release it from the floor`);
+				}
+				return {
+					agent: report.agent,
+					at: report.at,
+					text: WITHHELD_TEXT,
+					withheld: { id }
+				};
+			});
+			ids = kept;
+			return held.size ? {
+				...facts,
+				reports
+			} : facts;
+		},
+		async release(id) {
+			const report = held.get(id);
+			if (!report) {
+				log(`the office server released the report held as ${id}, but none is held under that id here; it may have been replaced by a newer report, or the data layer restarted`);
+				return false;
+			}
+			const { agent } = report;
+			held.delete(id);
+			released.add(report.hash);
+			log(`the report of ${agent} was released, so it is sent`);
+			await fs.mkdir(path.dirname(file), { recursive: true }).then(() => fs.writeFile(file, JSON.stringify({ released: [...released] }) + "\n")).catch((err) => log(`couldn't save the release of ${agent}'s report, so it is withheld again after a restart: ${err.message}`));
+			return true;
+		}
+	};
+}
+async function readReleased(file) {
+	try {
+		const list = JSON.parse(await fs.readFile(file, "utf8")).released;
+		return Array.isArray(list) ? list.filter((h) => typeof h === "string") : [];
+	} catch {
+		return [];
+	}
+}
+//#endregion
 //#region src/data-layer/shell-writes.ts
 /** The deepest a shell inside a shell is read, and the longest command read at all. */
 const MAX_DEPTH = 3;
@@ -10034,61 +10197,6 @@ function skipHeredocs(src, i, heredocs) {
 		if (line === h.delim) break;
 	}
 	return i;
-}
-//#endregion
-//#region src/runner/scan.ts
-/** What `scan` names as the match when the patterns couldn't be read. */
-const UNREADABLE = "unreadable patterns: everything is held";
-/** The patterns in `file`: [] when the owner's is missing, and null, logged, when it can't be used. */
-async function readPatterns(file, optional, log) {
-	const unusable = (why) => {
-		if (!optional) throw new Error(`${file}: ${why}`);
-		log(`${file} can't be used, so every answer, brief and report is held: ${why}`);
-		return null;
-	};
-	let value;
-	try {
-		value = JSON.parse(await fs.readFile(file, "utf8"));
-	} catch (err) {
-		if (optional && err.code === "ENOENT") return [];
-		if (!optional) throw err;
-		return unusable(err.message);
-	}
-	const list = value?.patterns;
-	if (!Array.isArray(list)) return unusable("it has no \"patterns\" list");
-	const out = [];
-	for (const p of list) {
-		const name = typeof p?.name === "string" && p.name ? p.name : String(p?.regex);
-		try {
-			if (typeof p?.regex !== "string" || !p.regex) throw new Error("no regex");
-			const flags = typeof p.flags === "string" ? p.flags : "";
-			if (!/^[imsu]*$/.test(flags)) throw new Error(`flags "${flags}" aren't any of i, m, s and u`);
-			out.push({
-				name,
-				regex: new RegExp(p.regex, flags)
-			});
-		} catch (err) {
-			return unusable(`the secret pattern "${name}" doesn't compile: ${err.message}`);
-		}
-	}
-	return out;
-}
-/** The mod's patterns and the owner's, or null when the owner's can't be used. */
-async function loadPatterns(modFile, ownerFile, log) {
-	const mod = await readPatterns(modFile, false, log);
-	const owner = await readPatterns(ownerFile, true, log);
-	return owner && [...mod, ...owner];
-}
-/** The name of the first pattern `text` matches, or null when it matches none; UNREADABLE when `patterns` is null. */
-function scan(text, patterns) {
-	if (!patterns) return UNREADABLE;
-	return patterns.find((p) => p.regex.test(text))?.name ?? null;
-}
-/** An error's stack (or its text) to log; in its place, a note when it matches a secret pattern, or the patterns can't be read. */
-function errorText(err, patterns) {
-	const text = String(err?.stack ?? err);
-	const hit = scan(text, patterns);
-	return hit === null ? text : hit === "unreadable patterns: everything is held" ? "(its text is left out: the secret patterns can't be read)" : `(its text is left out: it matches the secret pattern ${hit})`;
 }
 //#endregion
 //#region src/data-layer/workflows.ts
@@ -10999,6 +11107,7 @@ function createClaudeCode(io) {
 			a.t.touches = await addFiles(facts.edits, id, a.t.touches, [...config.touchedTools, ...config.shellTools], now, config, place);
 			a.t.reads = await addFiles(facts.reads, id, a.t.reads, [...READ_TOOLS$1, ...config.shellTools], now, config, place);
 		}
+		facts.reports = facts.reports.map(cutReport);
 		areaStates.set(c.path, {
 			area: main.area,
 			lastText: main.lastText
@@ -13635,9 +13744,9 @@ function takePrompt(id, brief, setupLog, failedRepos = [], task = null) {
 /**
 * Claude Code's command line for the new session. The prompt comes first: `--add-dir` takes every
 * argument after it, and would take the prompt too. `print` runs the prompt to its end, unattended,
-* in at most `maxTurns` turns, and says how it went as JSON, for a take into the Claude app: with the
-* default permission mode, whatever the folder's settings set as theirs, so nothing that would ask
-* is allowed.
+* in at most `maxTurns` turns, and says how it went as JSON, for a take into the Claude app: in manual
+* mode (Claude Code's `default`; see the probe above), whatever the folder's settings set as theirs,
+* so nothing that would ask is allowed.
 */
 function sessionArgv(bin, { prompt, session, name, folder, headless, print }) {
 	const printing = print ? [
@@ -13645,7 +13754,7 @@ function sessionArgv(bin, { prompt, session, name, folder, headless, print }) {
 		"--output-format",
 		"json",
 		"--permission-mode",
-		"default",
+		"manual",
 		"--max-turns",
 		String(print.maxTurns)
 	] : [];
@@ -14333,6 +14442,10 @@ async function worktreeFor(run, clone, remote, branch, id, exempt, timeoutMs, ex
 			const extra = await ahead(run, clone, tip, exempt, `refs/heads/${branch}`, timeoutMs);
 			if (extra !== 0) return { error: `The local branch ${branch} in ${clone} has ${extra ?? "some"} commit(s) that aren't in the handoff as handed over now, so no worktree was made over it. Push or move them, then take the handoff again.` };
 		}
+		await run(["worktree", "prune"], {
+			cwd: clone,
+			timeoutMs
+		});
 		const r = await run([
 			...hooksOff,
 			"worktree",
@@ -14351,7 +14464,10 @@ async function worktreeFor(run, clone, remote, branch, id, exempt, timeoutMs, ex
 	}
 	return { error: `${base} and the next eight names beside it are taken by other folders` };
 }
-/** The worktree, other than the main checkout, that has `branch` checked out, or null. */
+/**
+* The worktree, other than the main checkout, that has `branch` checked out, or null. One whose
+* folder was deleted by hand is pruned, so git no longer holds the branch for it, and isn't returned.
+*/
 async function worktreeOn(run, clone, branch, timeoutMs) {
 	const listed = await run([
 		"worktree",
@@ -14363,7 +14479,14 @@ async function worktreeOn(run, clone, branch, timeoutMs) {
 	});
 	if (listed.code !== 0) return null;
 	const at = listed.stdout.split(/\r?\n\r?\n/).slice(1).map((b) => b.split(/\r?\n/)).find((lines) => lines.includes(`branch refs/heads/${branch}`))?.find((line) => line.startsWith("worktree "));
-	return at ? path.resolve(at.slice(9)) : null;
+	if (!at) return null;
+	const dir = path.resolve(at.slice(9));
+	if (await fs.stat(dir).then((s) => s.isDirectory(), () => false)) return dir;
+	await run(["worktree", "prune"], {
+		cwd: clone,
+		timeoutMs
+	});
+	return null;
 }
 async function inOrca(orca, dir) {
 	const shown = await orca([
@@ -15377,9 +15500,7 @@ async function branchFolder(run, checkout, branch, timeoutMs) {
 	]);
 	if (head.code === 0 && head.stdout.trim() === branch) return checkout;
 	const existing = await worktreeOn(run, checkout, branch, timeoutMs);
-	const isDir = (p) => fs.stat(p).then((s) => s.isDirectory(), () => false);
-	if (existing && await isDir(existing)) return spelledAs(checkout, existing);
-	if (existing) await git(["worktree", "prune"]);
+	if (existing) return spelledAs(checkout, existing);
 	const hooksOff = await noHooks();
 	const base = `${normalize(checkout)}-branch-${asName(branch)}`;
 	for (let n = 1; n < 10; n++) {
@@ -19793,74 +19914,6 @@ function parse(text) {
 }
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 //#endregion
-//#region src/data-layer/reports.ts
-/** Where the reports released on one office's floor are kept for `session`; the server a version before #105 reports to keeps the old place. */
-const releasedPath = (claudeDir, office, session) => path.join(office.legacy ? path.join(claudeDir, "isoplan") : officeDir(claudeDir, office.server), "released", `${session}.json`);
-/** What a withheld report says in place of its text. */
-const WITHHELD_TEXT = "Held for its owner to check: the secret check found what may be a secret in this report.";
-const hash = (agent, text) => createHash("sha256").update(`${agent}
-${text}`).digest("hex");
-async function openReportHold(file, log) {
-	const released = new Set(await readReleased(file));
-	let held = /* @__PURE__ */ new Map();
-	let ids = /* @__PURE__ */ new Map();
-	const told = /* @__PURE__ */ new Set();
-	return {
-		apply(facts, patterns) {
-			held = /* @__PURE__ */ new Map();
-			const kept = /* @__PURE__ */ new Map();
-			const reports = facts.reports.map((report) => {
-				const h = hash(report.agent, report.text);
-				if (released.has(h)) return report;
-				const matched = patterns ? scan(report.text, patterns) : null;
-				if (patterns && !matched) return report;
-				const id = ids.get(h) ?? kept.get(h) ?? randomUUID();
-				kept.set(h, id);
-				held.set(id, {
-					agent: report.agent,
-					hash: h
-				});
-				if (!told.has(h)) {
-					told.add(h);
-					log(`withheld the report of ${report.agent}: ${matched ? `it matches the secret pattern "${matched}"` : "the secret patterns couldn't be read"}; its owner can release it from the floor`);
-				}
-				return {
-					agent: report.agent,
-					at: report.at,
-					text: WITHHELD_TEXT,
-					withheld: { id }
-				};
-			});
-			ids = kept;
-			return held.size ? {
-				...facts,
-				reports
-			} : facts;
-		},
-		async release(id) {
-			const report = held.get(id);
-			if (!report) {
-				log(`the office server released the report held as ${id}, but none is held under that id here; it may have been replaced by a newer report, or the data layer restarted`);
-				return false;
-			}
-			const { agent } = report;
-			held.delete(id);
-			released.add(report.hash);
-			log(`the report of ${agent} was released, so it is sent`);
-			await fs.mkdir(path.dirname(file), { recursive: true }).then(() => fs.writeFile(file, JSON.stringify({ released: [...released] }) + "\n")).catch((err) => log(`couldn't save the release of ${agent}'s report, so it is withheld again after a restart: ${err.message}`));
-			return true;
-		}
-	};
-}
-async function readReleased(file) {
-	try {
-		const list = JSON.parse(await fs.readFile(file, "utf8")).released;
-		return Array.isArray(list) ? list.filter((h) => typeof h === "string") : [];
-	} catch {
-		return [];
-	}
-}
-//#endregion
 //#region src/data-layer/report-session.ts
 const LOG_CAP_BYTES$2 = 65536;
 const DORMANT_MS = 3e4;
@@ -24108,8 +24161,9 @@ async function worker() {
 	await claude.check().catch((err) => log(`couldn't check for Claude Code here: ${err.message}`));
 	setInterval(() => void checkDesktop().then(() => claude.check()).catch(() => {}), DESKTOP_CHECK_MS).unref();
 	const names = askingRemoteNames(claudeDir);
-	const homeIo = machineHomeIo(first.workspaceRepos, names);
-	const expertHomeIo = machineHomeIo(first.workspaceRepos, names, os.hostname(), true);
+	const gitCacheMs = first.gitCacheSeconds * 1e3;
+	const homeIo = machineHomeIo(first.workspaceRepos, names, os.hostname(), false, gitCacheMs);
+	const expertHomeIo = machineHomeIo(first.workspaceRepos, names, os.hostname(), true, gitCacheMs);
 	const ledger = await openLedger(path.join(isoplanDir, "runner", "ledger.json"));
 	const preparedFor = /* @__PURE__ */ new Map();
 	const forks = createForkSlots();

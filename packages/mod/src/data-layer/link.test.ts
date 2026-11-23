@@ -224,7 +224,8 @@ test("link: a runner's link passes drive requests and drive-policy to onDrive, t
   let closed = 0;
   const { link: l, lines } = link(s.url, { hello: runnerHello, onDrive: (m) => drives.push(m), onOpen: () => void opened++, onClose: () => void closed++ });
   await until(() => opened === 1);
-  expect(s.got).toHaveLength(1);
+  // onOpen comes once the hello is sent, which can be before the server has it.
+  await until(() => s.got.length === 1);
   const policy = { type: "drive-policy", v: PROTOCOL_VERSION, bypassAllowed: ["github.com/ada/app"] };
   const stop = { type: "drive", v: PROTOCOL_VERSION, id: "d1", by: hello.account, kind: "stop", session: "claude-code:s" };
   s.sockets[0]!.send(JSON.stringify(policy));

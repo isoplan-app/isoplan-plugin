@@ -1247,6 +1247,8 @@ test("bypass: a reopen and a take skip prompts only while the current connection
   t.policy([PROJECT.id]);
   t.drive(start("d1", { permissions: "bypassPermissions" }));
   await t.until(() => t.of("held").length === 1);
+  // Held as soon as it is spawned; the fake logs its argv only once it runs, and a stop before then leaves no line for the last check.
+  await t.until(() => t.fakeLog().some((l) => l.argv));
   t.drive({ id: "s1", kind: "stop", session: S1 });
   await t.until(() => t.of("released").length === 1);
   // A new connection, whose drive-policy doesn't list the project.

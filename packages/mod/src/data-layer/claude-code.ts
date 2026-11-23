@@ -37,6 +37,7 @@ import { attributionCache, createAttribution, type Attribution, type Placed } fr
 import type { Config } from "./config.js";
 import { dirname, isAbsolute, join, normalize, pathKey, relativeTo, type MaybePromise, type Stat, type Where } from "./git.js";
 import type { DirEntry } from "./io.js";
+import { cutReport } from "./reports.js";
 import { shellFiles } from "./shell-writes.js";
 import { agentsInView, createWorkflowReader, endStatus, listWorkflows, viewWorkflow, workflowLaunch, type RunState, type WorkflowAgentView, type WorkflowFiles, type WorkflowLaunch } from "./workflows.js";
 
@@ -527,6 +528,7 @@ export function createClaudeCode(io: SourceIo) {
       a.t.touches = await addFiles(facts.edits, id, a.t.touches, [...config.touchedTools, ...config.shellTools], now, config, place);
       a.t.reads = await addFiles(facts.reads, id, a.t.reads, [...READ_TOOLS, ...config.shellTools], now, config, place);
     }
+    facts.reports = facts.reports.map(cutReport);
     // The areas, from every transcript of the session read in this one's life, the lead's first.
     areaStates.set(c.path, { area: main.area, lastText: main.lastText });
     for (const a of agentFiles) areaStates.set(a.path, { area: a.t.area, lastText: a.t.lastText });

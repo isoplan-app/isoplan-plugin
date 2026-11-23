@@ -12,6 +12,9 @@ import { asName, branchFolder, createCheckouts, createRemoteBranches, mainChecko
 // The empty folder git runs with as its hooks (handoff/take.ts noHooks) is made in the Claude folder: a temp one, never this machine's.
 vi.stubEnv("CLAUDE_CONFIG_DIR", path.join(tempRoot(), "claude"));
 
+// The tests with real git drive a few dozen spawns each, which is slow on Windows under load.
+vi.setConfig({ testTimeout: 30000 });
+
 const run = createRunGit();
 const isDir = async (p: string) => fs.existsSync(p) && fs.statSync(p).isDirectory();
 const resolver = () => {
@@ -68,16 +71,17 @@ test("with real git: a repo seen only in a deleted worktree is found by its main
 
 test("the branches are the remote's own: one pushed from elsewhere is listed, a local one and a stale remote-tracking one aren't, and one deleted on the remote goes once the list is refreshed", async () => {
   const root = tempRoot();
-  const { clone } = remoteAndClone(root);
-  const { clone: other } = remoteAndClone(root, "other");
-  git(other, "push", "-q", "origin", "main:feat/dark", "main:feat/old");
+  const { remote, clone } = remoteAndClone(root);
+  // Made on the remote itself, as if pushed from another clone, without that clone's git processes.
+  git(remote, "branch", "feat/dark", "main");
+  git(remote, "branch", "feat/old", "main");
   git(clone, "fetch", "-q", "origin");
   git(clone, "branch", "local-only");
   let t = 0;
   const logs: string[] = [];
   const branches = createRemoteBranches({ run, timeoutMs: async () => 30000, refreshMs: async () => 1000, log: (l) => void logs.push(l), now: () => t });
   expect(await branches(clone)).toEqual(["main", "feat/dark", "feat/old"]);
-  git(other, "push", "-q", "origin", "--delete", "feat/old");
+  git(remote, "branch", "-D", "feat/old");
   // Within the refresh time the list is kept; after it the remote is asked again, though the clone still has origin/feat/old.
   expect(await branches(clone)).toEqual(["main", "feat/dark", "feat/old"]);
   t = 1000;
@@ -111,9 +115,8 @@ test("ls-remote's heads are read by name, and one git would take for an option i
 
 test("a branch other than the checkout's opens in a new worktree beside it, then the same one again; the checkout's branch is never switched", async () => {
   const root = tempRoot();
-  const { clone } = remoteAndClone(root, "app");
-  const { clone: other } = remoteAndClone(root, "other");
-  git(other, "push", "-q", "origin", "main:feat/dark");
+  const { remote, clone } = remoteAndClone(root, "app");
+  git(remote, "branch", "feat/dark", "main");
   expect(await branchFolder(run, clone, "main", 30000)).toBe(clone);
   const made = await branchFolder(run, clone, "feat/dark", 30000);
   expect(typeof made).toBe("string");
@@ -144,9 +147,8 @@ test("a local branch of that name is used as it is, its own commits kept; a bran
 
 test("a worktree on the branch whose folder was deleted by hand is pruned, and a new one is made and returned", async () => {
   const root = tempRoot();
-  const { clone } = remoteAndClone(root, "app");
-  const { clone: other } = remoteAndClone(root, "other");
-  git(other, "push", "-q", "origin", "main:feat/x");
+  const { remote, clone } = remoteAndClone(root, "app");
+  git(remote, "branch", "feat/x", "main");
   const wt = path.join(root, "gone");
   git(clone, "fetch", "-q", "origin");
   git(clone, "worktree", "add", "-q", "--track", "-b", "feat/x", wt, "origin/feat/x");
@@ -159,9 +161,8 @@ test("a worktree on the branch whose folder was deleted by hand is pruned, and a
 
 test("none of the repo's hooks runs when a worktree is made for a branch", async () => {
   const root = tempRoot();
-  const { clone } = remoteAndClone(root, "app");
-  const { clone: other } = remoteAndClone(root, "other");
-  git(other, "push", "-q", "origin", "main:feat/dark");
+  const { remote, clone } = remoteAndClone(root, "app");
+  git(remote, "branch", "feat/dark", "main");
   const ran = path.join(root, "hook-ran");
   const hooks = path.join(clone, ".githooks");
   fs.mkdirSync(hooks);
@@ -179,9 +180,8 @@ test("none of the repo's hooks runs when a worktree is made for a branch", async
 
 test("in Orca: the checkout when it is on the branch or none is named; else Orca's own worktree of the remote's branch, in its workspace; one with a local branch of that name gets branchFolder's, which Orca finds by its path", async () => {
   const root = tempRoot();
-  const { clone } = remoteAndClone(root, "app");
-  const { clone: other } = remoteAndClone(root, "other");
-  git(other, "push", "-q", "origin", "main:feat/dark");
+  const { remote, clone } = remoteAndClone(root, "app");
+  git(remote, "branch", "feat/dark", "main");
   const fake = fakeOrca(root);
   const orca = orcaRunner(fake.bin, { ...process.env } as Record<string, string>);
   expect(await orcaBranchFolder(orca, run, clone, "main", 30000)).toBe(clone);
@@ -201,8 +201,7 @@ test("in Orca: the checkout when it is on the branch or none is named; else Orca
   const mine = await orcaBranchFolder(orca, run, clone, "mine", 30000);
   same(mine as string, path.join(root, "app-branch-mine"));
   expect(fake.calls().at(-1)!.slice(0, 2)).toEqual(["worktree", "show"]);
-  // Many git and Orca calls, each a process: slow on a loaded machine.
-}, 30000);
+});
 
 test("a branch's part of a folder's name is the branch, filesystem-safe; one longer than 24 is its first 16 characters and a hash, so two long branches alike at the start get different ones", () => {
   expect(asName("feat/dark")).toBe("feat-dark");

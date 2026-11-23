@@ -128,7 +128,13 @@ export function startEngine(o: EngineOptions): Engine {
     // It started: startRunner's record of opening it (or of it failing) goes.
     await fs.rm(appOpenPath(o.claudeDir), { force: true }).catch(() => {});
     const lost = new Promise<"taken">((resolve) => (taken = () => resolve("taken")));
+    // One pass at a time. A pass still going when the next is due (a slow disk) is left to finish:
+    // the next one's refresh would move the lock while this one rewrites it for new code, and
+    // takeLock, seeing it moved, would give up and leave the old code in the lock.
+    let refreshing = false;
     refresh = setInterval(() => {
+      if (refreshing) return;
+      refreshing = true;
       void (async () => {
         if (!(await refreshLock(lock, pid))) {
           o.log(`the app ${pid} stopped: another runner took its lock`);
@@ -145,7 +151,9 @@ export function startEngine(o: EngineOptions): Engine {
           o.log("the runner's code changed: its worker starts again on it");
           if (worker) stopWorker();
         }
-      })().catch(() => {});
+      })()
+        .catch(() => {})
+        .finally(() => (refreshing = false));
     }, o.refreshMs ?? LOCK_REFRESH_MS);
     const env = (await recordedEnv(o.claudeDir)) ?? undefined;
     if (!env) o.log("no environment is recorded for the runner, so it runs with the app's; run the plugin's install script to record one");

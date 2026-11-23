@@ -10,7 +10,8 @@
 //    holds work that isn't in it: uncommitted changes to tracked files, or any commit that is neither
 //    in the new tip nor one of the commits this machine took of this handoff before (taken.json in
 //    the handoff's folder). Then it is left as it is and the take is refused with a note. A local
-//    branch is never reset over such commits.
+//    branch is never reset over such commits. One whose folder was deleted by hand is pruned from
+//    git's worktrees, which still hold its branch, and made again.
 // 3. The setup script (E11): `worktreeSetup` in isoplan.json at the repo's top, read from the
 //    receiver's own copy of the remote's default branch, and never from any other branch, so neither
 //    the handoff nor whatever the clone has checked out can change what runs. When the default branch
@@ -61,11 +62,20 @@
 //      x64, signed in with a Claude subscription). The OS, the binary's version and its sign-in
 //      (`claude auth status`, which must answer, and say a subscription) are checked before anything
 //      is made. The worktree is trusted as for headless, then the take's prompt runs to its end,
-//      hidden, as a saved session under the server's id (`claude -p --permission-mode default`, so no
+//      hidden, as a saved session under the server's id (`claude -p --permission-mode manual`, so no
 //      `defaultMode` in the branch's settings loosens it, under `desktopReadMaxTurns` and
 //      `desktopReadTimeoutMinutes`), so it has read the brief before the app takes it over and the two
-//      never write to it at once. A first turn that fails has its transcript deleted. Then, unless the
-//      server has dropped the take (cancelled, or timed out) or it has run past
+//      never write to it at once. `manual` is the name `--help` lists, from 2.1.200, for the mode
+//      settings and `init` call `default`; Claude Code still takes `default` but no longer lists it.
+//      Probed on Claude Code 2.1.330 (23 Nov 2026, Haiku, a folder whose settings set `defaultMode`
+//      acceptEdits; read a file, then the Write tool, then `echo hi >` through Bash): with `manual`, as
+//      with `default`, `init` says `permissionMode` "default", the read runs, Write and Bash are each
+//      denied (a `permission_denied` line, and both in the result's `permission_denials`), exit code
+//      0, and the saved transcript records `permissionMode` "default"; with no flag the folder's
+//      acceptEdits ran both. `dontAsk` denies the same, but the transcript records "dontAsk", and
+//      Claude Code restores a session's mode when it is resumed from a terminal, so the session taken
+//      over could deny everything that asks. A first turn that fails has its transcript deleted.
+//      Then, unless the server has dropped the take (cancelled, or timed out) or it has run past
 //      `desktopTakeBudgetMinutes` (kept under the server's own take timeout), the app is asked to open
 //      it. A session the app didn't open is still taken, with the failure saying how to open it.
 //      The first turn's process is in the process registry while it runs (runner/registry.ts).
@@ -558,12 +568,12 @@ export function takePrompt(id: string, brief: string, setupLog: string | null, f
 /**
  * Claude Code's command line for the new session. The prompt comes first: `--add-dir` takes every
  * argument after it, and would take the prompt too. `print` runs the prompt to its end, unattended,
- * in at most `maxTurns` turns, and says how it went as JSON, for a take into the Claude app: with the
- * default permission mode, whatever the folder's settings set as theirs, so nothing that would ask
- * is allowed.
+ * in at most `maxTurns` turns, and says how it went as JSON, for a take into the Claude app: in manual
+ * mode (Claude Code's `default`; see the probe above), whatever the folder's settings set as theirs,
+ * so nothing that would ask is allowed.
  */
 export function sessionArgv(bin: string, { prompt, session, name, folder, headless, print }: { prompt: string; session: string; name: string; folder: string | null; headless: boolean; print?: { maxTurns: number } }): string[] {
-  const printing = print ? ["--print", "--output-format", "json", "--permission-mode", "default", "--max-turns", String(print.maxTurns)] : [];
+  const printing = print ? ["--print", "--output-format", "json", "--permission-mode", "manual", "--max-turns", String(print.maxTurns)] : [];
   return [...claudeCommand(bin), prompt, ...(headless ? ["--bg"] : []), ...printing, "--session-id", session, "--name", name, ...(folder ? ["--add-dir", folder] : [])];
 }
 
@@ -1150,19 +1160,28 @@ async function worktreeFor(run: RunGit, clone: string, remote: string, branch: s
       const extra = await ahead(run, clone, tip, exempt, `refs/heads/${branch}`, timeoutMs);
       if (extra !== 0) return { error: `The local branch ${branch} in ${clone} has ${extra ?? "some"} commit(s) that aren't in the handoff as handed over now, so no worktree was made over it. Push or move them, then take the handoff again.` };
     }
+    // A worktree whose folder was deleted by hand still holds its path and branch in git until pruned.
+    await run(["worktree", "prune"], { cwd: clone, timeoutMs });
     const r = await run([...hooksOff, "worktree", "add", "--track", "-B", branch, dir, `${remote}/${branch}`], { cwd: clone, timeoutMs, env: NO_LFS });
     return r.code === 0 ? dir : { error: `git worktree add ${dir} failed${r.timedOut ? " (it took too long)" : ""}:\n${r.stderr}` };
   }
   return { error: `${base} and the next eight names beside it are taken by other folders` };
 }
 
-/** The worktree, other than the main checkout, that has `branch` checked out, or null. */
+/**
+ * The worktree, other than the main checkout, that has `branch` checked out, or null. One whose
+ * folder was deleted by hand is pruned, so git no longer holds the branch for it, and isn't returned.
+ */
 export async function worktreeOn(run: RunGit, clone: string, branch: string, timeoutMs: number): Promise<string | null> {
   const listed = await run(["worktree", "list", "--porcelain"], { cwd: clone, timeoutMs });
   if (listed.code !== 0) return null;
   const blocks = listed.stdout.split(/\r?\n\r?\n/).slice(1).map((b) => b.split(/\r?\n/));
   const at = blocks.find((lines) => lines.includes(`branch refs/heads/${branch}`))?.find((line) => line.startsWith("worktree "));
-  return at ? path.resolve(at.slice("worktree ".length)) : null;
+  if (!at) return null;
+  const dir = path.resolve(at.slice("worktree ".length));
+  if (await fs.stat(dir).then((s) => s.isDirectory(), () => false)) return dir;
+  await run(["worktree", "prune"], { cwd: clone, timeoutMs });
+  return null;
 }
 
 // `dir` known to Orca as a project, added when it isn't: the problem, else null.
