@@ -14333,6 +14333,10 @@ async function worktreeFor(run, clone, remote, branch, id, exempt, timeoutMs, ex
 			const extra = await ahead(run, clone, tip, exempt, `refs/heads/${branch}`, timeoutMs);
 			if (extra !== 0) return { error: `The local branch ${branch} in ${clone} has ${extra ?? "some"} commit(s) that aren't in the handoff as handed over now, so no worktree was made over it. Push or move them, then take the handoff again.` };
 		}
+		await run(["worktree", "prune"], {
+			cwd: clone,
+			timeoutMs
+		});
 		const r = await run([
 			...hooksOff,
 			"worktree",
@@ -14351,7 +14355,10 @@ async function worktreeFor(run, clone, remote, branch, id, exempt, timeoutMs, ex
 	}
 	return { error: `${base} and the next eight names beside it are taken by other folders` };
 }
-/** The worktree, other than the main checkout, that has `branch` checked out, or null. */
+/**
+* The worktree, other than the main checkout, that has `branch` checked out, or null. One whose
+* folder was deleted by hand is pruned, so git no longer holds the branch for it, and isn't returned.
+*/
 async function worktreeOn(run, clone, branch, timeoutMs) {
 	const listed = await run([
 		"worktree",
@@ -14363,7 +14370,14 @@ async function worktreeOn(run, clone, branch, timeoutMs) {
 	});
 	if (listed.code !== 0) return null;
 	const at = listed.stdout.split(/\r?\n\r?\n/).slice(1).map((b) => b.split(/\r?\n/)).find((lines) => lines.includes(`branch refs/heads/${branch}`))?.find((line) => line.startsWith("worktree "));
-	return at ? path.resolve(at.slice(9)) : null;
+	if (!at) return null;
+	const dir = path.resolve(at.slice(9));
+	if (await fs.stat(dir).then((s) => s.isDirectory(), () => false)) return dir;
+	await run(["worktree", "prune"], {
+		cwd: clone,
+		timeoutMs
+	});
+	return null;
 }
 async function inOrca(orca, dir) {
 	const shown = await orca([
@@ -15377,9 +15391,7 @@ async function branchFolder(run, checkout, branch, timeoutMs) {
 	]);
 	if (head.code === 0 && head.stdout.trim() === branch) return checkout;
 	const existing = await worktreeOn(run, checkout, branch, timeoutMs);
-	const isDir = (p) => fs.stat(p).then((s) => s.isDirectory(), () => false);
-	if (existing && await isDir(existing)) return spelledAs(checkout, existing);
-	if (existing) await git(["worktree", "prune"]);
+	if (existing) return spelledAs(checkout, existing);
 	const hooksOff = await noHooks();
 	const base = `${normalize(checkout)}-branch-${asName(branch)}`;
 	for (let n = 1; n < 10; n++) {
