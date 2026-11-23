@@ -13644,9 +13644,9 @@ function takePrompt(id, brief, setupLog, failedRepos = [], task = null) {
 /**
 * Claude Code's command line for the new session. The prompt comes first: `--add-dir` takes every
 * argument after it, and would take the prompt too. `print` runs the prompt to its end, unattended,
-* in at most `maxTurns` turns, and says how it went as JSON, for a take into the Claude app: with the
-* default permission mode, whatever the folder's settings set as theirs, so nothing that would ask
-* is allowed.
+* in at most `maxTurns` turns, and says how it went as JSON, for a take into the Claude app: in manual
+* mode (Claude Code's `default`; see the probe above), whatever the folder's settings set as theirs,
+* so nothing that would ask is allowed.
 */
 function sessionArgv(bin, { prompt, session, name, folder, headless, print }) {
 	const printing = print ? [
@@ -13654,7 +13654,7 @@ function sessionArgv(bin, { prompt, session, name, folder, headless, print }) {
 		"--output-format",
 		"json",
 		"--permission-mode",
-		"default",
+		"manual",
 		"--max-turns",
 		String(print.maxTurns)
 	] : [];

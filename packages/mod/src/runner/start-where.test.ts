@@ -160,7 +160,7 @@ test("the Claude app: the task goes in task.md, the hidden first turn only reads
   const file = path.join(folder, "task.md");
   expect(fs.readFileSync(file, "utf8")).toBe("Write the docs page.\n");
   const [, , print, desktop] = claude.calls();
-  expect(print).toEqual({ args: [desktopTaskPrompt(file), "--print", "--output-format", "json", "--permission-mode", "default", "--max-turns", "2", "--session-id", SESSION, "--name", "Isoplan new session", "--add-dir", folder], cwd: t.checkout });
+  expect(print).toEqual({ args: [desktopTaskPrompt(file), "--print", "--output-format", "json", "--permission-mode", "manual", "--max-turns", "2", "--session-id", SESSION, "--name", "Isoplan new session", "--add-dir", folder], cwd: t.checkout });
   expect(desktop).toEqual({ args: ["--desktop", "--resume", SESSION], cwd: t.checkout });
   expect(t.opened).toEqual([]);
   expect(t.started).toEqual([]);

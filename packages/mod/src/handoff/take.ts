@@ -61,11 +61,20 @@
 //      x64, signed in with a Claude subscription). The OS, the binary's version and its sign-in
 //      (`claude auth status`, which must answer, and say a subscription) are checked before anything
 //      is made. The worktree is trusted as for headless, then the take's prompt runs to its end,
-//      hidden, as a saved session under the server's id (`claude -p --permission-mode default`, so no
+//      hidden, as a saved session under the server's id (`claude -p --permission-mode manual`, so no
 //      `defaultMode` in the branch's settings loosens it, under `desktopReadMaxTurns` and
 //      `desktopReadTimeoutMinutes`), so it has read the brief before the app takes it over and the two
-//      never write to it at once. A first turn that fails has its transcript deleted. Then, unless the
-//      server has dropped the take (cancelled, or timed out) or it has run past
+//      never write to it at once. `manual` is the name `--help` lists, from 2.1.200, for the mode
+//      settings and `init` call `default`; Claude Code still takes `default` but no longer lists it.
+//      Probed on Claude Code 2.1.330 (23 Nov 2026, Haiku, a folder whose settings set `defaultMode`
+//      acceptEdits; read a file, then the Write tool, then `echo hi >` through Bash): with `manual`, as
+//      with `default`, `init` says `permissionMode` "default", the read runs, Write and Bash are each
+//      denied (a `permission_denied` line, and both in the result's `permission_denials`), exit code
+//      0, and the saved transcript records `permissionMode` "default"; with no flag the folder's
+//      acceptEdits ran both. `dontAsk` denies the same, but the transcript records "dontAsk", and
+//      Claude Code restores a session's mode when it is resumed from a terminal, so the session taken
+//      over could deny everything that asks. A first turn that fails has its transcript deleted.
+//      Then, unless the server has dropped the take (cancelled, or timed out) or it has run past
 //      `desktopTakeBudgetMinutes` (kept under the server's own take timeout), the app is asked to open
 //      it. A session the app didn't open is still taken, with the failure saying how to open it.
 //      The first turn's process is in the process registry while it runs (runner/registry.ts).
@@ -558,12 +567,12 @@ export function takePrompt(id: string, brief: string, setupLog: string | null, f
 /**
  * Claude Code's command line for the new session. The prompt comes first: `--add-dir` takes every
  * argument after it, and would take the prompt too. `print` runs the prompt to its end, unattended,
- * in at most `maxTurns` turns, and says how it went as JSON, for a take into the Claude app: with the
- * default permission mode, whatever the folder's settings set as theirs, so nothing that would ask
- * is allowed.
+ * in at most `maxTurns` turns, and says how it went as JSON, for a take into the Claude app: in manual
+ * mode (Claude Code's `default`; see the probe above), whatever the folder's settings set as theirs,
+ * so nothing that would ask is allowed.
  */
 export function sessionArgv(bin: string, { prompt, session, name, folder, headless, print }: { prompt: string; session: string; name: string; folder: string | null; headless: boolean; print?: { maxTurns: number } }): string[] {
-  const printing = print ? ["--print", "--output-format", "json", "--permission-mode", "default", "--max-turns", String(print.maxTurns)] : [];
+  const printing = print ? ["--print", "--output-format", "json", "--permission-mode", "manual", "--max-turns", String(print.maxTurns)] : [];
   return [...claudeCommand(bin), prompt, ...(headless ? ["--bg"] : []), ...printing, "--session-id", session, "--name", name, ...(folder ? ["--add-dir", folder] : [])];
 }
 

@@ -269,8 +269,8 @@ test("into the Claude app: the same worktree and setup, the worktree alone trust
   expect(calls.map((c) => c.args[0])).toEqual(["--version", "auth", expect.stringMatching(/^Isoplan handoff h2d: you are taking this work over\. Read its brief in /), "--desktop"]);
   const [, , print, desktop] = calls;
   expect(print!.cwd).toBe(dir);
-  // The default permission mode, whatever the branch's settings say, and a bounded number of turns.
-  expect(print!.args.slice(1, -1)).toEqual(["--print", "--output-format", "json", "--permission-mode", "default", "--max-turns", "10", "--session-id", SESSION, "--name", "Isoplan handoff h2d", "--add-dir"]);
+  // Manual (Claude Code's default) permission mode, whatever the branch's settings say, and a bounded number of turns.
+  expect(print!.args.slice(1, -1)).toEqual(["--print", "--output-format", "json", "--permission-mode", "manual", "--max-turns", "10", "--session-id", SESSION, "--name", "Isoplan handoff h2d", "--add-dir"]);
   expect(desktop).toEqual({ args: ["--desktop", "--resume", SESSION], cwd: dir });
   // No window of Isoplan's own, and no background session.
   expect(t.opened).toEqual([]);
