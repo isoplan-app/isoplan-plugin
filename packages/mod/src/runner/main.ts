@@ -79,6 +79,7 @@ import { createPairing, pairingEntry, pairingLockPath, pairingPath, pairingWrite
 import { HOLD_OFF_MS, alive, holdOff, refreshLock, releaseLock, takeLock } from "../wake/lock.js";
 import { openLedger } from "./caps.js";
 import { createClaudeAnswerer, forkableId, forkEnv, killPid } from "./claude.js";
+import { endStrays } from "./strays.js";
 import { claudeBinary } from "./claude-binary.js";
 import { createClaudeSetup } from "./claude-setup.js";
 import { anyRoomSince, askableMs, NOT_WANTED_CODE, onEscapes, supervise, UNPAIRED_CODE } from "./lifecycle.js";
@@ -620,6 +621,7 @@ async function worker(): Promise<number> {
     // Kept on disk, so it isn't reported again after a runner restart either; it is once its
     // transcript is written again (resumed in a terminal, say), or its hooks module connects.
     removed: (session) => reporting.end(session.slice(session.indexOf(":") + 1), REMOVED, true),
+    endStrays: (session, folder) => endStrays(session, folder, { log }),
     projectOf: async (folder) => (await homeIo.projectOf(await homeIo.resolve(folder), folder)).id,
     isoplanClone,
     // A start that opens outside the floor (#85), as a take opens its session.

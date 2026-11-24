@@ -1,5 +1,5 @@
-// This user's processes, for the window of what's running (#137): read-only, and only while that
-// window is open and asks. Nothing here ends or signals a process.
+// This user's processes, for the desktop app's window of what's running (#137) and for the runner's
+// cleanup when a driven session is ended and removed (#144). Nothing here ends or signals a process.
 //
 // Windows: one hidden PowerShell call to Win32_Process (CIM), which needs no admin. It lists the
 // processes in the app's own logon session whose command line it can read: another user's, or an
@@ -10,9 +10,15 @@
 // ReadProcessMemory), which needs no admin for this user's own processes; one that can't be opened has
 // none, and running.ts places it by its command line and the process tree. macOS: `ps -U <uid>` for the
 // processes, and `lsof -d cwd` for each one's working folder, both this user's alone.
+//
+// Each process's ISOPLAN_SESSION, the marker the runner puts in a driven session's environment and
+// every process under it inherits, even one whose parent has ended (session.ts): on Windows read from
+// its own memory as its working folder is, on macOS from `ps -E`, which shows this user's processes'
+// environments. A 32-bit (WOW64) process's, or one that can't be read, isn't: it has no `marker`.
 
 import { execFile } from "node:child_process";
-import { parsePsInfo } from "../../../mod/src/runner/registry.js";
+import { SESSION_MARKER } from "./claude.js";
+import { parsePsInfo } from "./registry.js";
 
 /** A process as the OS lists it. */
 export interface Proc {
@@ -27,6 +33,8 @@ export interface Proc {
   memory: number;
   /** Its working folder, where it can be read. */
   cwd?: string;
+  /** Its ISOPLAN_SESSION: the driven session that started it; "" when its environment was read and has none. Absent when it couldn't be read. */
+  marker?: string;
 }
 
 // A process's working folder on Windows, as a 64-bit process reads another's: PEB+0x20 is its
@@ -56,6 +64,23 @@ const CWD_HELPER = [
   "var p = Read(h, info[1].ToInt64() + 0x20, 8); if (p == null) return null;",
   "var u = Read(h, BitConverter.ToInt64(p, 0) + 0x38, 16); if (u == null) return null;",
   "return Text(h, BitConverter.ToUInt16(u, 0), BitConverter.ToInt64(u, 8));",
+  "} finally { CloseHandle(h); } }",
+  // Its ISOPLAN_SESSION, from its environment block: ProcessParameters+0x80 is the block, +0x3F0 its
+  // size in bytes. "" when it has none; null for a 32-bit process, or one that can't be opened or read.
+  "public static string Marker(int pid) {",
+  "if (IntPtr.Size != 8) return null;",
+  "IntPtr h = OpenProcess(0x0410, false, pid); if (h == IntPtr.Zero) return null;",
+  "try {",
+  "var info = new IntPtr[6]; int length;",
+  "if (NtQueryInformationProcess(h, 26, info, 8, out length) != 0 || info[0] != IntPtr.Zero) return null;",
+  "if (NtQueryInformationProcess(h, 0, info, 48, out length) != 0) return null;",
+  "var p = Read(h, info[1].ToInt64() + 0x20, 8); if (p == null) return null;",
+  "long pp = BitConverter.ToInt64(p, 0);",
+  "var at = Read(h, pp + 0x80, 8); var n = Read(h, pp + 0x3F0, 8); if (at == null || n == null) return null;",
+  "long size = BitConverter.ToInt64(n, 0); if (size <= 0 || size > 1048576) return null;",
+  "var env = Text(h, (int)size, BitConverter.ToInt64(at, 0)); if (env == null) return null;",
+  `foreach (var v in env.Split((char)0)) if (v.StartsWith("${SESSION_MARKER}=", StringComparison.Ordinal)) return v.Substring(${SESSION_MARKER.length + 1});`,
+  'return "";',
   "} finally { CloseHandle(h); } } }",
 ].join(" ");
 
@@ -63,12 +88,12 @@ const WINDOWS_SCRIPT = [
   "[Console]::OutputEncoding = [Text.Encoding]::UTF8",
   `Add-Type -TypeDefinition '${CWD_HELPER}'`,
   '$s = (Get-CimInstance Win32_Process -Filter "ProcessId = $PID").SessionId',
-  '$list = @(Get-CimInstance Win32_Process -Filter "SessionId = $s" | Where-Object { $_.CommandLine } | ForEach-Object { [pscustomobject]@{ pid = $_.ProcessId; ppid = $_.ParentProcessId; name = $_.Name; command = $_.CommandLine; start = $(if ($_.CreationDate) { [DateTimeOffset]::new($_.CreationDate).ToUnixTimeMilliseconds() } else { 0 }); memory = $_.WorkingSetSize; cwd = [IsoplanCwd]::Of([int]$_.ProcessId) } })',
+  '$list = @(Get-CimInstance Win32_Process -Filter "SessionId = $s" | Where-Object { $_.CommandLine } | ForEach-Object { [pscustomobject]@{ pid = $_.ProcessId; ppid = $_.ParentProcessId; name = $_.Name; command = $_.CommandLine; start = $(if ($_.CreationDate) { [DateTimeOffset]::new($_.CreationDate).ToUnixTimeMilliseconds() } else { 0 }); memory = $_.WorkingSetSize; cwd = [IsoplanCwd]::Of([int]$_.ProcessId); marker = [IsoplanCwd]::Marker([int]$_.ProcessId) } })',
   "ConvertTo-Json -InputObject $list -Compress -Depth 2",
 ].join("; ");
 
 /** The hidden commands that list this user's processes, each `[file, ...args]`. */
-export function listCommands(platform: NodeJS.Platform, uid: number): { ps: string[]; names?: string[]; cwd?: string[] } {
+export function listCommands(platform: NodeJS.Platform, uid: number): { ps: string[]; names?: string[]; cwd?: string[]; env?: string[] } {
   if (platform === "win32") return { ps: ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_SCRIPT] };
   const user = String(uid);
   return {
@@ -76,10 +101,12 @@ export function listCommands(platform: NodeJS.Platform, uid: number): { ps: stri
     // comm last, as it may hold spaces.
     names: ["ps", "-x", "-U", user, "-o", "pid=,comm="],
     cwd: ["lsof", "-a", "-d", "cwd", "-u", user, "-Fn", "-w"],
+    // Each command line followed by its environment.
+    env: ["ps", "-x", "-E", "-ww", "-U", user, "-o", "pid=,command="],
   };
 }
 
-/** PowerShell's answer: a JSON list of { pid, ppid, name, command, start, memory, cwd }; cwd null where it couldn't be read. */
+/** PowerShell's answer: a JSON list of { pid, ppid, name, command, start, memory, cwd, marker }; cwd and marker null where they couldn't be read. */
 export function parseWindowsList(stdout: string): Proc[] | null {
   let value: unknown;
   try {
@@ -90,7 +117,7 @@ export function parseWindowsList(stdout: string): Proc[] | null {
   if (!Array.isArray(value)) return null;
   return value.flatMap((p: Record<string, unknown>) =>
     Number.isSafeInteger(p?.pid) && typeof p.command === "string"
-      ? [{ pid: p.pid as number, ppid: Number(p.ppid) || 0, name: String(p.name ?? ""), command: p.command, startMs: Number(p.start) || 0, memory: Number(p.memory) || 0, ...(typeof p.cwd === "string" && p.cwd && { cwd: p.cwd.length > 3 ? p.cwd.replace(/[\\/]+$/, "") : p.cwd }) }]
+      ? [{ pid: p.pid as number, ppid: Number(p.ppid) || 0, name: String(p.name ?? ""), command: p.command, startMs: Number(p.start) || 0, memory: Number(p.memory) || 0, ...(typeof p.cwd === "string" && p.cwd && { cwd: p.cwd.length > 3 ? p.cwd.replace(/[\\/]+$/, "") : p.cwd }), ...(typeof p.marker === "string" && { marker: p.marker }) }]
       : [],
   );
 }
@@ -126,6 +153,24 @@ export function parseLsofCwd(stdout: string): Map<number, string> {
   return cwd;
 }
 
+/**
+ * Each process's ISOPLAN_SESSION from `ps -E -o pid=,command=`, whose command column is the command
+ * line, a space, then the environment: read only after the command line `commands` gives it, so a
+ * command line can't pass for an environment. "" when it has none; a process whose line doesn't start
+ * with its command line has none listed.
+ */
+export function parsePsMarkers(stdout: string, commands: Map<number, string>): Map<number, string> {
+  const markers = new Map<number, string>();
+  const marked = new RegExp(`(?:^|\\s)${SESSION_MARKER}=(\\S*)`);
+  for (const line of stdout.split(/\r?\n/)) {
+    const m = /^\s*(\d+)\s+(.*)$/.exec(line);
+    const command = m ? commands.get(Number(m[1])) : undefined;
+    if (!m || command === undefined || !m[2]!.startsWith(command)) continue;
+    markers.set(Number(m[1]), marked.exec(m[2]!.slice(command.length))?.[1] ?? "");
+  }
+  return markers;
+}
+
 /** What a command wrote to stdout; `allowFail` keeps what it wrote when it exits with an error (lsof does, for a process it can't look into). */
 export type Run = (argv: string[], allowFail?: boolean) => Promise<string | null>;
 
@@ -147,12 +192,43 @@ export async function listProcesses({ platform = process.platform, uid = process
     const out = await run(commands.ps);
     return out === null ? null : parseWindowsList(out);
   }
-  const [out, names, cwd] = await Promise.all([run(commands.ps), run(commands.names!), run(commands.cwd!, true)]);
+  const [out, names, cwd, env] = await Promise.all([run(commands.ps), run(commands.names!), run(commands.cwd!, true), run(commands.env!)]);
   if (out === null) return null;
   const nameOf = parsePsNames(names ?? "");
   const cwdOf = parseLsofCwd(cwd ?? "");
-  return parsePsList(out, now()).map((p) => {
+  const list = parsePsList(out, now());
+  const markerOf = parsePsMarkers(env ?? "", new Map(list.map((p) => [p.pid, p.command])));
+  return list.map((p) => {
     const folder = cwdOf.get(p.pid);
-    return { ...p, name: nameOf.get(p.pid) ?? p.command.split(" ")[0]!.split("/").pop()!, ...(folder && { cwd: folder }) };
+    const marker = markerOf.get(p.pid);
+    return { ...p, name: nameOf.get(p.pid) ?? p.command.split(" ")[0]!.split("/").pop()!, ...(folder && { cwd: folder }), ...(marker !== undefined && { marker }) };
   });
+}
+
+/**
+ * The absolute paths in a command line: quoted or not, and after a flag's `=`. On Windows only a
+ * drive's paths, with Git Bash's `/c/...` read as `C:/...`, so cmd's `/c` and `/d` aren't taken for paths.
+ */
+export function commandPaths(command: string, platform: NodeJS.Platform = process.platform): string[] {
+  const asPath = (t: string): string | null => {
+    const clean = t.replace(/[;,]+$/, "");
+    if (platform !== "win32") return clean.startsWith("/") ? clean : null;
+    const bash = /^\/([A-Za-z])(\/.*)$/.exec(clean);
+    return bash ? `${bash[1]!.toUpperCase()}:${bash[2]}` : /^[A-Za-z]:[\\/]/.test(clean) ? clean : null;
+  };
+  const out: string[] = [];
+  for (const m of command.matchAll(/(?:"[^"]*"|'[^']*'|[^\s"'])+/g)) {
+    const token = m[0].replace(/["']/g, "");
+    // A quoted path keeps its spaces; a quoted command (cmd /c "...") is read word by word, and so are
+    // the words after the first of one that starts with a path ("C:\tools\bash.exe -c C:\w\x").
+    const whole = asPath(token) !== null || asPath(token.slice(token.indexOf("=") + 1)) !== null;
+    const words = whole ? [token, ...token.split(/\s+/).slice(1)] : token.split(/\s+/);
+    for (const word of words) {
+      for (const t of [word, word.slice(word.indexOf("=") + 1)]) {
+        const p = asPath(t);
+        if (p !== null && !out.includes(p)) out.push(p);
+      }
+    }
+  }
+  return out;
 }

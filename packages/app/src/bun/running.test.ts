@@ -1,9 +1,9 @@
 import path from "node:path";
 import { expect, test } from "vitest";
 import type { RunnerStatus } from "../../../mod/src/runner/status.js";
-import type { Proc } from "./processes.ts";
+import { commandPaths, type Proc } from "../../../mod/src/runner/processes.js";
 import { askAgainMs } from "../shared/ask-again.ts";
-import { commandPaths, parseClaudeSession, patternsProblemLine, runningView, workTreeFinder, type RunningInput } from "./running.ts";
+import { endChoice, parseClaudeSession, patternsProblemLine, runningView, workTreeFinder, type RunningInput } from "./running.ts";
 import { loadPatterns } from "../../../mod/src/runner/scan.js";
 const modDir = path.resolve(import.meta.dirname, "..", "..", "..", "mod");
 import fs from "node:fs/promises";
@@ -75,15 +75,15 @@ test("what's running: each folder lists its sessions with their processes, and t
             how: "from the floor",
             found: true,
             processes: [
-              { pid: 100, name: "claude.exe", command: "claude -p --resume u-d", started: at(T - 5000), memory: 300 * MB, parent: { pid: 50, name: "bun.exe" }, session: "Fix login" },
-              { pid: 101, name: "node.exe", command: "node C:\\w\\app\\node_modules\\vitest\\vitest.mjs", started: at(T - 4000), memory: 60 * MB, parent: { pid: 100, name: "claude.exe" }, session: "Fix login" },
+              { pid: 100, name: "claude.exe", command: "claude -p --resume u-d", started: at(T - 5000), memory: 300 * MB, parent: { pid: 50, name: "bun.exe" }, session: "Fix login", isoplan: null, endable: true },
+              { pid: 101, name: "node.exe", command: "node C:\\w\\app\\node_modules\\vitest\\vitest.mjs", started: at(T - 4000), memory: 60 * MB, parent: { pid: 100, name: "claude.exe" }, session: "Fix login", isoplan: null, endable: true },
             ],
           },
         ],
         strays: [
-          { pid: 400, name: "node.exe", command: "node C:\\w\\app\\node_modules\\vite\\bin\\vite.js --port 5173", started: at(T - 6000), memory: 90 * MB, parent: { pid: 999 }, session: null },
-          { pid: 401, name: "esbuild.exe", command: "esbuild --service=0.25", started: at(T - 5900), memory: 20 * MB, parent: { pid: 400, name: "node.exe" }, session: null },
-          { pid: 450, name: "bash.exe", command: "bash --login -i", started: at(T - 5800), memory: 5 * MB, parent: { pid: 1 }, session: null },
+          { pid: 400, name: "node.exe", command: "node C:\\w\\app\\node_modules\\vite\\bin\\vite.js --port 5173", started: at(T - 6000), memory: 90 * MB, parent: { pid: 999 }, session: null, isoplan: null, endable: true },
+          { pid: 401, name: "esbuild.exe", command: "esbuild --service=0.25", started: at(T - 5900), memory: 20 * MB, parent: { pid: 400, name: "node.exe" }, session: null, isoplan: null, endable: true },
+          { pid: 450, name: "bash.exe", command: "bash --login -i", started: at(T - 5800), memory: 5 * MB, parent: { pid: 1 }, session: null, isoplan: null, endable: true },
         ],
       },
       {
@@ -100,15 +100,52 @@ test("what's running: each folder lists its sessions with their processes, and t
             state: "working",
             found: true,
             processes: [
-              { pid: 200, name: "claude.exe", command: "claude", started: at(T - 7000), memory: 250 * MB, parent: { pid: 150, name: "pwsh.exe" }, session: "site" },
-              { pid: 201, name: "bash.exe", command: 'bash -c "API=[secret cut] pnpm test"', started: at(T - 3000), memory: 4 * MB, parent: { pid: 200, name: "claude.exe" }, session: "site" },
+              { pid: 200, name: "claude.exe", command: "claude", started: at(T - 7000), memory: 250 * MB, parent: { pid: 150, name: "pwsh.exe" }, session: "site", isoplan: null, endable: true },
+              { pid: 201, name: "bash.exe", command: 'bash -c "API=[secret cut] pnpm test"', started: at(T - 3000), memory: 4 * MB, parent: { pid: 200, name: "claude.exe" }, session: "site", isoplan: null, endable: true },
             ],
           },
         ],
-        strays: [{ pid: 600, name: "node.exe", command: '"C:\\Program Files\\nodejs\\node.exe" "C:\\w\\site\\scripts\\watch.js"', started: at(T - 20_000), memory: 40 * MB, parent: { pid: 100 }, session: null }],
+        strays: [{ pid: 600, name: "node.exe", command: '"C:\\Program Files\\nodejs\\node.exe" "C:\\w\\site\\scripts\\watch.js"', started: at(T - 20_000), memory: 40 * MB, parent: { pid: 100 }, session: null, isoplan: null, endable: true }],
       },
     ],
   });
+});
+
+test("what's running: End is offered on a session's processes and the ones in no session, never on the app, its runner or what they run outside a session; each says whether Isoplan started it", () => {
+  const marked = (p: Proc, marker?: string) => ({ ...p, ...(marker !== undefined && { marker }) });
+  const view = runningView(
+    input({
+      self: 40,
+      processes: [
+        proc(40, 1, "Isoplan.exe", "C:/w/app/build/Isoplan.exe", T - 9500, MB, "C:/w/app"),
+        // The window's own view, under the app.
+        proc(41, 40, "msedgewebview2.exe", "msedgewebview2.exe", T - 9400, MB, "C:/w/app"),
+        marked(proc(50, 40, "bun.exe", "bun runner.mjs --worker", T - 9000, MB, "C:/w/app"), ""),
+        // A git the runner runs: Isoplan's own, though in the folder.
+        proc(60, 50, "git.exe", "git fetch", T - 8000, MB, "C:/w/app"),
+        marked(proc(100, 50, "claude.exe", "claude -p --resume u-d", T - 5000, MB, "C:/w/app"), "claude-code:u-d"),
+        // The session's dev server, its parent gone: a stray Isoplan started.
+        marked(proc(400, 999, "node.exe", "node vite.js", T - 4000, MB, "C:/w/app"), "claude-code:u-d"),
+        marked(proc(450, 1, "bash.exe", "bash", T - 3000, MB, "C:/w/app"), ""),
+      ],
+    }),
+  );
+  const lines = view.folders.flatMap((f) => [...f.sessions.flatMap((s) => s.processes), ...f.strays]);
+  expect(lines.map((p) => [p.pid, p.endable, p.isoplan])).toEqual([
+    [100, true, true],
+    [40, false, null],
+    [41, false, null],
+    [50, false, false],
+    [60, false, null],
+    [400, true, true],
+    [450, true, false],
+  ]);
+  // One process, only while it is the one that started then; or every one offered in the folder.
+  expect(endChoice(view, { folder: view.folders[0]!.folder, pid: 400, started: at(T - 4000) }).map((p) => p.pid)).toEqual([400]);
+  expect(endChoice(view, { folder: view.folders[0]!.folder, pid: 400, started: at(T) })).toEqual([]);
+  expect(endChoice(view, { folder: view.folders[0]!.folder, pid: 50, started: at(T - 9000) })).toEqual([]);
+  expect(endChoice(view, { folder: view.folders[0]!.folder }).map((p) => p.pid)).toEqual([100, 400, 450]);
+  expect(endChoice(view, { folder: "C:/w/gone" })).toEqual([]);
 });
 
 test("what's running: on macOS a process's working folder places it; how each kind of session runs is said; a fork beside its lead is told apart", () => {

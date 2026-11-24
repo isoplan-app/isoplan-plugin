@@ -7,7 +7,8 @@
 // It logs to <claude dir>/isoplan/logs/app.log; the worker logs to runner.log as before.
 //
 // Show what's running… opens the window of this user's processes by folder (running.ts), which reads
-// them only while it is open, and ends none.
+// them only while it is open. It ends a process, or a folder's, only when a person confirms there, and
+// only what running.ts offers: never the app or its runner (#144). Each one ended is logged.
 //
 // Its Sessions submenu lists what the worker writes into status.json; Close on a headless one asks the
 // worker over its pipe (src/pipe), whose address and token it reads with the runner's own code.
@@ -30,8 +31,9 @@ import type { PairingRPC } from "../shared/pairing-rpc.ts";
 import type { RunningRPC } from "../shared/running-rpc.ts";
 import { startEngine } from "./engine.ts";
 import { closing, currentStatus, pairingView, trayMenu, type MenuInput } from "./menu.ts";
-import { listProcesses } from "./processes.ts";
-import { parseClaudeSession, patternsProblemLine, runningView, workTreeFinder, type ClaudeSessionRecord, type RunningView } from "./running.ts";
+import { listProcesses } from "../../../mod/src/runner/processes.js";
+import { endPid } from "../../../mod/src/runner/strays.js";
+import { endChoice, parseClaudeSession, patternsProblemLine, runningView, workTreeFinder, type ClaudeSessionRecord, type RunningView } from "./running.ts";
 import pkg from "../../package.json" with { type: "json" };
 
 const LOG_CAP_BYTES = 256 * 1024;
@@ -178,13 +180,28 @@ async function runningNow(): Promise<RunningView> {
   const patterns = await loadPatterns(path.join(appDir, "secret-patterns.json"), path.join(isoplanDir, "secret-patterns.json"), (text) => problems.push(text)).catch((err: Error) => (problems.push(err.message), null));
   patternsProblem(problems);
   const [processes, claude] = await Promise.all([listProcesses(), claudeSessions()]);
-  return runningView({ status, processes, claudeSessions: claude, workTree: workTreeFinder(existsSync, path), cut: (command) => cut(command, patterns), refreshMs: s.processRefreshSeconds * 1000 });
+  return runningView({ status, processes, claudeSessions: claude, workTree: workTreeFinder(existsSync, path), cut: (command) => cut(command, patterns), refreshMs: s.processRefreshSeconds * 1000, self: process.pid });
+}
+
+// A person's confirmed End in the window: what endChoice picks from a fresh read, so a process that
+// has ended, or whose pid another has now, is never ended.
+async function endFromWindow(asked: { folder: string; pid?: number; started?: string }): Promise<{ ended: number; failed: number }> {
+  const chosen = endChoice(await runningNow(), asked);
+  let ended = 0;
+  for (const p of chosen) {
+    const who = p.isoplan ? "Isoplan started it" : p.isoplan === false ? "Isoplan didn't start it" : "whether Isoplan started it couldn't be read";
+    if (endPid(p.pid)) {
+      ended++;
+      log(`ended ${p.name} (${p.pid}) in ${asked.folder} from the window of what's running: ${who}`);
+    } else log(`couldn't end ${p.name} (${p.pid}) in ${asked.folder} from the window of what's running: it may have ended already`);
+  }
+  return { ended, failed: chosen.length - ended };
 }
 
 // Only ever from a person's click on the menu item.
 function openRunning(): void {
   if (running) return void running.focus();
-  const rpc = BrowserView.defineRPC<RunningRPC>({ maxRequestTime: 15000, handlers: { requests: { view: () => runningNow() }, messages: {} } });
+  const rpc = BrowserView.defineRPC<RunningRPC>({ maxRequestTime: 15000, handlers: { requests: { view: () => runningNow(), end: (asked) => endFromWindow(asked) }, messages: {} } });
   running = new BrowserWindow({ title: "What's running", url: "views://running/index.html", frame: { width: 900, height: 620, x: 200, y: 120 }, rpc });
   running.on("close", () => (running = null));
 }

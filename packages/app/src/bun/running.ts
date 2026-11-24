@@ -1,6 +1,7 @@
 // What the window of what's running shows (#137): this user's processes by folder, each folder's
 // sessions with the processes that belong to each, and the processes there that belong to no session.
-// Pure, so it can be tested without a window or real processes. Read-only: nothing is ended (#144).
+// Pure, so it can be tested without a window or real processes. Nothing here ends a process: index.ts
+// does, for what endChoice picks.
 //
 // A process's folder is the git work tree (the nearest folder above holding `.git`) of its working
 // folder (processes.ts reads it on both OSes), else of the first path in its command line that is in
@@ -9,11 +10,16 @@
 // under it, all in the session's folder. A session's process is the one the runner started (its pid in
 // status.json), else the one Claude Code's own record of the session names (<claude dir>/sessions/<pid>.json),
 // believed only when that process started when the record says.
+//
+// The window offers to end a process (#144), once a person confirms, and says whether Isoplan started
+// it: its ISOPLAN_SESSION marker (processes.ts) names one of Isoplan's driven sessions. It never offers
+// to end the app, its runner, or what they run that isn't a session's (the window's own views, the
+// listing, git): only a session's processes and the ones in no session.
 
 import type { RunnerStatus, SessionSeen } from "../../../mod/src/runner/status.js";
 import { SPAWN_MATCH_MS } from "../../../mod/src/runner/registry.js";
 import { pathKey } from "../../../mod/src/data-layer/git.js";
-import type { Proc } from "./processes.ts";
+import { commandPaths, type Proc } from "../../../mod/src/runner/processes.js";
 
 /** Claude Code's record of a running session: <claude dir>/sessions/<pid>.json. */
 export interface ClaudeSessionRecord {
@@ -48,6 +54,10 @@ export interface ProcessLine {
   parent: { pid: number; name?: string };
   /** The name of the session it belongs to; null for one that belongs to no session. */
   session: string | null;
+  /** Whether Isoplan started it, by its ISOPLAN_SESSION; null when its environment couldn't be read. */
+  isoplan: boolean | null;
+  /** Whether the window offers to end it: false for the app, its runner, and what they run that is no session's. */
+  endable: boolean;
 }
 
 export interface SessionLine {
@@ -96,6 +106,8 @@ export interface RunningInput {
   /** The command with secrets cut out, or null when the secret patterns can't be read. */
   cut: (command: string) => string | null;
   refreshMs: number;
+  /** The app's own pid, never offered to be ended; the runner's is the status's. */
+  self?: number;
 }
 
 /** How a session runs, as the window says it. */
@@ -120,34 +132,6 @@ export function patternsProblemLine(reasons: string[]): string {
 const STATE: Record<string, string> = { busy: "working", idle: "idle" };
 
 /**
- * The absolute paths in a command line: quoted or not, and after a flag's `=`. On Windows only a
- * drive's paths, with Git Bash's `/c/...` read as `C:/...`, so cmd's `/c` and `/d` aren't taken for paths.
- */
-export function commandPaths(command: string, platform: NodeJS.Platform = process.platform): string[] {
-  const asPath = (t: string): string | null => {
-    const clean = t.replace(/[;,]+$/, "");
-    if (platform !== "win32") return clean.startsWith("/") ? clean : null;
-    const bash = /^\/([A-Za-z])(\/.*)$/.exec(clean);
-    return bash ? `${bash[1]!.toUpperCase()}:${bash[2]}` : /^[A-Za-z]:[\\/]/.test(clean) ? clean : null;
-  };
-  const out: string[] = [];
-  for (const m of command.matchAll(/(?:"[^"]*"|'[^']*'|[^\s"'])+/g)) {
-    const token = m[0].replace(/["']/g, "");
-    // A quoted path keeps its spaces; a quoted command (cmd /c "...") is read word by word, and so are
-    // the words after the first of one that starts with a path ("C:\tools\bash.exe -c C:\w\x").
-    const whole = asPath(token) !== null || asPath(token.slice(token.indexOf("=") + 1)) !== null;
-    const words = whole ? [token, ...token.split(/\s+/).slice(1)] : token.split(/\s+/);
-    for (const word of words) {
-      for (const t of [word, word.slice(word.indexOf("=") + 1)]) {
-        const p = asPath(t);
-        if (p !== null && !out.includes(p)) out.push(p);
-      }
-    }
-  }
-  return out;
-}
-
-/**
  * A finder of the git work tree a path is in: the nearest folder at or above it that holds `.git`
  * (a folder in a checkout, a file in a worktree), asking `exists` once per folder.
  */
@@ -165,7 +149,7 @@ export function workTreeFinder(exists: (path: string) => boolean, p: { join: (..
   return find;
 }
 
-export function runningView({ status, processes, claudeSessions, workTree, platform = process.platform, cut, refreshMs }: RunningInput): RunningView {
+export function runningView({ status, processes, claudeSessions, workTree, platform = process.platform, cut, refreshMs, self }: RunningInput): RunningView {
   const procs = processes ?? [];
   const byPid = new Map(procs.map((p) => [p.pid, p]));
   // A process's parent, only if it started before it: a parent pid reused since is another process.
@@ -194,6 +178,19 @@ export function runningView({ status, processes, claudeSessions, workTree, platf
     const s = rootOf.get(p.pid) ?? (parent ? belongs(parent, seen) : null);
     sessionOf.set(p, s);
     return s;
+  };
+
+  // The app, its runner, and what they run above any session's process: never offered to be ended.
+  const isoplanItself = new Set([self, status?.pid].filter((pid) => pid !== undefined));
+  const keptOf = new Map<Proc, boolean>();
+  const kept = (p: Proc, seen = new Set<Proc>()): boolean => {
+    if (keptOf.has(p)) return keptOf.get(p)!;
+    if (seen.has(p)) return false;
+    seen.add(p);
+    const parent = parentOf(p);
+    const k = isoplanItself.has(p.pid) || (!rootOf.has(p.pid) && !!parent && kept(parent, seen));
+    keptOf.set(p, k);
+    return k;
   };
 
   const sessionFolder = (s: SessionSeen) => workTree(s.folder) ?? s.folder;
@@ -232,7 +229,7 @@ export function runningView({ status, processes, claudeSessions, workTree, platf
 
   const line = (p: Proc, session: string | null): ProcessLine => {
     const parent = parentOf(p);
-    return { pid: p.pid, name: p.name, command: cut(p.command), started: new Date(p.startMs).toISOString(), memory: p.memory, parent: { pid: p.ppid, ...(parent && { name: parent.name }) }, session };
+    return { pid: p.pid, name: p.name, command: cut(p.command), started: new Date(p.startMs).toISOString(), memory: p.memory, parent: { pid: p.ppid, ...(parent && { name: parent.name }) }, session, isoplan: p.marker === undefined ? null : p.marker !== "", endable: !kept(p) };
   };
   for (const p of [...procs].sort((a, b) => a.startMs - b.startMs || a.pid - b.pid)) {
     const i = belongs(p);
@@ -258,4 +255,15 @@ export function runningView({ status, processes, claudeSessions, workTree, platf
     memory: list.reduce((sum, f) => sum + f.memory, 0),
     refreshMs,
   };
+}
+
+/**
+ * What a person's End in the window ends, from a view read just now: every process it offers to end
+ * in `folder`, or only the one with `pid` that started at `started` (so a pid reused since isn't
+ * ended); none when the folder or process isn't there any more.
+ */
+export function endChoice(view: RunningView, { folder, pid, started }: { folder: string; pid?: number; started?: string }): ProcessLine[] {
+  const f = view.folders.find((line) => line.folder === folder);
+  const lines = f ? [...f.sessions.flatMap((s) => s.processes), ...f.strays] : [];
+  return lines.filter((p) => p.endable && (pid === undefined || (p.pid === pid && p.started === started)));
 }

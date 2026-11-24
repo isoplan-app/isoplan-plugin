@@ -56,7 +56,7 @@ const flag = (n) => (args.includes(n) ? args[args.indexOf(n) + 1] : undefined);
 const id = flag("--resume") ?? flag("--session-id");
 const transcript = path.join(process.env.CLAUDE_CONFIG_DIR, "projects", "fake", id + ".jsonl");
 const missing = flag("--resume") !== undefined && !fs.existsSync(transcript);
-log({ argv: args, cwd: process.cwd(), pid: process.pid, grandchild: spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" }).pid });
+log({ argv: args, cwd: process.cwd(), pid: process.pid, marker: process.env.ISOPLAN_SESSION, grandchild: spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" }).pid });
 const finish = (reply) => {
   out({ type: "assistant", parent_tool_use_id: null, message: { content: [{ type: "text", text: reply }] } });
   out({ type: "result", subtype: "success", is_error: false, num_turns: 1, result: reply, session_id: id });
@@ -214,6 +214,8 @@ async function setUp({ settings = {}, linger = false, records = [] as ProcessRec
   const current = { ...SETTINGS, ...settings };
   // The sessions whose reporting was ended as they were removed.
   const removed: string[] = [];
+  // The sessions, with their folders, whose stray processes were asked to be ended as they were removed.
+  const strays: [string, string][] = [];
   const driver = createDriver({
     claudeDir,
     account: { id: ADA.id },
@@ -247,6 +249,7 @@ async function setUp({ settings = {}, linger = false, records = [] as ProcessRec
     // Isoplan's own clones made with real git, from a local origin standing in for GitHub; worktrees too.
     ...(hiddenClones ? { isoplanClone: createIsoplanClones({ git: createRunGit(), claudeDir, timeoutMs: async () => 30000, log, cloneFrom: () => true }) } : {}),
     removed: async (session) => void removed.push(session),
+    endStrays: async (session, f) => void strays.push([session, f]),
   });
   const fakeLog = () => (fs.existsSync(path.join(state, "log.jsonl")) ? fs.readFileSync(path.join(state, "log.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l)) : []);
   // Every process the fake started ends with the test.
@@ -269,7 +272,7 @@ async function setUp({ settings = {}, linger = false, records = [] as ProcessRec
   driver.linked(SERVER);
   if (first) policy(first);
   sent.splice(0);
-  return { root, claudeDir, state, bin, folder, file, driver, registry, sent, folders, all, listing, dropped, link, logs, current, removed, drive, policy, until, of, fakeLog, saved };
+  return { root, claudeDir, state, bin, folder, file, driver, registry, sent, folders, all, listing, dropped, link, logs, current, removed, strays, drive, policy, until, of, fakeLog, saved };
 }
 
 const start = (id: string, extra: Record<string, unknown> = {}) => ({ id, kind: "start", room: "room-1", project: PROJECT, roomSessions: ["claude-code:gone", "claude-code:room-1"], permissions: "auto", ...extra });
@@ -748,11 +751,13 @@ test("interrupt: mid-turn the reply stops, the turn ends stopped with no error, 
   expect(t.fakeLog().filter((l) => "interrupt" in l)).toEqual([{ interrupt: true }]);
 });
 
-test("stop with remove: the process and its tree end mid-turn, it is released removed and forgotten, holding goes without it, its reporting ends, and it isn't opened again", async () => {
+test("stop with remove: the process and its tree end mid-turn, it is released removed and forgotten, holding goes without it, its reporting ends, what it left running is ended, and it isn't opened again", async () => {
   const t = await setUp();
   t.drive(start("d1", { instruction: "now hang" }));
   await t.until(() => t.fakeLog().some((l) => l.turn === "now hang"));
-  const [{ pid, grandchild }] = t.fakeLog();
+  const [{ pid, grandchild, marker }] = t.fakeLog();
+  // Its process carries the session's marker, which what it starts inherits (strays.ts).
+  expect(marker).toBe(S1);
   t.drive({ id: "d2", kind: "stop", session: S1, remove: true });
   await t.until(() => t.of("holding").length === 1);
   expect(t.sent.slice(-3)).toEqual([
@@ -761,6 +766,7 @@ test("stop with remove: the process and its tree end mid-turn, it is released re
     { type: "driven", v: 1, kind: "holding", sessions: [] },
   ]);
   expect(t.removed).toEqual([S1]);
+  expect(t.strays).toEqual([[S1, t.folder]]);
   for (let i = 0; i < 100 && (alive(pid) || alive(grandchild)); i++) await new Promise((r) => setTimeout(r, 50));
   expect([alive(pid), alive(grandchild)]).toEqual([false, false]);
   await t.registry.flushed();
@@ -785,6 +791,7 @@ test("closed from this computer: Close session ends the process mid-turn and is 
   for (let i = 0; i < 100 && (alive(pid) || alive(grandchild)); i++) await new Promise((r) => setTimeout(r, 50));
   expect([alive(pid), alive(grandchild)]).toEqual([false, false]);
   expect(t.removed).toEqual([]);
+  expect(t.strays).toEqual([]);
   await t.registry.flushed();
   expect(t.saved().processes).toMatchObject([{ session: S1, pid: null, state: "closed" }]);
   // Kept: the floor's next instruction opens it again.
@@ -799,6 +806,7 @@ test("closed from this computer: Close session ends the process mid-turn and is 
     { type: "driven", v: 1, kind: "holding", sessions: [] },
   ]);
   expect(t.removed).toEqual([S1]);
+  expect(t.strays).toEqual([[S1, t.folder]]);
   await t.registry.flushed();
   expect(t.saved().processes).toEqual([]);
   // Nothing is left to close, or to instruct.

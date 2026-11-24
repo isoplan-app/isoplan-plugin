@@ -12013,7 +12013,8 @@ function forkArgs(sessionId, model) {
 /**
 * The variables Claude Code sets for the processes it starts, which tie them to that session: its
 * marker and entrypoint, the session's ids, its messaging socket and token, its own path and pid,
-* the session's plugin folders and effort, and its IDE port.
+* the session's plugin folders and effort, and its IDE port. And Isoplan's own marker of a driven
+* session's processes, which only the driven session it names is given.
 */
 const FORK_ENV_DROPPED = [
 	"CLAUDECODE",
@@ -12027,8 +12028,15 @@ const FORK_ENV_DROPPED = [
 	"CLAUDE_CODE_PLUGIN_DIRS",
 	"CLAUDE_CODE_SSE_PORT",
 	"CLAUDE_PID",
-	"CLAUDE_EFFORT"
+	"CLAUDE_EFFORT",
+	"ISOPLAN_SESSION"
 ];
+/**
+* The variable a driven session's process is started with, holding its session's id: every process
+* under it inherits it, even after its parent has ended, so the runner can tell the processes it
+* started from the person's own when the session is ended and removed (strays.ts, #144).
+*/
+const SESSION_MARKER = "ISOPLAN_SESSION";
 /** The fork's environment: this one's, less FORK_ENV_DROPPED. */
 function forkEnv(env) {
 	const out = {};
@@ -12224,6 +12232,522 @@ function drive(child, { instructions, request, timeoutMs }) {
 		child.on("close", (code) => fail("failed", `claude exited${code === null ? "" : ` with code ${code}`} before answering${stderr.trim() ? `: ${stderr.trim().split("\n").slice(-3).join(" ")}` : ""}`));
 		child.stdin.write(userTurn(instructions));
 	});
+}
+const registryPath = (claudeDir) => path.join(claudeDir, "isoplan", "runner", "processes.json");
+const ABOUT = "The processes Isoplan's runner started on this machine that may still run, and the sessions driven from the floor it may open again. Written by the runner alone; the format is in the Isoplan plugin's README.";
+const TOUCH_SAVE_MS = 1e4;
+/** The command that asks the OS about `pid`, hidden: PowerShell on Windows, ps elsewhere. */
+function infoCommand(pid, platform) {
+	if (platform === "win32") return [
+		"powershell.exe",
+		"-NoProfile",
+		"-NonInteractive",
+		"-Command",
+		`$p = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"; if ($p) { [DateTimeOffset]::new($p.CreationDate).ToUnixTimeMilliseconds(); $p.CommandLine }`
+	];
+	return [
+		"ps",
+		"-o",
+		"etime=",
+		"-o",
+		"command=",
+		"-p",
+		String(pid)
+	];
+}
+/** PowerShell's answer: the start time in ms on the first line, the command line after it. */
+function parseWindowsInfo(stdout) {
+	const [first, ...rest] = stdout.trim().split(/\r?\n/);
+	const startMs = Number(first?.trim());
+	return first && Number.isFinite(startMs) && startMs > 0 ? {
+		startMs,
+		command: rest.join("\n").trim()
+	} : null;
+}
+/** ps's answer: `[[dd-]hh:]mm:ss` since the process started, then its command line. */
+function parsePsInfo(stdout, now) {
+	const m = /^\s*(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)\s+(.*)$/s.exec(stdout.trim());
+	if (!m) return null;
+	const [, days, hours, minutes, seconds, command] = m;
+	return {
+		startMs: now - (((Number(days ?? 0) * 24 + Number(hours ?? 0)) * 60 + Number(minutes)) * 60 + Number(seconds)) * 1e3,
+		command: command.trim()
+	};
+}
+/** What the OS says of `pid` now, or null when it can't say (gone, or the command failed). */
+function processInfo(pid, platform = process.platform, now = Date.now) {
+	const [cmd, ...args] = infoCommand(pid, platform);
+	return new Promise((resolve) => {
+		execFile(cmd, args, {
+			windowsHide: true,
+			timeout: 15e3,
+			env: platform === "win32" ? process.env : {
+				...process.env,
+				LC_ALL: "C"
+			}
+		}, (err, stdout) => {
+			if (err) return resolve(null);
+			resolve(platform === "win32" ? parseWindowsInfo(stdout) : parsePsInfo(stdout, now()));
+		});
+	});
+}
+const uuidOf$2 = (session) => session.slice(session.indexOf(":") + 1);
+/** Whether `info`, what the OS says of the record's pid, shows the process is the one the record names. */
+function isOurs(record, info) {
+	if (!info || !record.spawned) return false;
+	const spawned = Date.parse(record.spawned);
+	const uuid = uuidOf$2(record.session);
+	return Number.isFinite(spawned) && Math.abs(info.startMs - spawned) <= 15e3 && uuid.length >= 8 && info.command.includes(uuid);
+}
+const keyOf = (r) => r.kind === "driven" ? `driven ${r.session}` : `${r.kind} ${r.pid}`;
+/** The records in the file's text, or null when it isn't a registry this version reads. */
+function parseRegistry(text) {
+	try {
+		const value = JSON.parse(text);
+		if (value?.version !== 1 || !Array.isArray(value.processes)) return null;
+		return value.processes.filter((r) => r && [
+			"driven",
+			"fork",
+			"desktop-read"
+		].includes(r.kind) && typeof r.session === "string" && typeof r.folder === "string" && (r.pid === null || Number.isSafeInteger(r.pid)) && (r.kind !== "driven" || r.driven && typeof r.driven.office === "string"));
+	} catch {
+		return null;
+	}
+}
+/** The name the runner wrote for the driven session `session` (`claude-code:<uuid>`) from its first instruction, as the registry at `file` keeps it; null with none. */
+async function drivenName(file, session) {
+	const d = parseRegistry(await fs.readFile(file, "utf8").catch(() => ""))?.find((r) => r.kind === "driven" && r.session === session)?.driven;
+	return d?.named === true && typeof d.name === "string" && d.name ? d.name : null;
+}
+function createRegistry({ file, log, pid = process.pid, isAlive = alive, info = (p) => processInfo(p), kill = (p) => killPid(p), now = Date.now }) {
+	const records = /* @__PURE__ */ new Map();
+	let writing = Promise.resolve();
+	let queued = false;
+	let savedAt = -Infinity;
+	const text = () => JSON.stringify({
+		about: ABOUT,
+		version: 1,
+		runner: pid,
+		written: new Date(now()).toISOString(),
+		processes: [...records.values()]
+	}, null, 2) + "\n";
+	function save() {
+		savedAt = now();
+		if (queued) return writing;
+		queued = true;
+		writing = writing.then(async () => {
+			queued = false;
+			await fs.mkdir(path.dirname(file), { recursive: true });
+			const temp = `${file}.${pid}.tmp`;
+			await fs.writeFile(temp, text());
+			for (let tries = 0;; tries++) try {
+				await fs.rename(temp, file);
+				return;
+			} catch (err) {
+				if (tries >= 5 || ![
+					"EPERM",
+					"EBUSY",
+					"EACCES"
+				].includes(err.code ?? "")) throw err;
+				await new Promise((r) => setTimeout(r, 50 * (tries + 1)));
+			}
+		}).catch((err) => log(`couldn't write the process registry ${file}: ${err.message}`));
+		return writing;
+	}
+	return {
+		list: () => [...records.values()].map((r) => ({
+			...r,
+			...r.driven ? { driven: { ...r.driven } } : {}
+		})),
+		put(record) {
+			records.set(keyOf(record), { ...record });
+			save();
+		},
+		touch(session, at) {
+			const r = records.get(`driven ${session}`);
+			if (!r) return;
+			r.lastActivity = new Date(at).toISOString();
+			if (now() - savedAt >= TOUCH_SAVE_MS) save();
+		},
+		remove(session) {
+			if (records.delete(`driven ${session}`)) save();
+		},
+		track(child, { kind, session, folder }) {
+			if (child.pid === void 0) return;
+			const at = new Date(now()).toISOString();
+			const record = {
+				kind,
+				pid: child.pid,
+				spawned: at,
+				session,
+				folder,
+				started: at,
+				lastActivity: at,
+				state: "working"
+			};
+			const key = keyOf(record);
+			records.set(key, record);
+			save();
+			child.once("close", () => {
+				if (records.get(key) === record && records.delete(key)) save();
+			});
+		},
+		async restore() {
+			const found = await fs.readFile(file, "utf8").then(parseRegistry, (err) => err.code === "ENOENT" ? [] : null);
+			if (found === null) {
+				log(`the process registry ${file} couldn't be read, or is of another version, so nothing in it was ended or kept; it is written anew`);
+				await save();
+				return;
+			}
+			for (const r of found) {
+				if (r.pid !== null && isAlive(r.pid)) {
+					if (isOurs(r, await info(r.pid))) {
+						log(`ended ${r.kind} process ${r.pid} of ${r.session}, which an earlier run of the runner left`);
+						try {
+							kill(r.pid);
+						} catch {}
+					} else log(`left process ${r.pid} running: the registry names it for ${r.session}, but it can't be shown to be the one Isoplan started`);
+				}
+				if (r.kind !== "driven") continue;
+				records.set(keyOf(r), {
+					...r,
+					pid: null,
+					spawned: null,
+					state: "closed"
+				});
+			}
+			await save();
+		},
+		closeSync() {
+			for (const [key, r] of records) if (r.kind === "driven") records.set(key, {
+				...r,
+				pid: null,
+				spawned: null,
+				state: "closed"
+			});
+			else records.delete(key);
+			try {
+				const temp = `${file}.${pid}.exit.tmp`;
+				fs$1.writeFileSync(temp, text());
+				fs$1.renameSync(temp, file);
+			} catch {}
+		},
+		flushed: () => writing
+	};
+}
+//#endregion
+//#region src/runner/processes.ts
+const WINDOWS_SCRIPT = [
+	"[Console]::OutputEncoding = [Text.Encoding]::UTF8",
+	`Add-Type -TypeDefinition '${[
+		"using System; using System.Runtime.InteropServices;",
+		"public static class IsoplanCwd {",
+		"[DllImport(\"kernel32.dll\")] static extern IntPtr OpenProcess(int access, bool inherit, int pid);",
+		"[DllImport(\"kernel32.dll\")] static extern bool CloseHandle(IntPtr h);",
+		"[DllImport(\"kernel32.dll\")] static extern bool ReadProcessMemory(IntPtr h, IntPtr at, byte[] buffer, IntPtr size, out IntPtr read);",
+		"[DllImport(\"ntdll.dll\")] static extern int NtQueryInformationProcess(IntPtr h, int kind, IntPtr[] info, int size, out int length);",
+		"static byte[] Read(IntPtr h, long at, int n) { var b = new byte[n]; IntPtr r; return ReadProcessMemory(h, new IntPtr(at), b, new IntPtr(n), out r) && r.ToInt64() == n ? b : null; }",
+		"static string Text(IntPtr h, int n, long at) { if (n == 0) return null; var s = Read(h, at, n); return s == null ? null : System.Text.Encoding.Unicode.GetString(s); }",
+		"public static string Of(int pid) {",
+		"if (IntPtr.Size != 8) return null;",
+		"IntPtr h = OpenProcess(0x0410, false, pid); if (h == IntPtr.Zero) return null;",
+		"try {",
+		"var info = new IntPtr[6]; int length;",
+		"if (NtQueryInformationProcess(h, 26, info, 8, out length) == 0 && info[0] != IntPtr.Zero) {",
+		"var p32 = Read(h, info[0].ToInt64() + 0x10, 4); if (p32 == null) return null;",
+		"var u32 = Read(h, (long)BitConverter.ToUInt32(p32, 0) + 0x24, 8); if (u32 == null) return null;",
+		"return Text(h, BitConverter.ToUInt16(u32, 0), BitConverter.ToUInt32(u32, 4)); }",
+		"if (NtQueryInformationProcess(h, 0, info, 48, out length) != 0) return null;",
+		"var p = Read(h, info[1].ToInt64() + 0x20, 8); if (p == null) return null;",
+		"var u = Read(h, BitConverter.ToInt64(p, 0) + 0x38, 16); if (u == null) return null;",
+		"return Text(h, BitConverter.ToUInt16(u, 0), BitConverter.ToInt64(u, 8));",
+		"} finally { CloseHandle(h); } }",
+		"public static string Marker(int pid) {",
+		"if (IntPtr.Size != 8) return null;",
+		"IntPtr h = OpenProcess(0x0410, false, pid); if (h == IntPtr.Zero) return null;",
+		"try {",
+		"var info = new IntPtr[6]; int length;",
+		"if (NtQueryInformationProcess(h, 26, info, 8, out length) != 0 || info[0] != IntPtr.Zero) return null;",
+		"if (NtQueryInformationProcess(h, 0, info, 48, out length) != 0) return null;",
+		"var p = Read(h, info[1].ToInt64() + 0x20, 8); if (p == null) return null;",
+		"long pp = BitConverter.ToInt64(p, 0);",
+		"var at = Read(h, pp + 0x80, 8); var n = Read(h, pp + 0x3F0, 8); if (at == null || n == null) return null;",
+		"long size = BitConverter.ToInt64(n, 0); if (size <= 0 || size > 1048576) return null;",
+		"var env = Text(h, (int)size, BitConverter.ToInt64(at, 0)); if (env == null) return null;",
+		`foreach (var v in env.Split((char)0)) if (v.StartsWith("${SESSION_MARKER}=", StringComparison.Ordinal)) return v.Substring(16);`,
+		"return \"\";",
+		"} finally { CloseHandle(h); } } }"
+	].join(" ")}'`,
+	"$s = (Get-CimInstance Win32_Process -Filter \"ProcessId = $PID\").SessionId",
+	"$list = @(Get-CimInstance Win32_Process -Filter \"SessionId = $s\" | Where-Object { $_.CommandLine } | ForEach-Object { [pscustomobject]@{ pid = $_.ProcessId; ppid = $_.ParentProcessId; name = $_.Name; command = $_.CommandLine; start = $(if ($_.CreationDate) { [DateTimeOffset]::new($_.CreationDate).ToUnixTimeMilliseconds() } else { 0 }); memory = $_.WorkingSetSize; cwd = [IsoplanCwd]::Of([int]$_.ProcessId); marker = [IsoplanCwd]::Marker([int]$_.ProcessId) } })",
+	"ConvertTo-Json -InputObject $list -Compress -Depth 2"
+].join("; ");
+/** The hidden commands that list this user's processes, each `[file, ...args]`. */
+function listCommands(platform, uid) {
+	if (platform === "win32") return { ps: [
+		"powershell.exe",
+		"-NoProfile",
+		"-NonInteractive",
+		"-Command",
+		WINDOWS_SCRIPT
+	] };
+	const user = String(uid);
+	return {
+		ps: [
+			"ps",
+			"-x",
+			"-U",
+			user,
+			"-o",
+			"pid=,ppid=,rss=,etime=,command="
+		],
+		names: [
+			"ps",
+			"-x",
+			"-U",
+			user,
+			"-o",
+			"pid=,comm="
+		],
+		cwd: [
+			"lsof",
+			"-a",
+			"-d",
+			"cwd",
+			"-u",
+			user,
+			"-Fn",
+			"-w"
+		],
+		env: [
+			"ps",
+			"-x",
+			"-E",
+			"-ww",
+			"-U",
+			user,
+			"-o",
+			"pid=,command="
+		]
+	};
+}
+/** PowerShell's answer: a JSON list of { pid, ppid, name, command, start, memory, cwd, marker }; cwd and marker null where they couldn't be read. */
+function parseWindowsList(stdout) {
+	let value;
+	try {
+		value = JSON.parse(stdout.trim() || "[]");
+	} catch {
+		return null;
+	}
+	if (!Array.isArray(value)) return null;
+	return value.flatMap((p) => Number.isSafeInteger(p?.pid) && typeof p.command === "string" ? [{
+		pid: p.pid,
+		ppid: Number(p.ppid) || 0,
+		name: String(p.name ?? ""),
+		command: p.command,
+		startMs: Number(p.start) || 0,
+		memory: Number(p.memory) || 0,
+		...typeof p.cwd === "string" && p.cwd && { cwd: p.cwd.length > 3 ? p.cwd.replace(/[\\/]+$/, "") : p.cwd },
+		...typeof p.marker === "string" && { marker: p.marker }
+	}] : []);
+}
+/** ps's answer: pid, ppid, resident size in KB, `[[dd-]hh:]mm:ss` since it started, then its command line. */
+function parsePsList(stdout, now) {
+	return stdout.split(/\r?\n/).flatMap((line) => {
+		const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+\s+.*)$/.exec(line);
+		const info = m && parsePsInfo(m[4], now);
+		if (!m || !info) return [];
+		return [{
+			pid: Number(m[1]),
+			ppid: Number(m[2]),
+			name: "",
+			command: info.command,
+			startMs: info.startMs,
+			memory: Number(m[3]) * 1024
+		}];
+	});
+}
+/** `ps -o pid=,comm=`'s answer: each pid's executable, as its last path segment. */
+function parsePsNames(stdout) {
+	const names = /* @__PURE__ */ new Map();
+	for (const line of stdout.split(/\r?\n/)) {
+		const m = /^\s*(\d+)\s+(.+?)\s*$/.exec(line);
+		if (m) names.set(Number(m[1]), m[2].slice(m[2].lastIndexOf("/") + 1));
+	}
+	return names;
+}
+/** `lsof -d cwd -Fn`'s answer: `p<pid>` then `n<folder>` (with `f` lines between), per process. */
+function parseLsofCwd(stdout) {
+	const cwd = /* @__PURE__ */ new Map();
+	let pid = null;
+	for (const line of stdout.split(/\r?\n/)) if (line.startsWith("p")) pid = Number(line.slice(1)) || null;
+	else if (line.startsWith("n") && pid !== null) cwd.set(pid, line.slice(1));
+	return cwd;
+}
+/**
+* Each process's ISOPLAN_SESSION from `ps -E -o pid=,command=`, whose command column is the command
+* line, a space, then the environment: read only after the command line `commands` gives it, so a
+* command line can't pass for an environment. "" when it has none; a process whose line doesn't start
+* with its command line has none listed.
+*/
+function parsePsMarkers(stdout, commands) {
+	const markers = /* @__PURE__ */ new Map();
+	const marked = new RegExp(`(?:^|\\s)${SESSION_MARKER}=(\\S*)`);
+	for (const line of stdout.split(/\r?\n/)) {
+		const m = /^\s*(\d+)\s+(.*)$/.exec(line);
+		const command = m ? commands.get(Number(m[1])) : void 0;
+		if (!m || command === void 0 || !m[2].startsWith(command)) continue;
+		markers.set(Number(m[1]), marked.exec(m[2].slice(command.length))?.[1] ?? "");
+	}
+	return markers;
+}
+const LIST_TIMEOUT_MS = 1e4;
+const runHidden$1 = (argv, allowFail = false) => {
+	const [file, ...args] = argv;
+	return new Promise((resolve) => {
+		execFile(file, args, {
+			windowsHide: true,
+			timeout: LIST_TIMEOUT_MS,
+			maxBuffer: 33554432,
+			env: {
+				...process.env,
+				LC_ALL: "C"
+			}
+		}, (err, stdout) => resolve(err && !(allowFail && stdout) ? null : stdout));
+	});
+};
+/** This user's processes now, or null when the OS couldn't be asked. */
+async function listProcesses({ platform = process.platform, uid = process.getuid?.() ?? -1, run = runHidden$1, now = Date.now } = {}) {
+	const commands = listCommands(platform, uid);
+	if (platform === "win32") {
+		const out = await run(commands.ps);
+		return out === null ? null : parseWindowsList(out);
+	}
+	const [out, names, cwd, env] = await Promise.all([
+		run(commands.ps),
+		run(commands.names),
+		run(commands.cwd, true),
+		run(commands.env)
+	]);
+	if (out === null) return null;
+	const nameOf = parsePsNames(names ?? "");
+	const cwdOf = parseLsofCwd(cwd ?? "");
+	const list = parsePsList(out, now());
+	const markerOf = parsePsMarkers(env ?? "", new Map(list.map((p) => [p.pid, p.command])));
+	return list.map((p) => {
+		const folder = cwdOf.get(p.pid);
+		const marker = markerOf.get(p.pid);
+		return {
+			...p,
+			name: nameOf.get(p.pid) ?? p.command.split(" ")[0].split("/").pop(),
+			...folder && { cwd: folder },
+			...marker !== void 0 && { marker }
+		};
+	});
+}
+/**
+* The absolute paths in a command line: quoted or not, and after a flag's `=`. On Windows only a
+* drive's paths, with Git Bash's `/c/...` read as `C:/...`, so cmd's `/c` and `/d` aren't taken for paths.
+*/
+function commandPaths(command, platform = process.platform) {
+	const asPath = (t) => {
+		const clean = t.replace(/[;,]+$/, "");
+		if (platform !== "win32") return clean.startsWith("/") ? clean : null;
+		const bash = /^\/([A-Za-z])(\/.*)$/.exec(clean);
+		return bash ? `${bash[1].toUpperCase()}:${bash[2]}` : /^[A-Za-z]:[\\/]/.test(clean) ? clean : null;
+	};
+	const out = [];
+	for (const m of command.matchAll(/(?:"[^"]*"|'[^']*'|[^\s"'])+/g)) {
+		const token = m[0].replace(/["']/g, "");
+		const words = asPath(token) !== null || asPath(token.slice(token.indexOf("=") + 1)) !== null ? [token, ...token.split(/\s+/).slice(1)] : token.split(/\s+/);
+		for (const word of words) for (const t of [word, word.slice(word.indexOf("=") + 1)]) {
+			const p = asPath(t);
+			if (p !== null && !out.includes(p)) out.push(p);
+		}
+	}
+	return out;
+}
+//#endregion
+//#region src/runner/strays.ts
+/** Whether `p` is `folder` or in it. */
+function inFolder(p, folder) {
+	const key = pathKey(p);
+	const root = pathKey(folder).replace(/\/+$/, "");
+	return key === root || key.startsWith(root + "/");
+}
+/** Which of `procs` to end for the removed session `session` in `folder`, and which are left and why. Pure. */
+function chooseStrays(procs, { session, folder, self, platform = process.platform }) {
+	const byPid = new Map(procs.map((p) => [p.pid, p]));
+	const kept = /* @__PURE__ */ new Set([self]);
+	for (let p = byPid.get(self); p;) {
+		const parent = byPid.get(p.ppid);
+		if (!parent || kept.has(parent.pid) || parent.startMs > p.startMs) break;
+		kept.add(parent.pid);
+		p = parent;
+	}
+	const here = (p) => p.cwd !== void 0 && inFolder(p.cwd, folder) || commandPaths(p.command, platform).some((c) => inFolder(c, folder));
+	const choice = {
+		end: [],
+		left: []
+	};
+	for (const p of procs) {
+		const ours = p.marker === session;
+		if (!here(p)) {
+			if (ours && !kept.has(p.pid)) choice.left.push({
+				proc: p,
+				why: "Isoplan started it for this session, but it runs outside the session's folder"
+			});
+			continue;
+		}
+		if (kept.has(p.pid)) choice.left.push({
+			proc: p,
+			why: "it is Isoplan's runner, or the app that runs it"
+		});
+		else if (ours) choice.end.push(p);
+		else if (p.marker === void 0) choice.left.push({
+			proc: p,
+			why: "its environment couldn't be read, so it can't be told whether Isoplan started it"
+		});
+		else if (p.marker === "") choice.left.push({
+			proc: p,
+			why: "Isoplan didn't start it"
+		});
+		else choice.left.push({
+			proc: p,
+			why: "another of Isoplan's sessions started it"
+		});
+	}
+	return choice;
+}
+/** Ends the process `pid` alone, not what it started: each of those is ended for itself, if it carries the marker. */
+function endPid(pid, platform = process.platform) {
+	if (platform === "win32") return spawnSync("taskkill", [
+		"/pid",
+		String(pid),
+		"/F"
+	], {
+		windowsHide: true,
+		stdio: "ignore"
+	}).status === 0;
+	try {
+		process.kill(pid, "SIGKILL");
+		return true;
+	} catch {
+		return false;
+	}
+}
+/** Ends what the removed session `session` left running in `folder`, as chooseStrays decides, logging each one ended or left. */
+async function endStrays(session, folder, { log, list = () => listProcesses(), end = (pid) => endPid(pid), self = process.pid, platform = process.platform }) {
+	const procs = await list();
+	if (procs === null) return log(`couldn't list this computer's processes, so nothing ${session} left running in ${folder} was ended`);
+	const { end: ending, left } = chooseStrays(procs, {
+		session,
+		folder,
+		self,
+		platform
+	});
+	for (const p of ending) log(end(p.pid) ? `ended ${p.name} (${p.pid}), which ${session} left running in ${folder}` : `couldn't end ${p.name} (${p.pid}), which ${session} left running in ${folder}: it may have ended already`);
+	for (const { proc, why } of left) log(`left ${proc.name} (${proc.pid}) running in ${folder} when ${session} was removed: ${why}`);
 }
 //#endregion
 //#region src/runner/claude-setup.ts
@@ -15164,208 +15688,6 @@ function createRunner({ answerer, ledger, settings, prompts, scan, send, log, is
 		}
 	};
 }
-const registryPath = (claudeDir) => path.join(claudeDir, "isoplan", "runner", "processes.json");
-const ABOUT = "The processes Isoplan's runner started on this machine that may still run, and the sessions driven from the floor it may open again. Written by the runner alone; the format is in the Isoplan plugin's README.";
-const TOUCH_SAVE_MS = 1e4;
-/** The command that asks the OS about `pid`, hidden: PowerShell on Windows, ps elsewhere. */
-function infoCommand(pid, platform) {
-	if (platform === "win32") return [
-		"powershell.exe",
-		"-NoProfile",
-		"-NonInteractive",
-		"-Command",
-		`$p = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"; if ($p) { [DateTimeOffset]::new($p.CreationDate).ToUnixTimeMilliseconds(); $p.CommandLine }`
-	];
-	return [
-		"ps",
-		"-o",
-		"etime=",
-		"-o",
-		"command=",
-		"-p",
-		String(pid)
-	];
-}
-/** PowerShell's answer: the start time in ms on the first line, the command line after it. */
-function parseWindowsInfo(stdout) {
-	const [first, ...rest] = stdout.trim().split(/\r?\n/);
-	const startMs = Number(first?.trim());
-	return first && Number.isFinite(startMs) && startMs > 0 ? {
-		startMs,
-		command: rest.join("\n").trim()
-	} : null;
-}
-/** ps's answer: `[[dd-]hh:]mm:ss` since the process started, then its command line. */
-function parsePsInfo(stdout, now) {
-	const m = /^\s*(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)\s+(.*)$/s.exec(stdout.trim());
-	if (!m) return null;
-	const [, days, hours, minutes, seconds, command] = m;
-	return {
-		startMs: now - (((Number(days ?? 0) * 24 + Number(hours ?? 0)) * 60 + Number(minutes)) * 60 + Number(seconds)) * 1e3,
-		command: command.trim()
-	};
-}
-/** What the OS says of `pid` now, or null when it can't say (gone, or the command failed). */
-function processInfo(pid, platform = process.platform, now = Date.now) {
-	const [cmd, ...args] = infoCommand(pid, platform);
-	return new Promise((resolve) => {
-		execFile(cmd, args, {
-			windowsHide: true,
-			timeout: 15e3,
-			env: platform === "win32" ? process.env : {
-				...process.env,
-				LC_ALL: "C"
-			}
-		}, (err, stdout) => {
-			if (err) return resolve(null);
-			resolve(platform === "win32" ? parseWindowsInfo(stdout) : parsePsInfo(stdout, now()));
-		});
-	});
-}
-const uuidOf$2 = (session) => session.slice(session.indexOf(":") + 1);
-/** Whether `info`, what the OS says of the record's pid, shows the process is the one the record names. */
-function isOurs(record, info) {
-	if (!info || !record.spawned) return false;
-	const spawned = Date.parse(record.spawned);
-	const uuid = uuidOf$2(record.session);
-	return Number.isFinite(spawned) && Math.abs(info.startMs - spawned) <= 15e3 && uuid.length >= 8 && info.command.includes(uuid);
-}
-const keyOf = (r) => r.kind === "driven" ? `driven ${r.session}` : `${r.kind} ${r.pid}`;
-/** The records in the file's text, or null when it isn't a registry this version reads. */
-function parseRegistry(text) {
-	try {
-		const value = JSON.parse(text);
-		if (value?.version !== 1 || !Array.isArray(value.processes)) return null;
-		return value.processes.filter((r) => r && [
-			"driven",
-			"fork",
-			"desktop-read"
-		].includes(r.kind) && typeof r.session === "string" && typeof r.folder === "string" && (r.pid === null || Number.isSafeInteger(r.pid)) && (r.kind !== "driven" || r.driven && typeof r.driven.office === "string"));
-	} catch {
-		return null;
-	}
-}
-/** The name the runner wrote for the driven session `session` (`claude-code:<uuid>`) from its first instruction, as the registry at `file` keeps it; null with none. */
-async function drivenName(file, session) {
-	const d = parseRegistry(await fs.readFile(file, "utf8").catch(() => ""))?.find((r) => r.kind === "driven" && r.session === session)?.driven;
-	return d?.named === true && typeof d.name === "string" && d.name ? d.name : null;
-}
-function createRegistry({ file, log, pid = process.pid, isAlive = alive, info = (p) => processInfo(p), kill = (p) => killPid(p), now = Date.now }) {
-	const records = /* @__PURE__ */ new Map();
-	let writing = Promise.resolve();
-	let queued = false;
-	let savedAt = -Infinity;
-	const text = () => JSON.stringify({
-		about: ABOUT,
-		version: 1,
-		runner: pid,
-		written: new Date(now()).toISOString(),
-		processes: [...records.values()]
-	}, null, 2) + "\n";
-	function save() {
-		savedAt = now();
-		if (queued) return writing;
-		queued = true;
-		writing = writing.then(async () => {
-			queued = false;
-			await fs.mkdir(path.dirname(file), { recursive: true });
-			const temp = `${file}.${pid}.tmp`;
-			await fs.writeFile(temp, text());
-			for (let tries = 0;; tries++) try {
-				await fs.rename(temp, file);
-				return;
-			} catch (err) {
-				if (tries >= 5 || ![
-					"EPERM",
-					"EBUSY",
-					"EACCES"
-				].includes(err.code ?? "")) throw err;
-				await new Promise((r) => setTimeout(r, 50 * (tries + 1)));
-			}
-		}).catch((err) => log(`couldn't write the process registry ${file}: ${err.message}`));
-		return writing;
-	}
-	return {
-		list: () => [...records.values()].map((r) => ({
-			...r,
-			...r.driven ? { driven: { ...r.driven } } : {}
-		})),
-		put(record) {
-			records.set(keyOf(record), { ...record });
-			save();
-		},
-		touch(session, at) {
-			const r = records.get(`driven ${session}`);
-			if (!r) return;
-			r.lastActivity = new Date(at).toISOString();
-			if (now() - savedAt >= TOUCH_SAVE_MS) save();
-		},
-		remove(session) {
-			if (records.delete(`driven ${session}`)) save();
-		},
-		track(child, { kind, session, folder }) {
-			if (child.pid === void 0) return;
-			const at = new Date(now()).toISOString();
-			const record = {
-				kind,
-				pid: child.pid,
-				spawned: at,
-				session,
-				folder,
-				started: at,
-				lastActivity: at,
-				state: "working"
-			};
-			const key = keyOf(record);
-			records.set(key, record);
-			save();
-			child.once("close", () => {
-				if (records.get(key) === record && records.delete(key)) save();
-			});
-		},
-		async restore() {
-			const found = await fs.readFile(file, "utf8").then(parseRegistry, (err) => err.code === "ENOENT" ? [] : null);
-			if (found === null) {
-				log(`the process registry ${file} couldn't be read, or is of another version, so nothing in it was ended or kept; it is written anew`);
-				await save();
-				return;
-			}
-			for (const r of found) {
-				if (r.pid !== null && isAlive(r.pid)) {
-					if (isOurs(r, await info(r.pid))) {
-						log(`ended ${r.kind} process ${r.pid} of ${r.session}, which an earlier run of the runner left`);
-						try {
-							kill(r.pid);
-						} catch {}
-					} else log(`left process ${r.pid} running: the registry names it for ${r.session}, but it can't be shown to be the one Isoplan started`);
-				}
-				if (r.kind !== "driven") continue;
-				records.set(keyOf(r), {
-					...r,
-					pid: null,
-					spawned: null,
-					state: "closed"
-				});
-			}
-			await save();
-		},
-		closeSync() {
-			for (const [key, r] of records) if (r.kind === "driven") records.set(key, {
-				...r,
-				pid: null,
-				spawned: null,
-				state: "closed"
-			});
-			else records.delete(key);
-			try {
-				const temp = `${file}.${pid}.exit.tmp`;
-				fs$1.writeFileSync(temp, text());
-				fs$1.renameSync(temp, file);
-			} catch {}
-		},
-		flushed: () => writing
-	};
-}
 //#endregion
 //#region src/runner/checkouts.ts
 /** The main checkout of the repo at `where`: the folder holding its shared `.git`, or, for a bare repo's worktree, the worktree itself. */
@@ -18111,7 +18433,10 @@ function createDriver(o) {
 			try {
 				child = spawn(argv, {
 					cwd: s.record.folder,
-					env: forkEnv(env)
+					env: {
+						...forkEnv(env),
+						[SESSION_MARKER]: s.record.session
+					}
 				});
 			} catch (err) {
 				o.log(`couldn't start claude for ${s.record.session} in ${s.record.folder}: ${err.message}`);
@@ -18768,6 +19093,7 @@ function createDriver(o) {
 		if (policies.has(server)) sayHolding(server);
 		await o.removed?.(session).catch((err) => o.log(`couldn't stop reporting ${session}: ${err?.message ?? String(err)}`));
 		o.log(`ended and removed driven session ${session}: it won't be opened again`);
+		o.endStrays?.(session, s.record.folder).catch((err) => o.log(`couldn't end what ${session} left running: ${err?.message ?? String(err)}`));
 	}
 	async function stop(s, id, removing) {
 		if (!current(s)) return refuse(s.record.driven.office, id, "not-found");
@@ -24442,6 +24768,7 @@ async function worker() {
 		log,
 		namer,
 		removed: (session) => reporting.end(session.slice(session.indexOf(":") + 1), REMOVED, true),
+		endStrays: (session, folder) => endStrays(session, folder, { log }),
 		projectOf: async (folder) => (await homeIo.projectOf(await homeIo.resolve(folder), folder)).id,
 		isoplanClone,
 		elsewhere: (start, bin) => startWhere(start, bin, {
