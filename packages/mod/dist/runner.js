@@ -12437,47 +12437,50 @@ function createRegistry({ file, log, pid = process.pid, isAlive = alive, info = 
 }
 //#endregion
 //#region src/runner/processes.ts
+const CWD_HELPER = [
+	"using System; using System.Runtime.InteropServices;",
+	"public static class IsoplanCwd {",
+	"[DllImport(\"kernel32.dll\")] static extern IntPtr OpenProcess(int access, bool inherit, int pid);",
+	"[DllImport(\"kernel32.dll\")] static extern bool CloseHandle(IntPtr h);",
+	"[DllImport(\"kernel32.dll\")] static extern bool ReadProcessMemory(IntPtr h, IntPtr at, byte[] buffer, IntPtr size, out IntPtr read);",
+	"[DllImport(\"ntdll.dll\")] static extern int NtQueryInformationProcess(IntPtr h, int kind, IntPtr[] info, int size, out int length);",
+	"static byte[] Read(IntPtr h, long at, int n) { var b = new byte[n]; IntPtr r; return ReadProcessMemory(h, new IntPtr(at), b, new IntPtr(n), out r) && r.ToInt64() == n ? b : null; }",
+	"static string Text(IntPtr h, int n, long at) { if (n == 0) return null; var s = Read(h, at, n); return s == null ? null : System.Text.Encoding.Unicode.GetString(s); }",
+	"public static string Of(int pid) {",
+	"if (IntPtr.Size != 8) return null;",
+	"IntPtr h = OpenProcess(0x0410, false, pid); if (h == IntPtr.Zero) return null;",
+	"try {",
+	"var info = new IntPtr[6]; int length;",
+	"if (NtQueryInformationProcess(h, 26, info, 8, out length) == 0 && info[0] != IntPtr.Zero) {",
+	"var p32 = Read(h, info[0].ToInt64() + 0x10, 4); if (p32 == null) return null;",
+	"var u32 = Read(h, (long)BitConverter.ToUInt32(p32, 0) + 0x24, 8); if (u32 == null) return null;",
+	"return Text(h, BitConverter.ToUInt16(u32, 0), BitConverter.ToUInt32(u32, 4)); }",
+	"if (NtQueryInformationProcess(h, 0, info, 48, out length) != 0) return null;",
+	"var p = Read(h, info[1].ToInt64() + 0x20, 8); if (p == null) return null;",
+	"var u = Read(h, BitConverter.ToInt64(p, 0) + 0x38, 16); if (u == null) return null;",
+	"return Text(h, BitConverter.ToUInt16(u, 0), BitConverter.ToInt64(u, 8));",
+	"} finally { CloseHandle(h); } }",
+	"public static string Marker(int pid) {",
+	"if (IntPtr.Size != 8) return null;",
+	"IntPtr h = OpenProcess(0x0410, false, pid); if (h == IntPtr.Zero) return null;",
+	"try { return MarkerOf(h); } finally { CloseHandle(h); } }",
+	"public static string MarkerOf(IntPtr h) {",
+	"if (IntPtr.Size != 8) return null;",
+	"var info = new IntPtr[6]; int length;",
+	"if (NtQueryInformationProcess(h, 26, info, 8, out length) != 0 || info[0] != IntPtr.Zero) return null;",
+	"if (NtQueryInformationProcess(h, 0, info, 48, out length) != 0) return null;",
+	"var p = Read(h, info[1].ToInt64() + 0x20, 8); if (p == null) return null;",
+	"long pp = BitConverter.ToInt64(p, 0);",
+	"var at = Read(h, pp + 0x80, 8); var n = Read(h, pp + 0x3F0, 8); if (at == null || n == null) return null;",
+	"long size = BitConverter.ToInt64(n, 0); if (size <= 0 || size > 1048576) return null;",
+	"var env = Text(h, (int)size, BitConverter.ToInt64(at, 0)); if (env == null) return null;",
+	`foreach (var v in env.Split((char)0)) if (v.StartsWith("${SESSION_MARKER}=", StringComparison.Ordinal)) return v.Substring(16);`,
+	"return \"\";",
+	"} }"
+].join(" ");
 const WINDOWS_SCRIPT = [
 	"[Console]::OutputEncoding = [Text.Encoding]::UTF8",
-	`Add-Type -TypeDefinition '${[
-		"using System; using System.Runtime.InteropServices;",
-		"public static class IsoplanCwd {",
-		"[DllImport(\"kernel32.dll\")] static extern IntPtr OpenProcess(int access, bool inherit, int pid);",
-		"[DllImport(\"kernel32.dll\")] static extern bool CloseHandle(IntPtr h);",
-		"[DllImport(\"kernel32.dll\")] static extern bool ReadProcessMemory(IntPtr h, IntPtr at, byte[] buffer, IntPtr size, out IntPtr read);",
-		"[DllImport(\"ntdll.dll\")] static extern int NtQueryInformationProcess(IntPtr h, int kind, IntPtr[] info, int size, out int length);",
-		"static byte[] Read(IntPtr h, long at, int n) { var b = new byte[n]; IntPtr r; return ReadProcessMemory(h, new IntPtr(at), b, new IntPtr(n), out r) && r.ToInt64() == n ? b : null; }",
-		"static string Text(IntPtr h, int n, long at) { if (n == 0) return null; var s = Read(h, at, n); return s == null ? null : System.Text.Encoding.Unicode.GetString(s); }",
-		"public static string Of(int pid) {",
-		"if (IntPtr.Size != 8) return null;",
-		"IntPtr h = OpenProcess(0x0410, false, pid); if (h == IntPtr.Zero) return null;",
-		"try {",
-		"var info = new IntPtr[6]; int length;",
-		"if (NtQueryInformationProcess(h, 26, info, 8, out length) == 0 && info[0] != IntPtr.Zero) {",
-		"var p32 = Read(h, info[0].ToInt64() + 0x10, 4); if (p32 == null) return null;",
-		"var u32 = Read(h, (long)BitConverter.ToUInt32(p32, 0) + 0x24, 8); if (u32 == null) return null;",
-		"return Text(h, BitConverter.ToUInt16(u32, 0), BitConverter.ToUInt32(u32, 4)); }",
-		"if (NtQueryInformationProcess(h, 0, info, 48, out length) != 0) return null;",
-		"var p = Read(h, info[1].ToInt64() + 0x20, 8); if (p == null) return null;",
-		"var u = Read(h, BitConverter.ToInt64(p, 0) + 0x38, 16); if (u == null) return null;",
-		"return Text(h, BitConverter.ToUInt16(u, 0), BitConverter.ToInt64(u, 8));",
-		"} finally { CloseHandle(h); } }",
-		"public static string Marker(int pid) {",
-		"if (IntPtr.Size != 8) return null;",
-		"IntPtr h = OpenProcess(0x0410, false, pid); if (h == IntPtr.Zero) return null;",
-		"try {",
-		"var info = new IntPtr[6]; int length;",
-		"if (NtQueryInformationProcess(h, 26, info, 8, out length) != 0 || info[0] != IntPtr.Zero) return null;",
-		"if (NtQueryInformationProcess(h, 0, info, 48, out length) != 0) return null;",
-		"var p = Read(h, info[1].ToInt64() + 0x20, 8); if (p == null) return null;",
-		"long pp = BitConverter.ToInt64(p, 0);",
-		"var at = Read(h, pp + 0x80, 8); var n = Read(h, pp + 0x3F0, 8); if (at == null || n == null) return null;",
-		"long size = BitConverter.ToInt64(n, 0); if (size <= 0 || size > 1048576) return null;",
-		"var env = Text(h, (int)size, BitConverter.ToInt64(at, 0)); if (env == null) return null;",
-		`foreach (var v in env.Split((char)0)) if (v.StartsWith("${SESSION_MARKER}=", StringComparison.Ordinal)) return v.Substring(16);`,
-		"return \"\";",
-		"} finally { CloseHandle(h); } } }"
-	].join(" ")}'`,
+	`Add-Type -TypeDefinition '${CWD_HELPER}'`,
 	"$s = (Get-CimInstance Win32_Process -Filter \"ProcessId = $PID\").SessionId",
 	"$list = @(Get-CimInstance Win32_Process -Filter \"SessionId = $s\" | Where-Object { $_.CommandLine } | ForEach-Object { [pscustomobject]@{ pid = $_.ProcessId; ppid = $_.ParentProcessId; name = $_.Name; command = $_.CommandLine; start = $(if ($_.CreationDate) { [DateTimeOffset]::new($_.CreationDate).ToUnixTimeMilliseconds() } else { 0 }); memory = $_.WorkingSetSize; cwd = [IsoplanCwd]::Of([int]$_.ProcessId); marker = [IsoplanCwd]::Marker([int]$_.ProcessId) } })",
 	"ConvertTo-Json -InputObject $list -Compress -Depth 2"
@@ -12719,25 +12722,98 @@ function chooseStrays(procs, { session, folder, self, platform = process.platfor
 	}
 	return choice;
 }
-/** Ends the process `pid` alone, not what it started: each of those is ended for itself, if it carries the marker. */
-function endPid(pid, platform = process.platform) {
-	if (platform === "win32") return spawnSync("taskkill", [
-		"/pid",
-		String(pid),
-		"/F"
-	], {
-		windowsHide: true,
-		stdio: "ignore"
-	}).status === 0;
-	try {
-		process.kill(pid, "SIGKILL");
-		return true;
-	} catch {
-		return false;
-	}
+const PS_START_SLACK_MS = 2e3;
+const END_HELPER = [
+	"public static class IsoplanEnd {",
+	"[DllImport(\"kernel32.dll\")] static extern IntPtr OpenProcess(int access, bool inherit, int pid);",
+	"[DllImport(\"kernel32.dll\")] static extern bool CloseHandle(IntPtr h);",
+	"[DllImport(\"kernel32.dll\")] static extern bool GetProcessTimes(IntPtr h, out long create, out long exit, out long kernel, out long user);",
+	"[DllImport(\"kernel32.dll\")] static extern bool TerminateProcess(IntPtr h, uint code);",
+	"public static string If(int pid, long startMs, string marker) {",
+	"IntPtr h = OpenProcess(0x0411, false, pid); if (h == IntPtr.Zero) return \"unknown\";",
+	"try {",
+	"long c, e, k, u; if (!GetProcessTimes(h, out c, out e, out k, out u)) return \"unknown\";",
+	"if (Math.Abs((c - 116444736000000000L) / 10000 - startMs) > 1) return \"changed\";",
+	"var m = IsoplanCwd.MarkerOf(h); if (m == null) return \"unknown\"; if (m != marker) return \"changed\";",
+	"return TerminateProcess(h, 1) ? \"ended\" : \"failed\";",
+	"} finally { CloseHandle(h); } } }"
+].join(" ");
+/** The hidden PowerShell call that checks and ends each of `procs` for `session`; null when the session's id can't be put in it as it is. */
+function endCommand(procs, session) {
+	if (!/^[\w:.-]+$/.test(session)) return null;
+	const each = procs.map((p) => `@{ pid = ${p.pid}; r = [IsoplanEnd]::If(${p.pid}, ${Math.trunc(p.startMs)}, '${session}') }`).join(", ");
+	return [
+		"powershell.exe",
+		"-NoProfile",
+		"-NonInteractive",
+		"-Command",
+		[`Add-Type -TypeDefinition '${CWD_HELPER} ${END_HELPER}'`, `ConvertTo-Json -InputObject @(${each}) -Compress`].join("; ")
+	];
 }
-/** Ends what the removed session `session` left running in `folder`, as chooseStrays decides, logging each one ended or left. */
-async function endStrays(session, folder, { log, list = () => listProcesses(), end = (pid) => endPid(pid), self = process.pid, platform = process.platform }) {
+/**
+* Ends each of `procs` only if, just before, it is still the process that was listed: the same pid,
+* started then, and still carrying `session`'s marker. Every one it can't check again is "unknown",
+* and left.
+*/
+async function endIfSame(procs, session, { platform = process.platform, run = runHidden$1, now = Date.now, signal = (pid) => process.kill(pid, "SIGKILL") } = {}) {
+	const out = new Map(procs.map((p) => [p.pid, "unknown"]));
+	if (!procs.length) return out;
+	if (platform === "win32") {
+		const command = endCommand(procs, session);
+		const answer = command && await run(command);
+		let said;
+		try {
+			said = JSON.parse(answer ?? "null");
+		} catch {
+			return out;
+		}
+		for (const r of Array.isArray(said) ? said : []) if (out.has(r?.pid) && [
+			"ended",
+			"changed",
+			"unknown",
+			"failed"
+		].includes(r?.r)) out.set(r.pid, r.r);
+		return out;
+	}
+	for (const p of procs) {
+		const [info, env] = await Promise.all([run([
+			"ps",
+			"-p",
+			String(p.pid),
+			"-o",
+			"etime=,command="
+		]), run([
+			"ps",
+			"-E",
+			"-ww",
+			"-p",
+			String(p.pid),
+			"-o",
+			"pid=,command="
+		])]);
+		const seen = parsePsInfo(info ?? "", now());
+		if (!seen || env === null) continue;
+		if (Math.abs(seen.startMs - p.startMs) > PS_START_SLACK_MS || seen.command !== p.command) {
+			out.set(p.pid, "changed");
+			continue;
+		}
+		const marker = parsePsMarkers(env, /* @__PURE__ */ new Map([[p.pid, p.command]])).get(p.pid);
+		if (marker === void 0) continue;
+		if (marker !== session) {
+			out.set(p.pid, "changed");
+			continue;
+		}
+		try {
+			signal(p.pid);
+			out.set(p.pid, "ended");
+		} catch {
+			out.set(p.pid, "failed");
+		}
+	}
+	return out;
+}
+/** Ends what the removed session `session` left running in `folder`, as chooseStrays decides and endIfSame confirms, logging each one ended or left. */
+async function endStrays(session, folder, { log, list = () => listProcesses(), end = (procs, s) => endIfSame(procs, s), self = process.pid, platform = process.platform }) {
 	const procs = await list();
 	if (procs === null) return log(`couldn't list this computer's processes, so nothing ${session} left running in ${folder} was ended`);
 	const { end: ending, left } = chooseStrays(procs, {
@@ -12746,7 +12822,15 @@ async function endStrays(session, folder, { log, list = () => listProcesses(), e
 		self,
 		platform
 	});
-	for (const p of ending) log(end(p.pid) ? `ended ${p.name} (${p.pid}), which ${session} left running in ${folder}` : `couldn't end ${p.name} (${p.pid}), which ${session} left running in ${folder}: it may have ended already`);
+	const outcomes = await end(ending, session);
+	for (const p of ending) {
+		const outcome = outcomes.get(p.pid) ?? "unknown";
+		const what = `${p.name} (${p.pid})`;
+		if (outcome === "ended") log(`ended ${what}, which ${session} left running in ${folder}`);
+		else if (outcome === "failed") log(`couldn't end ${what}, which ${session} left running in ${folder}: it may have ended already`);
+		else if (outcome === "changed") log(`left ${what} running in ${folder} when ${session} was removed: it isn't the process that was listed any more (its pid was reused, or its environment changed)`);
+		else log(`left ${what} running in ${folder} when ${session} was removed: it couldn't be checked again just before it was to be ended`);
+	}
 	for (const { proc, why } of left) log(`left ${proc.name} (${proc.pid}) running in ${folder} when ${session} was removed: ${why}`);
 }
 //#endregion

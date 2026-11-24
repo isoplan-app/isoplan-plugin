@@ -42,7 +42,7 @@ export interface Proc {
 // (WOW64) process keeps its current folder in its 32-bit PEB, which ProcessWow64Information (26)
 // names: PEB32+0x10 is its ProcessParameters, and ProcessParameters+0x24 its CurrentDirectory, a
 // 32-bit UNICODE_STRING. Null when the process can't be opened or read.
-const CWD_HELPER = [
+export const CWD_HELPER = [
   "using System; using System.Runtime.InteropServices;",
   "public static class IsoplanCwd {",
   '[DllImport("kernel32.dll")] static extern IntPtr OpenProcess(int access, bool inherit, int pid);',
@@ -67,10 +67,14 @@ const CWD_HELPER = [
   "} finally { CloseHandle(h); } }",
   // Its ISOPLAN_SESSION, from its environment block: ProcessParameters+0x80 is the block, +0x3F0 its
   // size in bytes. "" when it has none; null for a 32-bit process, or one that can't be opened or read.
+  // MarkerOf takes a handle opened with at least 0x0410 (query information, read memory), so strays.ts
+  // can check a process and end it through one handle.
   "public static string Marker(int pid) {",
   "if (IntPtr.Size != 8) return null;",
   "IntPtr h = OpenProcess(0x0410, false, pid); if (h == IntPtr.Zero) return null;",
-  "try {",
+  "try { return MarkerOf(h); } finally { CloseHandle(h); } }",
+  "public static string MarkerOf(IntPtr h) {",
+  "if (IntPtr.Size != 8) return null;",
   "var info = new IntPtr[6]; int length;",
   "if (NtQueryInformationProcess(h, 26, info, 8, out length) != 0 || info[0] != IntPtr.Zero) return null;",
   "if (NtQueryInformationProcess(h, 0, info, 48, out length) != 0) return null;",
@@ -81,7 +85,7 @@ const CWD_HELPER = [
   "var env = Text(h, (int)size, BitConverter.ToInt64(at, 0)); if (env == null) return null;",
   `foreach (var v in env.Split((char)0)) if (v.StartsWith("${SESSION_MARKER}=", StringComparison.Ordinal)) return v.Substring(${SESSION_MARKER.length + 1});`,
   'return "";',
-  "} finally { CloseHandle(h); } } }",
+  "} }",
 ].join(" ");
 
 const WINDOWS_SCRIPT = [

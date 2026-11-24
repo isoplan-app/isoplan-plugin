@@ -5,7 +5,8 @@ import path from "node:path";
 import { expect, test } from "vitest";
 import { alive } from "../wake/lock.js";
 import type { Proc } from "./processes.js";
-import { chooseStrays, endStrays, inFolder } from "./strays.js";
+import { chooseStrays, endCommand, endIfSame, endStrays, inFolder, type EndOutcome } from "./strays.js";
+import { listProcesses } from "./processes.js";
 
 const S = "claude-code:1111";
 const proc = (pid: number, extra: Partial<Proc> = {}): Proc => ({ pid, ppid: 1, name: `p${pid}`, command: `p${pid}`, startMs: pid, memory: 0, ...extra });
@@ -43,18 +44,26 @@ test("strays: the runner and the app above it are never ended, even carrying the
   expect([inFolder("/w/app/x", "/w/app/"), inFolder("/w/appx", "/w/app"), inFolder(String.raw`C:\W\App`, "c:/w/app")]).toEqual([true, false, true]);
 });
 
-test("strays: each process ended and each left is logged; with no listing nothing is ended", async () => {
+test("strays: each process ended and each left is logged, also one that changed or couldn't be checked again just before; with no listing nothing is ended", async () => {
   const logs: string[] = [];
   const ended: number[] = [];
-  await endStrays(S, "/w/app", { log: (t) => void logs.push(t), list: async () => [proc(10, { cwd: "/w/app", marker: S }), proc(11, { cwd: "/w/app", marker: S }), proc(12, { cwd: "/w/app", marker: "" })], end: (pid) => (ended.push(pid), pid === 10), self: 999, platform: "darwin" });
-  expect(ended).toEqual([10, 11]);
+  const outcomes = new Map<number, EndOutcome>([
+    [10, "ended"],
+    [11, "failed"],
+    [13, "changed"],
+  ]);
+  const list = async () => [10, 11, 13, 14].map((pid) => proc(pid, { cwd: "/w/app", marker: S })).concat(proc(12, { cwd: "/w/app", marker: "" }));
+  await endStrays(S, "/w/app", { log: (t) => void logs.push(t), list, end: async (procs) => (ended.push(...procs.map((p) => p.pid)), outcomes), self: 999, platform: "darwin" });
+  expect(ended).toEqual([10, 11, 13, 14]);
   expect(logs).toEqual([
     `ended p10 (10), which ${S} left running in /w/app`,
     `couldn't end p11 (11), which ${S} left running in /w/app: it may have ended already`,
+    `left p13 (13) running in /w/app when ${S} was removed: it isn't the process that was listed any more (its pid was reused, or its environment changed)`,
+    `left p14 (14) running in /w/app when ${S} was removed: it couldn't be checked again just before it was to be ended`,
     `left p12 (12) running in /w/app when ${S} was removed: Isoplan didn't start it`,
   ]);
   logs.length = 0;
-  await endStrays(S, "/w/app", { log: (t) => void logs.push(t), list: async () => null, end: () => (ended.push(-1), true) });
+  await endStrays(S, "/w/app", { log: (t) => void logs.push(t), list: async () => null, end: async () => (ended.push(-1), new Map()) });
   expect(ended).not.toContain(-1);
   expect(logs).toEqual([`couldn't list this computer's processes, so nothing ${S} left running in /w/app was ended`]);
 });
@@ -81,3 +90,44 @@ test("strays: on this computer, an orphan the session started is ended and the p
     if (alive(orphan)) process.kill(orphan);
   }
 }, 60000);
+
+test("strays: on this computer, a pid that now names another process (another start, or no marker of the session) is left, and the one listed is ended", async () => {
+  const marked = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { env: { ...process.env, ISOPLAN_SESSION: S }, stdio: "ignore", windowsHide: true });
+  try {
+    await new Promise((r) => setTimeout(r, 500));
+    const listed = (await listProcesses())!.find((p) => p.pid === marked.pid)!;
+    expect(listed.marker).toBe(S);
+    // The pid reused by a process that started later, or one that doesn't carry this session's marker.
+    expect([...(await endIfSame([{ ...listed, startMs: listed.startMs - 60_000 }], S))]).toEqual([[listed.pid, "changed"]]);
+    expect([...(await endIfSame([listed], "claude-code:2222"))]).toEqual([[listed.pid, "changed"]]);
+    expect(alive(listed.pid)).toBe(true);
+    expect([...(await endIfSame([listed], S))]).toEqual([[listed.pid, "ended"]]);
+    for (let i = 0; i < 50 && alive(listed.pid); i++) await new Promise((r) => setTimeout(r, 100));
+    expect(alive(listed.pid)).toBe(false);
+    // Gone: it can't be checked again, so nothing is ended.
+    expect([...(await endIfSame([listed], S))]).toEqual([[listed.pid, "unknown"]]);
+  } finally {
+    if (alive(marked.pid!)) marked.kill();
+  }
+}, 60000);
+
+test("strays: on macOS ps is asked again for the pid alone, and only the process listed is signalled", async () => {
+  const NOW = 1_000_000_000;
+  const listed = proc(801, { command: "node vite.js", startMs: NOW - 300_000, marker: S });
+  const answers = (etime: string, command: string, env: string) => async (argv: string[]) => (argv.includes("-E") ? `  801 ${command} ${env}` : `${etime} ${command}`);
+  const signalled: number[] = [];
+  const signal = (pid: number) => void signalled.push(pid);
+  const opts = { platform: "darwin" as const, now: () => NOW, signal };
+  // The pid reused by a process that started later, by another command, or without the marker.
+  expect((await endIfSame([listed], S, { ...opts, run: answers("00:30", "node vite.js", `ISOPLAN_SESSION=${S}`) })).get(801)).toBe("changed");
+  expect((await endIfSame([listed], S, { ...opts, run: answers("05:00", "bash", `ISOPLAN_SESSION=${S}`) })).get(801)).toBe("changed");
+  expect((await endIfSame([listed], S, { ...opts, run: answers("05:00", "node vite.js", "HOME=/Users/ada") })).get(801)).toBe("changed");
+  // Gone, or ps -E failing: it can't be checked.
+  expect((await endIfSame([listed], S, { ...opts, run: async () => null })).get(801)).toBe("unknown");
+  expect((await endIfSame([listed], S, { ...opts, run: async (argv) => (argv.includes("-E") ? null : "05:00 node vite.js") })).get(801)).toBe("unknown");
+  expect(signalled).toEqual([]);
+  expect((await endIfSame([listed], S, { ...opts, run: answers("05:01", "node vite.js", `ISOPLAN_SESSION=${S}`) })).get(801)).toBe("ended");
+  expect(signalled).toEqual([801]);
+  // A session id that can't be put in the Windows check as it is ends nothing there.
+  expect(endCommand([listed], "claude-code:x'; Stop-Computer; '")).toBeNull();
+});
