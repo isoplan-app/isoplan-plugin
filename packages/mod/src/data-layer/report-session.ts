@@ -225,8 +225,8 @@ export interface ReportSessionOptions {
   isOff?: () => Promise<boolean>;
   /** Without a hooks module: the offices that didn't want the session, each until when, from an earlier run. */
   notWanted?: Record<string, number>;
-  /** The runner's own pairing and list of repos for an office, shared by every session it reports. */
-  shared?: (office: Office) => { pairing: Pairing; approved: Approved } | null;
+  /** The runner's own pairing and list of repos for an office, shared by every session it reports; `config` is config.json as this session read it, for an office the runner has none for yet. */
+  shared?: (office: Office, config: Config) => { pairing: Pairing; approved: Approved } | null;
   /** The session's title as each pass works it out for the offices, sent or not, for the desktop app's menu (runner/status.ts). */
   titled?: (title: string) => void;
   /** Each pass's areas, once per office that takes the session's repo, when it has any (SessionAreas). */
@@ -589,7 +589,7 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
         emit(line.type === "status" || line.type === "pair" ? { ...line, label } : line.type === "asked" || line.type === "ask-rights" || line.type === "expert-rights" ? { ...line, server } : line);
       });
       // The runner's own, shared by every session it reports: one pairing for the office, which a session's link closing leaves answering.
-      const shared = o.shared?.(office);
+      const shared = o.shared?.(office, config);
       if (shared) {
         run.pairing = { ...shared.pairing, close: async () => {} };
         run.approved = shared.approved;
