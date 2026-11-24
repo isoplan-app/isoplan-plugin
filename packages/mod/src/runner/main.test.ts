@@ -65,9 +65,11 @@ process.stdin.setEncoding("utf8").on("data", (piece) => {
 });
 `;
 
-/** A stand-in office that takes github.com/team/app; `send` reaches the runner's link once it has said hello. */
-async function office() {
-  const received: { type: string; id?: string; kind?: string; answer?: string }[] = [];
+/** A stand-in office that takes github.com/team/app; `send` reaches the runner's link once it has said hello. With `notWanted`, it wants no session's project. */
+async function office({ notWanted = false } = {}) {
+  const received: { type: string; id?: string; kind?: string; answer?: string; reason?: string; detail?: string }[] = [];
+  // The sessions whose data-layer links said hello.
+  const hellos: string[] = [];
   let runnerLink: WebSocket | null = null;
   const server = http.createServer((request, response) => {
     if (!request.url?.startsWith("/data-layer/repos")) return void response.writeHead(404).end();
@@ -80,6 +82,10 @@ async function office() {
       // The runner's link says hello as a runner; the sessions' links say theirs as data layers.
       if (message.type === "runner") runnerLink ??= ws;
       if (ws === runnerLink) received.push(message);
+      else if (message.type === "hello") {
+        hellos.push((message as { session?: string }).session ?? "");
+        if (notWanted) ws.send(JSON.stringify({ type: "error", v: PROTOCOL_VERSION, code: "not-wanted", message: "this project isn't in any office on this server" }));
+      }
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -89,11 +95,12 @@ async function office() {
     linked: () => runnerLink !== null,
     send: (message: unknown) => runnerLink!.send(JSON.stringify(message)),
     received,
+    hellos,
   };
 }
 
 /** A machine paired with both offices, with session lead-1 in a repo they take, its turn over, and maxForks 1. */
-function machine(servers: string[]) {
+function machine(servers: string[], config: Record<string, unknown> = {}) {
   const root = tempRoot();
   const home = path.join(root, "home");
   const claudeDir = path.join(root, "claude");
@@ -117,7 +124,7 @@ function machine(servers: string[]) {
       .join("\n") + "\n",
   );
   fs.writeFileSync(path.join(claudeDir, ".claude.json"), JSON.stringify({ oauthAccount: { accountUuid: "acc-1", displayName: "Adam" } }));
-  fs.writeFileSync(path.join(isoplanDir, "config.json"), JSON.stringify({ servers: servers.map((server, i) => ({ label: `office-${i}`, server })) }));
+  fs.writeFileSync(path.join(isoplanDir, "config.json"), JSON.stringify({ servers: servers.map((server, i) => ({ label: `office-${i}`, server })), ...config }));
   fs.writeFileSync(path.join(isoplanDir, "runner.json"), JSON.stringify({ maxForks: 1 }));
   const expires = Date.now() + 86400000;
   fs.writeFileSync(path.join(isoplanDir, "pairing.json"), JSON.stringify({ accounts: {}, offices: Object.fromEntries(servers.map((server) => [server, { [ACCOUNT]: { server, credential: "cred", token: "token", tokenExpires: expires } }])) }));
@@ -128,7 +135,7 @@ function machine(servers: string[]) {
   fs.writeFileSync(path.join(isoplanDir, "claude-binary.json"), JSON.stringify({ path: fake }));
   const fakeLog = path.join(fakeDir, "log.txt");
   fs.writeFileSync(fakeLog, "");
-  return { claudeDir, home, fakeDir, fakeLog, ledger: path.join(isoplanDir, "runner", "ledger.json"), log: path.join(isoplanDir, "logs", "runner.log") };
+  return { claudeDir, home, repo, transcript, fakeDir, fakeLog, ledger: path.join(isoplanDir, "runner", "ledger.json"), log: path.join(isoplanDir, "logs", "runner.log") };
 }
 
 function startWorker(m: ReturnType<typeof machine>): ChildProcess {
@@ -175,4 +182,35 @@ test("runner worker: two offices share one fork cap; with maxForks 1, one office
   expect(lines(m.fakeLog)).toEqual(["start alpha", "end alpha", "start beta", "end beta"]);
   expect(a.received.find((x) => x.id === "q-alpha")).toMatchObject({ kind: "answer-question", answer: "Answer alpha." });
   expect(b.received.find((x) => x.id === "q-beta")).toMatchObject({ kind: "answer-question", answer: "Answer beta." });
+});
+
+test("runner worker: a session in a folder the plugin is disabled for isn't reported, and is once it is enabled and the session moves", async () => {
+  const a = await office();
+  const m = machine([a.url], { runnerRetrySeconds: 0 });
+  // The data layer install recorded, a marketplace install's, and the plugin off for the session's folder.
+  fs.writeFileSync(path.join(m.claudeDir, "isoplan", "wake.json"), JSON.stringify({ dataLayer: path.join(m.claudeDir, "plugins", "cache", "isoplan", "isoplan", "a1b2c3d4e5f6", "dist", "data-layer.js") }));
+  const local = path.join(m.repo, ".claude", "settings.local.json");
+  fs.mkdirSync(path.dirname(local), { recursive: true });
+  fs.writeFileSync(local, JSON.stringify({ enabledPlugins: { "isoplan@isoplan": false } }));
+  startWorker(m);
+  await until(() => a.linked());
+  await new Promise((r) => setTimeout(r, 2500));
+  expect(a.hellos).toEqual([]);
+  fs.writeFileSync(local, JSON.stringify({ enabledPlugins: { "isoplan@isoplan": true } }));
+  fs.appendFileSync(m.transcript, JSON.stringify({ type: "user", cwd: m.repo, sessionId: "lead-1", timestamp: new Date().toISOString(), message: { role: "user", content: "and again" } }) + "\n");
+  await until(() => a.hellos.includes("claude-code:lead-1"));
+});
+
+test("runner worker: a session held off because no office wants its project is refused as one the machine doesn't report", async () => {
+  const a = await office({ notWanted: true });
+  const m = machine([a.url], { runnerRetrySeconds: 0 });
+  startWorker(m);
+  await until(() => a.linked() && a.hellos.includes("claude-code:lead-1"));
+  const sessionLog = path.join(m.claudeDir, "isoplan", "logs", "lead-1.log");
+  await until(() => fs.existsSync(sessionLog) && fs.readFileSync(sessionLog, "utf8").includes("so it holds off"));
+  await new Promise((r) => setTimeout(r, 500));
+  a.send(question("q-held", "room-a", "alpha"));
+  await until(() => a.received.some((x) => x.id === "q-held"));
+  expect(a.received.find((x) => x.id === "q-held")).toMatchObject({ type: "refusal", reason: "unavailable", detail: "this machine doesn't report that session" });
+  expect(lines(m.fakeLog)).toEqual([]);
 });
