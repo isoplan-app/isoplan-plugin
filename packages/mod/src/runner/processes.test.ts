@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { listCommands, listProcesses, parseLsofCwd, parsePsList, parseWindowsList, type Run } from "./processes.ts";
+import { listCommands, listProcesses, parseLsofCwd, parsePsList, parsePsMarkers, parseWindowsList, type Run } from "./processes.js";
 
 const NOW = Date.parse("2026-11-10T12:00:00Z");
 
@@ -15,11 +15,17 @@ test("processes: on Windows one hidden PowerShell call lists this logon session'
   // A 32-bit (WOW64) process's current folder is in its 32-bit PEB, not the 64-bit one it started with.
   expect(args[3]).toContain("NtQueryInformationProcess(h, 26, info, 8, out length) == 0 && info[0] != IntPtr.Zero");
   expect(args[3]).toContain("(long)BitConverter.ToUInt32(p32, 0) + 0x24");
+  // Its ISOPLAN_SESSION from its environment block, also from its own memory; never a 32-bit one's.
+  expect(args[3]).toContain("marker = [IsoplanCwd]::Marker([int]$_.ProcessId)");
+  expect(args[3]).toContain("(NtQueryInformationProcess(h, 26, info, 8, out length) != 0 || info[0] != IntPtr.Zero) return null");
+  expect(args[3]).toContain('v.StartsWith("ISOPLAN_SESSION=", StringComparison.Ordinal)) return v.Substring(16)');
   const stdout = JSON.stringify([
     { pid: 4100, ppid: 4000, name: "node.exe", command: "node C:\\w\\app\\node_modules\\vitest\\vitest.mjs", start: NOW - 60_000, memory: 52_428_800 },
     { pid: 4200, ppid: 4100, name: "bash.exe", command: '"C:\\Program Files\\Git\\bin\\bash.exe" -c "pnpm test"', start: NOW - 30_000, memory: 4_194_304, cwd: "C:\\w\\app\\" },
     { pid: 4300, ppid: 1, name: "cmd.exe", command: "cmd.exe", start: NOW, memory: 1, cwd: "C:\\" },
-    { pid: 4400, ppid: 1, name: "svc.exe", command: "svc.exe", start: NOW, memory: 1, cwd: null },
+    { pid: 4400, ppid: 1, name: "svc.exe", command: "svc.exe", start: NOW, memory: 1, cwd: null, marker: null },
+    { pid: 4500, ppid: 1, name: "node.exe", command: "node dev.js", start: NOW, memory: 1, cwd: null, marker: "claude-code:1111" },
+    { pid: 4600, ppid: 1, name: "node.exe", command: "node own.js", start: NOW, memory: 1, cwd: null, marker: "" },
     { pid: "x", command: "bad" },
   ]);
   const asked: string[][] = [];
@@ -29,6 +35,8 @@ test("processes: on Windows one hidden PowerShell call lists this logon session'
     { pid: 4200, ppid: 4100, name: "bash.exe", command: '"C:\\Program Files\\Git\\bin\\bash.exe" -c "pnpm test"', startMs: NOW - 30_000, memory: 4_194_304, cwd: "C:\\w\\app" },
     { pid: 4300, ppid: 1, name: "cmd.exe", command: "cmd.exe", startMs: NOW, memory: 1, cwd: "C:\\" },
     { pid: 4400, ppid: 1, name: "svc.exe", command: "svc.exe", startMs: NOW, memory: 1 },
+    { pid: 4500, ppid: 1, name: "node.exe", command: "node dev.js", startMs: NOW, memory: 1, marker: "claude-code:1111" },
+    { pid: 4600, ppid: 1, name: "node.exe", command: "node own.js", startMs: NOW, memory: 1, marker: "" },
   ]);
   expect(asked).toHaveLength(1);
   expect(parseWindowsList("not json")).toBeNull();
@@ -44,12 +52,26 @@ test("processes: on macOS ps lists this user's processes, a second ps their name
     ps: ["  700     1  20480 1-02:03:04 /Applications/Visual Studio Code.app/Contents/MacOS/Electron", "  801   700  10240    05:00 node /Users/ada/w/app/node_modules/.bin/vite --port 5173", "garbage"].join("\n"),
     names: ["  700 /Applications/Visual Studio Code.app/Contents/MacOS/Electron", "  801 node"].join("\n"),
     lsof: ["p700", "fcwd", "n/", "p801", "fcwd", "n/Users/ada/w/app"].join("\n"),
+    env: "",
   };
-  const run: Run = async (argv, allowFail) => (argv[0] === "lsof" ? (expect(allowFail).toBe(true), out.lsof!) : argv.includes("pid=,comm=") ? out.names! : out.ps!);
+  expect(commands.env).toEqual(["ps", "-x", "-E", "-ww", "-U", "501", "-o", "pid=,command="]);
+  out.env = ["  700 /Applications/Visual Studio Code.app/Contents/MacOS/Electron HOME=/Users/ada", "  801 node /Users/ada/w/app/node_modules/.bin/vite --port 5173 HOME=/Users/ada ISOPLAN_SESSION=claude-code:1111 TERM=xterm"].join("\n");
+  const run: Run = async (argv, allowFail) => (argv[0] === "lsof" ? (expect(allowFail).toBe(true), out.lsof!) : argv.includes("pid=,comm=") ? out.names! : argv.includes("-E") ? out.env! : out.ps!);
   expect(await listProcesses({ platform: "darwin", uid: 501, run, now: () => NOW })).toEqual([
-    { pid: 700, ppid: 1, name: "Electron", command: "/Applications/Visual Studio Code.app/Contents/MacOS/Electron", startMs: NOW - (((24 + 2) * 60 + 3) * 60 + 4) * 1000, memory: 20480 * 1024, cwd: "/" },
-    { pid: 801, ppid: 700, name: "node", command: "node /Users/ada/w/app/node_modules/.bin/vite --port 5173", startMs: NOW - 300_000, memory: 10240 * 1024, cwd: "/Users/ada/w/app" },
+    { pid: 700, ppid: 1, name: "Electron", command: "/Applications/Visual Studio Code.app/Contents/MacOS/Electron", startMs: NOW - (((24 + 2) * 60 + 3) * 60 + 4) * 1000, memory: 20480 * 1024, cwd: "/", marker: "" },
+    { pid: 801, ppid: 700, name: "node", command: "node /Users/ada/w/app/node_modules/.bin/vite --port 5173", startMs: NOW - 300_000, memory: 10240 * 1024, cwd: "/Users/ada/w/app", marker: "claude-code:1111" },
   ]);
+  // The marker is read only after the command line: a command line that holds it isn't marked, and a
+  // process whose line doesn't start with its command line, or that ps -E didn't list, has no marker.
+  const commandsOf = new Map([
+    [10, "sh -c echo ISOPLAN_SESSION=claude-code:1111"],
+    [11, "node a.js"],
+    [12, "node b.js"],
+  ]);
+  const markers = parsePsMarkers(["   10 sh -c echo ISOPLAN_SESSION=claude-code:1111 HOME=/Users/ada", "   11 node other.js ISOPLAN_SESSION=claude-code:1111"].join("\n"), commandsOf);
+  expect([...markers]).toEqual([[10, ""]]);
+  // ps -E failing loses only the markers.
+  expect((await listProcesses({ platform: "darwin", uid: 501, run: async (argv, allowFail) => (argv.includes("-E") ? null : run(argv, allowFail)), now: () => NOW }))?.[1]).not.toHaveProperty("marker");
   expect(parsePsList("", NOW)).toEqual([]);
   expect(parseLsofCwd("p9\nfcwd\n").size).toBe(0);
   // ps failing is no listing; lsof failing only loses the working folders.

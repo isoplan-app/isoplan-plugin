@@ -73,7 +73,8 @@ export function forkArgs(sessionId: string, model: string): string[] {
 /**
  * The variables Claude Code sets for the processes it starts, which tie them to that session: its
  * marker and entrypoint, the session's ids, its messaging socket and token, its own path and pid,
- * the session's plugin folders and effort, and its IDE port.
+ * the session's plugin folders and effort, and its IDE port. And Isoplan's own marker of a driven
+ * session's processes, which only the driven session it names is given.
  */
 export const FORK_ENV_DROPPED = [
   "CLAUDECODE",
@@ -88,7 +89,15 @@ export const FORK_ENV_DROPPED = [
   "CLAUDE_CODE_SSE_PORT",
   "CLAUDE_PID",
   "CLAUDE_EFFORT",
+  "ISOPLAN_SESSION",
 ];
+
+/**
+ * The variable a driven session's process is started with, holding its session's id: every process
+ * under it inherits it, even after its parent has ended, so the runner can tell the processes it
+ * started from the person's own when the session is ended and removed (strays.ts, #144).
+ */
+export const SESSION_MARKER = "ISOPLAN_SESSION";
 
 /** The fork's environment: this one's, less FORK_ENV_DROPPED. */
 export function forkEnv(env: Record<string, string | undefined>): Record<string, string> {

@@ -93,6 +93,8 @@
 //   then forgotten here, so it is never opened again, `holding` goes again without it, and its
 //   reporting ends (`removed`), so its agent leaves the floor once the office supports it
 //   (isoplan-app#245; an office before that shows it disconnected).
+// - Ended and removed, from the floor or this computer, the processes it started that outlived its
+//   process tree and still run in its folder are ended too, and only those (strays.ts, #144).
 // - Closed from this computer (the desktop app's Close session and End and remove, `end`): the same
 //   as the floor's `stop` and `stop` with `remove`, with no request to answer. Close session keeps the
 //   session, released `stopped`, so the floor's next instruction opens it again.
@@ -188,7 +190,7 @@ import {
 import { pathKey } from "../data-layer/git.js";
 import { createRunGit } from "../handoff/git.js";
 import { claudeCommand } from "./claude-binary.js";
-import { forkEnv, hiddenSpawn, killTree, userTurn, type Spawn } from "./claude.js";
+import { forkEnv, hiddenSpawn, killTree, SESSION_MARKER, userTurn, type Spawn } from "./claude.js";
 import { createIsoplanClones, type IsoplanClone } from "./isoplan-clone.js";
 import type { DrivenFields, ProcessRecord, Registry } from "./registry.js";
 import type { RepoFolders } from "./repo-folders.js";
@@ -277,6 +279,8 @@ export interface DriverOptions {
   namer?: { name(instruction: string): Promise<string | null> };
   /** The session was ended and removed: its reporting ends, so its agent leaves the floor once the office supports it (isoplan-app#245). */
   removed?: (session: string) => Promise<void>;
+  /** The session was ended and removed: what it started that is still running in its folder is ended (strays.ts, #144). */
+  endStrays?: (session: string, folder: string) => Promise<void>;
   /** Installs Claude Code, or signs it in, for a request whose `by` is the runner's own person (claude-setup.ts). */
   setup?: (m: Extract<DriveMessage, { kind: "install-claude" | "sign-in-claude" }>) => void;
   spawn?: Spawn;
@@ -758,7 +762,7 @@ export function createDriver(o: DriverOptions): Driver {
       const argv = [...claudeCommand(bin), ...drivenArgs({ uuid, resume, permissions: mode, ...(d.name ? { name: d.name } : {}), ...(d.addDir ? { addDir: d.addDir } : {}) })];
       let child: ChildProcessWithoutNullStreams;
       try {
-        child = spawn(argv, { cwd: s.record.folder, env: forkEnv(env) });
+        child = spawn(argv, { cwd: s.record.folder, env: { ...forkEnv(env), [SESSION_MARKER]: s.record.session } });
       } catch (err) {
         o.log(`couldn't start claude for ${s.record.session} in ${s.record.folder}: ${(err as Error).message}`);
         return { reason: "unavailable", detail: NOT_STARTED };
@@ -1235,6 +1239,8 @@ export function createDriver(o: DriverOptions): Driver {
     if (policies.has(server)) sayHolding(server);
     await o.removed?.(session).catch((err: Error) => o.log(`couldn't stop reporting ${session}: ${err?.message ?? String(err)}`));
     o.log(`ended and removed driven session ${session}: it won't be opened again`);
+    // Not waited for: listing the processes takes seconds, and the floor or the menu waits for the answer.
+    void o.endStrays?.(session, s.record.folder).catch((err: Error) => o.log(`couldn't end what ${session} left running: ${err?.message ?? String(err)}`));
   }
 
   async function stop(s: Session, id: string, removing: boolean): Promise<void> {

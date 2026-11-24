@@ -1,7 +1,8 @@
 <script setup lang="ts">
 // The window of what's running on this computer (#137): by folder, its sessions and their processes,
 // then the processes there that belong to no session. It asks the app again only while it is open.
-// Read-only: nothing here ends a process.
+// End asks the app to end a process, or every one in a folder, only once a person confirms here, and
+// the confirmation says whether Isoplan started it (#144). The app checks again before it ends any.
 import { Electroview } from "electrobun/view";
 import { onMounted, onUnmounted, ref } from "vue";
 import type { FolderLine, ProcessLine, RunningView } from "../bun/running.ts";
@@ -21,6 +22,7 @@ let timer: ReturnType<typeof setTimeout> | undefined;
 let closed = false;
 // Asked again at the pace the last answer gave (processRefreshSeconds).
 const load = async () => {
+	clearTimeout(timer);
 	try {
 		view.value = await rpc.request.view({});
 		stale.value = false;
@@ -41,6 +43,45 @@ const started = (iso: string) => {
 	const today = d.toDateString() === new Date().toDateString();
 	return today ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : d.toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 };
+// The End a person asked for, waiting for them to confirm it, and what the last one did.
+const asking = ref<{ folder: string; pid?: number; started?: string; text: string } | null>(null);
+const ending = ref(false);
+const result = ref("");
+const who = (p: ProcessLine) => (p.isoplan ? "Isoplan started it" : p.isoplan === false ? "Isoplan didn't start it: you or another app did" : "Isoplan can't tell whether it started it");
+const endable = (folder: FolderLine) => [...folder.sessions.flatMap((s) => s.processes), ...folder.strays].filter((p) => p.endable);
+const askOne = (folder: FolderLine, p: ProcessLine) => {
+	result.value = "";
+	asking.value = { folder: folder.folder, pid: p.pid, started: p.started, text: `End ${p.name} (${p.pid})? ${who(p)}.` };
+};
+const askAll = (folder: FolderLine) => {
+	const all = endable(folder);
+	const started = all.filter((p) => p.isoplan).length;
+	const unknown = all.filter((p) => p.isoplan === null).length;
+	const inSessions = all.filter((p) => p.session !== null).length;
+	result.value = "";
+	asking.value = {
+		folder: folder.folder,
+		text:
+			`End ${all.length === 1 ? "the 1 process" : `all ${all.length} processes`} in this folder? Isoplan started ${started} of them` +
+			(unknown ? `, and can't tell for ${unknown}` : "") +
+			"." +
+			(inSessions ? ` ${count(inSessions, "is a session's", "are sessions'")}, which end too.` : ""),
+	};
+};
+const confirmEnd = async () => {
+	const asked = asking.value;
+	if (!asked || ending.value) return;
+	ending.value = true;
+	try {
+		const { ended, failed } = await rpc.request.end({ folder: asked.folder, ...(asked.pid !== undefined && { pid: asked.pid, started: asked.started }) });
+		result.value = !ended && !failed ? "Nothing was ended: it had ended already, or changed." : `Ended ${count(ended, "process", "processes")}.` + (failed ? ` ${count(failed, "process", "processes")} couldn't be ended.` : "");
+	} catch {
+		result.value = "Couldn't ask the app to end it just now.";
+	}
+	ending.value = false;
+	asking.value = null;
+	void load();
+};
 const parent = (p: ProcessLine) => (p.parent.name ? `${p.parent.name} (${p.parent.pid})` : `${p.parent.pid}, not running or not shown`);
 const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 // A folder's sessions, then its processes that belong to no session, shown alike.
@@ -58,6 +99,7 @@ const groups = (folder: FolderLine) => [
 		</header>
 		<p v-if="!view" class="quiet">Looking…</p>
 		<template v-else>
+			<p v-if="result" class="quiet small">{{ result }}</p>
 			<p v-if="stale" class="quiet small">Couldn't refresh just now; this is from before.</p>
 			<p v-if="!view.processesListed" class="note">This computer's processes couldn't be listed just now. Trying again…</p>
 			<p v-if="!view.sessionsListed" class="note">Isoplan's runner isn't listing sessions with their folders right now (it isn't running, or it needs updating), so every process shows as belonging to no session.</p>
@@ -65,7 +107,12 @@ const groups = (folder: FolderLine) => [
 			<section v-for="folder in view.folders" :key="folder.folder" class="folder">
 				<div class="folder-head">
 					<h2 :title="folder.folder"><bdi>{{ folder.folder }}</bdi></h2>
-					<span class="quiet">{{ memory(folder.memory) }}</span>
+					<span class="quiet nowrap">{{ memory(folder.memory) }} <button v-if="endable(folder).length" @click="askAll(folder)">End all</button></span>
+				</div>
+				<div v-if="asking && asking.folder === folder.folder" class="confirm">
+					<span>{{ asking.text }}</span>
+					<button class="danger" :disabled="ending" @click="confirmEnd">End</button>
+					<button :disabled="ending" @click="asking = null">Cancel</button>
 				</div>
 				<div v-for="group in groups(folder)" :key="group.key" class="session" :class="{ strays: group.strays }">
 					<div class="session-head">
@@ -82,6 +129,7 @@ const groups = (folder: FolderLine) => [
 								<td class="quiet nowrap">{{ memory(p.memory) }}</td>
 								<td class="quiet">started by {{ parent(p) }}</td>
 								<td class="quiet nowrap">{{ p.session ?? "no session" }}</td>
+								<td class="act"><button v-if="p.endable" @click="askOne(folder, p)">End</button></td>
 							</tr>
 						</tbody>
 					</table>
@@ -114,4 +162,10 @@ td.command { width: 38%; font-family: ui-monospace, "Cascadia Mono", Menlo, mono
 .quiet { color: #5a6578; font-size: 13px; }
 td.quiet { font-size: 12px; }
 .small { font-size: 12px; }
+button { font: inherit; font-size: 12px; padding: 2px 10px; border: 1px solid #c9d2e0; border-radius: 6px; background: white; cursor: pointer; }
+button:disabled { opacity: 0.5; cursor: default; }
+button.danger { background: #b42318; border-color: #b42318; color: white; }
+td.act { width: 52px; text-align: right; }
+.confirm { display: flex; gap: 8px; align-items: center; background: #fff1f0; border: 1px solid #f3b8b2; border-radius: 8px; padding: 6px 10px; margin-bottom: 8px; font-size: 13px; }
+.confirm span { flex: 1; }
 </style>
