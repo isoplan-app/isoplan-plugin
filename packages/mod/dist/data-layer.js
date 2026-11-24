@@ -8001,6 +8001,18 @@ function launcherPaths(text) {
 		return null;
 	}
 }
+/** conhost.exe, by its full path, so no other program of that name is found first. */
+const conhostPath = (env = process.env) => path.win32.join(env.SystemRoot || "C:\\Windows", "System32", "conhost.exe");
+/** The command Windows runs where Script Host is off: conhost with no window, on `"<node>" "<script>" <args>`. */
+const headlessCommand = (node, script, args = "") => `"${conhostPath()}" --headless "${node}" "${script}"${args ? ` ${args}` : ""}`;
+/** The node and script `headlessCommand` names in a command; null for any other command. */
+function headlessPaths(command) {
+	const m = command ? /^"[^"]+\\conhost\.exe" --headless "([^"]+)" "([^"]+)"/i.exec(command) : null;
+	return m ? {
+		node: m[1],
+		script: m[2]
+	} : null;
+}
 const SCRIPT_HOST_KEYS = ["HKCU\\Software\\Microsoft\\Windows Script Host\\Settings", "HKLM\\Software\\Microsoft\\Windows Script Host\\Settings"];
 /** Whether Windows Script Host is turned off for this person or this computer (`Enabled` set to 0). */
 async function scriptHostOff(run) {
@@ -8029,8 +8041,8 @@ const desktopPath = (h) => path.join(h.dataHome || path.join(h.home, ".local", "
 const linkLauncherPath = (claudeDir) => path.join(claudeDir, "isoplan", "open-link.js");
 /** The Windows open command: wscript on the launcher, and the link. */
 const windowsCommand = (launcher) => launchCommand(launcher, "\"%1\"");
-/** The open command where Windows Script Host is off: node and the handler, quoted, and the link. */
-const directCommand = (node, script) => `"${node}" "${script}" "%1"`;
+/** The open command where Windows Script Host is off: conhost with no window, on node, the handler and the link. */
+const headlessLinkCommand = (node, script) => headlessCommand(node, script, "\"%1\"");
 /** The value `reg query` prints for a key's default or a named value, whatever the language of its "(Default)" label. */
 const regValue = (stdout) => /REG_SZ[ \t]+(.*?)\s*$/m.exec(stdout)?.[1] ?? null;
 const appleString = (text) => `"${text.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"`;
@@ -8044,14 +8056,6 @@ const macScript = (node, script) => [
 const exists = (file) => fs.stat(file).then(() => true, () => false);
 /** Whether a registration naming this node and this handler still works: both are there. */
 const works = async (paths) => !!paths && typeof paths.node === "string" && typeof paths.script === "string" && await exists(paths.node) && await exists(paths.script);
-/** The node and handler a direct Windows open command names, as directCommand writes it. */
-const directPaths = (command) => {
-	const m = command ? /^"([^"]+)" "([^"]+)" "%1"$/.exec(command) : null;
-	return m ? {
-		node: m[1],
-		script: m[2]
-	} : null;
-};
 /** A desktop entry's Exec argument, quoted as the Desktop Entry spec asks, then escaped as its strings are. */
 const execArg = (value) => `"${value.replace(/(["`$\\])/g, "\\$1")}"`.replace(/\\/g, "\\\\");
 /** The Linux desktop entry. */
@@ -8105,7 +8109,7 @@ async function register$1(given) {
 			"/ve"
 		])).stdout);
 		const off = await scriptHostOff(run);
-		if (off && await works(directPaths(current))) return [];
+		if (off && await works(headlessPaths(current))) return [];
 		const launcher = launcherOf(current);
 		if (!off && launcher && await works(launcherPaths(await fs.readFile(launcher, "utf8").catch(() => null)))) return [];
 		const file = linkLauncherPath(h.claudeDir);
@@ -8144,10 +8148,10 @@ async function register$1(given) {
 			COMMAND_KEY,
 			"/ve",
 			"/d",
-			off ? directCommand(h.node, h.script) : windowsCommand(file),
+			off ? headlessLinkCommand(h.node, h.script) : windowsCommand(file),
 			"/f"
 		]);
-		return [off ? `registered isoplan:// links to open ${h.script}; Windows Script Host is turned off, so a link shows a console window for a moment` : `registered isoplan:// links to open ${h.script}, through ${file}`];
+		return [`registered isoplan:// links to open ${h.script}, through ${off ? "conhost with no window, since Windows Script Host is turned off" : file}`];
 	}
 	if (h.platform === "darwin") {
 		const app = macAppPath(h.claudeDir);
@@ -8518,20 +8522,31 @@ async function register(given) {
 		if (r.code !== 0) throw new Error(`${path.basename(file)} ${args[0] ?? ""} failed${r.code === null ? " to start" : ` (${r.code})`}`);
 	};
 	if (h.platform === "win32") {
-		if (await scriptHostOff(run)) {
-			const why = "Windows Script Host is turned off on this computer, and without it the runner can't start with no window";
-			const removed = await unregisterLoginItem(h);
-			if (!removed.length) throw new Error(why);
-			return removed.map((change) => `${change}: ${why}`);
-		}
+		const off = await scriptHostOff(run);
 		const launcher = loginLauncherPath(h.claudeDir);
-		const want = windowsLoginCommand(h.claudeDir);
-		if (regValue((await run("reg", [
+		const current = regValue((await run("reg", [
 			"query",
 			RUN_KEY,
 			"/v",
 			runValueName(h.claudeDir)
-		])).stdout)?.toLowerCase() === want.toLowerCase() && await works(launcherPaths(await read(launcher)))) return [];
+		])).stdout);
+		if (off) {
+			const want = headlessCommand(h.node, h.script, LOGIN_ARG);
+			if (current?.toLowerCase() === want.toLowerCase() && await works(headlessPaths(current))) return [];
+			await fs.rm(launcher, { force: true });
+			await must("reg", [
+				"add",
+				RUN_KEY,
+				"/v",
+				runValueName(h.claudeDir),
+				"/d",
+				want,
+				"/f"
+			]);
+			return ["set the runner to start at login, through conhost with no window, since Windows Script Host is turned off"];
+		}
+		const want = windowsLoginCommand(h.claudeDir);
+		if (current?.toLowerCase() === want.toLowerCase() && await works(launcherPaths(await read(launcher)))) return [];
 		await fs.mkdir(path.dirname(launcher), { recursive: true });
 		await fs.writeFile(launcher, hiddenLauncher(h.node, h.script, { args: LOGIN_ARG }));
 		await must("reg", [

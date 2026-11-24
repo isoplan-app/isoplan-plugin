@@ -8,7 +8,7 @@
 // as an argument, it starts itself again, hidden and detached, with the link in its environment,
 // says so in one line, and returns at once: the floor's set-up message has Claude run it from a shell
 // whose command would otherwise wait for the dialog's answer, up to five minutes, and on Windows
-// where Script Host is off the link starts node in a console window of its own, which then closes at
+// where Script Host is off the link starts node in conhost's console, which has no window, and closes at
 // once. (The Mac handler and the Windows launcher pass the link in the environment, already in the
 // background.) What it did, and why it didn't, goes to <claude dir>/isoplan/logs/connect.log as well
 // as the dialog.

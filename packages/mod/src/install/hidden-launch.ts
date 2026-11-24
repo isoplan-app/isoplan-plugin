@@ -17,7 +17,13 @@
 //
 // Windows Script Host can be turned off by policy, and wscript then shows a message instead of
 // running anything, so `scriptHostOff` is checked each time, before a registration through it is
-// kept or made.
+// kept or made. Where it is off, Windows starts conhost.exe instead, which is a windowed program and
+// not a console one, so Windows gives it no console window, and with --headless it gives node a
+// console of its own that has no window either (`headlessCommand`). That is how Windows's own
+// pseudoconsoles (ConPTY) start it, since Windows 10 1809. Probed on Windows 11 (26300), started
+// from a registered URL protocol: node ran with no window, where node started directly from the
+// same protocol opened a Windows Terminal window. Through conhost the link reaches node on its
+// command line, since there is no launcher to put it in node's environment.
 
 import path from "node:path";
 import type { Exec } from "../connect/dialog.js";
@@ -58,6 +64,18 @@ export function launcherPaths(text: string | null): { node?: unknown; script?: u
   } catch {
     return null;
   }
+}
+
+/** conhost.exe, by its full path, so no other program of that name is found first. */
+export const conhostPath = (env: Record<string, string | undefined> = process.env) => path.win32.join(env.SystemRoot || "C:\\Windows", "System32", "conhost.exe");
+
+/** The command Windows runs where Script Host is off: conhost with no window, on `"<node>" "<script>" <args>`. */
+export const headlessCommand = (node: string, script: string, args = "") => `"${conhostPath()}" --headless "${node}" "${script}"${args ? ` ${args}` : ""}`;
+
+/** The node and script `headlessCommand` names in a command; null for any other command. */
+export function headlessPaths(command: string | null): { node: string; script: string } | null {
+  const m = command ? /^"[^"]+\\conhost\.exe" --headless "([^"]+)" "([^"]+)"/i.exec(command) : null;
+  return m ? { node: m[1]!, script: m[2]! } : null;
 }
 
 const SCRIPT_HOST_KEYS = ["HKCU\\Software\\Microsoft\\Windows Script Host\\Settings", "HKLM\\Software\\Microsoft\\Windows Script Host\\Settings"];
