@@ -4,8 +4,8 @@ import { expect, test } from "vitest";
 import type { Exec } from "../connect/dialog.js";
 import { tempRoot } from "../data-layer/fixture.js";
 import { connectScriptPath, installWake, RUNNER_FILES, uninstall } from "./install.js";
-import { hiddenLauncher, launcherPaths, wscriptPath } from "./hidden-launch.js";
-import { desktopEntry, directCommand, linkLauncherPath, macAppPath, macScript, registerLinkHandler, unregisterLinkHandler, windowsCommand } from "./link-handler.js";
+import { conhostPath, hiddenLauncher, launcherPaths, wscriptPath } from "./hidden-launch.js";
+import { desktopEntry, headlessLinkCommand, linkLauncherPath, macAppPath, macScript, registerLinkHandler, unregisterLinkHandler, windowsCommand } from "./link-handler.js";
 
 const NODE = "C:\\Program Files\\nodejs\\node.exe";
 const SCRIPT = "C:\\Users\\ada\\.claude\\isoplan\\runner\\app\\dist\\connect.mjs";
@@ -91,9 +91,13 @@ test("Windows: a launcher whose node and handler exist is left alone, even anoth
   expect(await registerLinkHandler({ ...h, run: broken.run })).toHaveLength(1);
   expect(broken.calls).toHaveLength(7);
   // Node straight from the registry opens a console window, so a working one of that form goes through the launcher now.
-  const direct = windows(directCommand(there.node, there.script));
+  const direct = windows(`"${there.node}" "${there.script}" "%1"`);
   expect(await registerLinkHandler({ ...h, run: direct.run })).toHaveLength(1);
   expect(direct.calls.at(-1)).toEqual(["reg", "add", COMMAND_KEY, "/ve", "/d", windowsCommand(linkLauncherPath(claudeDir)), "/f"]);
+  // So does one through conhost, made while Script Host was off.
+  const headless = windows(headlessLinkCommand(there.node, there.script));
+  expect(await registerLinkHandler({ ...h, run: headless.run })).toHaveLength(1);
+  expect(headless.calls.at(-1)).toEqual(["reg", "add", COMMAND_KEY, "/ve", "/d", windowsCommand(linkLauncherPath(claudeDir)), "/f"]);
   // Another install registering at the same moment leaves it to that one.
   fs.writeFileSync(path.join(claudeDir, "isoplan", "link-handler.lock"), JSON.stringify({ pid: process.ppid }));
   const held = fakeOs(() => ({ code: 1 }));
@@ -101,15 +105,16 @@ test("Windows: a launcher whose node and handler exist is left alone, even anoth
   expect(held.calls).toEqual([]);
 });
 
-test("Windows: with Script Host turned off, links run node directly, a working direct command is kept, and a working launcher is redone directly", async () => {
+test("Windows: with Script Host turned off, links run node through conhost with no window; a working one is kept, and a launcher or the old direct command is redone that way", async () => {
   const claudeDir = path.join(tempRoot(), ".claude");
   const there = realFiles();
   const h = { platform: "win32" as const, claudeDir, home: "C:\\Users\\ada", node: NODE, script: SCRIPT };
   const none = windows(null, true);
-  expect(await registerLinkHandler({ ...h, run: none.run })).toEqual([expect.stringContaining("Windows Script Host is turned off")]);
-  expect(none.calls.at(-1)).toEqual(["reg", "add", COMMAND_KEY, "/ve", "/d", `"${NODE}" "${SCRIPT}" "%1"`, "/f"]);
+  expect(await registerLinkHandler({ ...h, run: none.run })).toEqual([`registered isoplan:// links to open ${SCRIPT}, through conhost with no window, since Windows Script Host is turned off`]);
+  // conhost is a windowed program, so Windows makes no console for it, and --headless gives node one with no window.
+  expect(none.calls.at(-1)).toEqual(["reg", "add", COMMAND_KEY, "/ve", "/d", `"${conhostPath()}" --headless "${NODE}" "${SCRIPT}" "%1"`, "/f"]);
   expect(fs.existsSync(linkLauncherPath(claudeDir))).toBe(false);
-  const kept = windows(directCommand(there.node, there.script), true);
+  const kept = windows(headlessLinkCommand(there.node, there.script), true);
   expect(await registerLinkHandler({ ...h, run: kept.run })).toEqual([]);
   expect(kept.calls.filter((c) => c[1] === "add")).toEqual([]);
   // Turned off after a launcher was registered: wscript would show its message on every link.
@@ -117,7 +122,11 @@ test("Windows: with Script Host turned off, links run node directly, a working d
   fs.writeFileSync(theirs, hiddenLauncher(there.node, there.script, { link: true }));
   const launched = windows(windowsCommand(theirs), true);
   expect(await registerLinkHandler({ ...h, run: launched.run })).toEqual([expect.stringContaining("Windows Script Host is turned off")]);
-  expect(launched.calls.at(-1)).toEqual(["reg", "add", COMMAND_KEY, "/ve", "/d", directCommand(NODE, SCRIPT), "/f"]);
+  expect(launched.calls.at(-1)).toEqual(["reg", "add", COMMAND_KEY, "/ve", "/d", headlessLinkCommand(NODE, SCRIPT), "/f"]);
+  // Node straight from the registry, as before, shows a console window on every link.
+  const direct = windows(`"${there.node}" "${there.script}" "%1"`, true);
+  expect(await registerLinkHandler({ ...h, run: direct.run })).toHaveLength(1);
+  expect(direct.calls.at(-1)).toEqual(["reg", "add", COMMAND_KEY, "/ve", "/d", headlessLinkCommand(NODE, SCRIPT), "/f"]);
 });
 
 test("Windows: uninstall takes the protocol out only when it runs this config folder's handler or launcher, and the launcher goes", async () => {
@@ -130,8 +139,8 @@ test("Windows: uninstall takes the protocol out only when it runs this config fo
   expect(await unregisterLinkHandler({ ...h, run: mine.run })).toEqual(["removed the isoplan:// link handler"]);
   expect(mine.calls.at(-1)).toEqual(["reg", "delete", "HKCU\\Software\\Classes\\isoplan", "/f"]);
   expect(fs.existsSync(launcher)).toBe(false);
-  const direct = windows(directCommand(NODE, SCRIPT.replace(/\\/g, "/")));
-  expect(await unregisterLinkHandler({ ...h, run: direct.run })).toEqual(["removed the isoplan:// link handler"]);
+  const headless = windows(headlessLinkCommand(NODE, SCRIPT.replace(/\\/g, "/")));
+  expect(await unregisterLinkHandler({ ...h, run: headless.run })).toEqual(["removed the isoplan:// link handler"]);
   const another = windows(windowsCommand("D:\\other\\.claude\\isoplan\\open-link.js"));
   expect(await unregisterLinkHandler({ ...h, run: another.run })).toEqual([]);
   expect(another.calls).toHaveLength(1);

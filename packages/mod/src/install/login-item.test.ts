@@ -3,7 +3,7 @@ import path from "node:path";
 import { expect, test } from "vitest";
 import type { Exec } from "../connect/dialog.js";
 import { tempRoot } from "../data-layer/fixture.js";
-import { hiddenLauncher, launcherPaths, wscriptPath } from "./hidden-launch.js";
+import { conhostPath, hiddenLauncher, launcherPaths, wscriptPath } from "./hidden-launch.js";
 import { installWake, RUNNER_FILES, uninstall, wakeScriptPath } from "./install.js";
 import { autostartEntry, autostartPath, launchAgentLabel, launchAgentPath, launchAgentPlist, loginLauncherPath, registerLoginItem, runValueName, unregisterLoginItem, windowsLoginCommand } from "./login-item.js";
 
@@ -85,21 +85,25 @@ test("Windows: a Run value of the config folder's own starts wake.mjs --login th
   expect(await unregisterLoginItem(h)).toEqual([]);
 });
 
-test("Windows: with Script Host turned off nothing is registered, and it says why; an item registered before is taken out", async () => {
+test("Windows: with Script Host turned off the Run value starts wake.mjs --login through conhost with no window, once; an item through the launcher is redone that way, and back", async () => {
   const claudeDir = path.join(tempRoot(), ".claude");
   const reg = registry(true);
   const h = { platform: "win32" as const, claudeDir, home: "C:\\Users\\ada", ...realFiles(), run: reg.run };
-  await expect(registerLoginItem(h)).rejects.toThrow("Windows Script Host is turned off");
-  expect(reg.values.size).toBe(0);
+  const name = runValueName(claudeDir);
+  const said = ["set the runner to start at login, through conhost with no window, since Windows Script Host is turned off"];
+  expect(await registerLoginItem(h)).toEqual(said);
+  expect(reg.values.get(name)).toBe(`"${conhostPath()}" --headless "${h.node}" "${h.script}" --login`);
   expect(fs.existsSync(loginLauncherPath(claudeDir))).toBe(false);
-  // Turned off after the item was added: wscript would show its message at every login.
+  const adds = () => reg.calls.filter((c) => c[1] === "add").length;
+  const added = adds();
+  expect(await registerLoginItem(h)).toEqual([]);
+  expect(adds()).toBe(added);
+  // Turned on: through the launcher again. Turned off after that: wscript would show its message at every login.
   reg.state.off = false;
-  expect(await registerLoginItem(h)).toHaveLength(1);
+  expect(await registerLoginItem(h)).toEqual([`set the runner to start at login, through ${loginLauncherPath(claudeDir)}`]);
   reg.state.off = true;
-  expect(await registerLoginItem(h)).toEqual([
-    `took out the runner's start at login (${RUN_KEY}\\${runValueName(claudeDir)}): Windows Script Host is turned off on this computer, and without it the runner can't start with no window`,
-  ]);
-  expect(reg.values.size).toBe(0);
+  expect(await registerLoginItem(h)).toEqual(said);
+  expect(reg.values.get(name)).toBe(`"${conhostPath()}" --headless "${h.node}" "${h.script}" --login`);
   expect(fs.existsSync(loginLauncherPath(claudeDir))).toBe(false);
 });
 

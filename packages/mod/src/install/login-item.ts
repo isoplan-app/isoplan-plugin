@@ -10,7 +10,8 @@
 // - Windows: a value, "Isoplan runner <id>", under HKCU\Software\Microsoft\Windows\CurrentVersion\Run,
 //   running wscript on a launcher, <claude dir>/isoplan/start-at-login.js, which starts node hidden
 //   (hidden-launch.ts): node straight from the Run key would show a console window for as long as it
-//   ran. Not registered, and taken out, while Windows Script Host is turned off.
+//   ran. While Windows Script Host is turned off, the value runs conhost with no window on node
+//   instead (hidden-launch.ts), and the launcher goes.
 // - macOS: a LaunchAgent, ~/Library/LaunchAgents/dev.isoplan.runner.<id>.plist, with RunAtLoad and no
 //   KeepAlive, so launchd starts it once at login and never again behind the runner's own lifecycle,
 //   loaded now into this person's GUI domain with `launchctl bootstrap gui/<uid>`.
@@ -27,7 +28,7 @@ import { exec, type Exec } from "../connect/dialog.js";
 import { loadSettings } from "../data-layer/config.js";
 import { nodeIo } from "../data-layer/io.js";
 import { alive, releaseLock, takeLock } from "../wake/lock.js";
-import { hiddenLauncher, launchCommand, launcherPaths, scriptHostOff } from "./hidden-launch.js";
+import { headlessCommand, headlessPaths, hiddenLauncher, launchCommand, launcherPaths, scriptHostOff } from "./hidden-launch.js";
 import { execArg, regValue, works } from "./link-handler.js";
 import { stableNode } from "./stable-node.js";
 import { normalPath } from "./state.js";
@@ -154,16 +155,18 @@ async function register(given: LoginItem): Promise<string[]> {
     if (r.code !== 0) throw new Error(`${path.basename(file)} ${args[0] ?? ""} failed${r.code === null ? " to start" : ` (${r.code})`}`);
   };
   if (h.platform === "win32") {
-    // Checked first: with Script Host off, an item made before would show its message at every login.
-    if (await scriptHostOff(run)) {
-      const why = "Windows Script Host is turned off on this computer, and without it the runner can't start with no window";
-      const removed = await unregisterLoginItem(h);
-      if (!removed.length) throw new Error(why);
-      return removed.map((change) => `${change}: ${why}`);
-    }
+    // With Script Host off, an item through the launcher would show its message at every login.
+    const off = await scriptHostOff(run);
     const launcher = loginLauncherPath(h.claudeDir);
-    const want = windowsLoginCommand(h.claudeDir);
     const current = regValue((await run("reg", ["query", RUN_KEY, "/v", runValueName(h.claudeDir)])).stdout);
+    if (off) {
+      const want = headlessCommand(h.node, h.script, LOGIN_ARG);
+      if (current?.toLowerCase() === want.toLowerCase() && (await works(headlessPaths(current)))) return [];
+      await fs.rm(launcher, { force: true });
+      await must("reg", ["add", RUN_KEY, "/v", runValueName(h.claudeDir), "/d", want, "/f"]);
+      return ["set the runner to start at login, through conhost with no window, since Windows Script Host is turned off"];
+    }
+    const want = windowsLoginCommand(h.claudeDir);
     // In any letter case, as Windows reads paths: %SystemRoot% may be C:\WINDOWS or C:\Windows.
     if (current?.toLowerCase() === want.toLowerCase() && (await works(launcherPaths(await read(launcher))))) return [];
     await fs.mkdir(path.dirname(launcher), { recursive: true });
