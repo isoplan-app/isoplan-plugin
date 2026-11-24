@@ -31,6 +31,7 @@ import path from "node:path";
 import { exec, type Exec } from "../connect/dialog.js";
 import { alive, releaseLock, takeLock } from "../wake/lock.js";
 import { hiddenLauncher, launchCommand, launcherOf, launcherPaths, scriptHostOff } from "./hidden-launch.js";
+import { stableNode } from "./stable-node.js";
 
 export interface LinkHandler {
   platform: NodeJS.Platform;
@@ -41,6 +42,8 @@ export interface LinkHandler {
   /** The node binary, and the handler it runs. */
   node: string;
   script: string;
+  /** The environment, for the version managers' paths (stable-node.ts). */
+  env?: Record<string, string | undefined>;
   run?: Exec;
 }
 
@@ -125,8 +128,8 @@ export async function registerLinkHandler(given: LinkHandler): Promise<string[]>
 }
 
 async function register(given: LinkHandler): Promise<string[]> {
-  // A version manager's node may be a link in a folder of the shell's own (fnm's multishells), gone with it.
-  const h = { ...given, node: await fs.realpath(given.node).catch(() => given.node) };
+  // A path that outlives this Node version where there is one (stable-node.ts).
+  const h = { ...given, node: await stableNode(given.node, given.env ?? process.env, given.platform) };
   const run = h.run ?? exec;
   const must = async (file: string, args: string[]) => {
     const r = await run(file, args);

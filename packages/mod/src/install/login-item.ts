@@ -29,6 +29,7 @@ import { nodeIo } from "../data-layer/io.js";
 import { alive, releaseLock, takeLock } from "../wake/lock.js";
 import { hiddenLauncher, launchCommand, launcherPaths, scriptHostOff } from "./hidden-launch.js";
 import { execArg, regValue, works } from "./link-handler.js";
+import { stableNode } from "./stable-node.js";
 import { normalPath } from "./state.js";
 
 export interface LoginItem {
@@ -42,6 +43,8 @@ export interface LoginItem {
   /** The node binary, and the script it runs: this config folder's wake.mjs. */
   node: string;
   script: string;
+  /** The environment, for the version managers' paths (stable-node.ts). */
+  env?: Record<string, string | undefined>;
   run?: Exec;
 }
 
@@ -143,8 +146,8 @@ export async function registerLoginItem(given: LoginItem): Promise<string[]> {
 }
 
 async function register(given: LoginItem): Promise<string[]> {
-  // A version manager's node may be a link in a folder of the shell's own (fnm's multishells), gone with it.
-  const h = { ...given, node: await fs.realpath(given.node).catch(() => given.node) };
+  // A path that outlives this Node version where there is one (stable-node.ts).
+  const h = { ...given, node: await stableNode(given.node, given.env ?? process.env, given.platform) };
   const run = h.run ?? exec;
   const must = async (file: string, args: string[]) => {
     const r = await run(file, args);
