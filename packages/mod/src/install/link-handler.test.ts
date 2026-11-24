@@ -196,6 +196,21 @@ test("Linux: a desktop entry for x-scheme-handler/isoplan, made the default with
   expect(fs.existsSync(file)).toBe(false);
 });
 
+test("the handler names fnm's default node, which outlives the version, when that is the node running install", async () => {
+  const root = tempRoot();
+  const { script } = realFiles();
+  const node = path.join(root, "v22", "node");
+  fs.mkdirSync(path.dirname(node));
+  fs.writeFileSync(node, "");
+  const fnm = path.join(root, "fnm");
+  fs.mkdirSync(path.join(fnm, "aliases", "default"), { recursive: true });
+  fs.symlinkSync(path.dirname(node), path.join(fnm, "aliases", "default", "bin"), "junction");
+  const h = { platform: "linux" as const, claudeDir: path.join(root, ".claude"), home: root, node, script, env: { FNM_DIR: fnm }, run: fakeOs().run };
+  await registerLinkHandler(h);
+  const entry = fs.readFileSync(path.join(root, ".local", "share", "applications", "isoplan-connect.desktop"), "utf8");
+  expect(entry).toBe(desktopEntry(path.posix.join(fnm, "aliases", "default", "bin", "node"), script));
+});
+
 test("install registers the handler for the copy beside the runner, and uninstall takes it out; an install without a place for it registers nothing", async () => {
   const root = tempRoot();
   const claudeDir = path.join(root, ".claude");

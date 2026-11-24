@@ -7495,6 +7495,160 @@ async function readJson$2(io, p, optional = false) {
 	}
 }
 //#endregion
+//#region src/data-layer/git.ts
+/** True for a Windows-shaped path: a drive letter, a UNC prefix, or any backslash. */
+function isWindowsPath(p) {
+	return /^[A-Za-z]:([\\/]|$)/.test(p) || p.startsWith("\\\\") || p.includes("\\");
+}
+function isAbsolute(p) {
+	return /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("/") || p.startsWith("\\");
+}
+/**
+* Forward slashes, "." and ".." folded away, no trailing slash, drive letter upper-cased.
+* The root keeps its slash ("C:/", "/").
+*/
+function normalize(p) {
+	let s = p.replace(/\\/g, "/");
+	let prefix = "";
+	const drive = /^([A-Za-z]):(\/|$)/.exec(s);
+	if (drive) {
+		prefix = drive[1].toUpperCase() + ":/";
+		s = s.slice(drive[0].length);
+	} else if (s.startsWith("//")) {
+		prefix = "//";
+		s = s.slice(2);
+	} else if (s.startsWith("/")) {
+		prefix = "/";
+		s = s.slice(1);
+	}
+	const out = [];
+	for (const part of s.split("/")) {
+		if (part === "" || part === ".") continue;
+		if (part === ".." && out.length && out[out.length - 1] !== "..") out.pop();
+		else if (part !== ".." || !prefix) out.push(part);
+	}
+	return prefix + out.join("/") || ".";
+}
+/** A comparison key: normalised, and case-folded for Windows paths (case-insensitive there). */
+function pathKey(p) {
+	const n = normalize(p);
+	return isWindowsPath(p) || /^[A-Z]:\//.test(n) ? n.toLowerCase() : n;
+}
+function join(base, rel) {
+	return isAbsolute(rel) ? normalize(rel) : normalize(base + "/" + rel);
+}
+function dirname(p) {
+	const n = normalize(p);
+	const i = n.lastIndexOf("/");
+	if (i < 0) return ".";
+	if (i === 0) return "/";
+	if (/^[A-Z]:$/.test(n.slice(0, i))) return n.slice(0, i + 1);
+	return n.slice(0, i);
+}
+/**
+* `p` relative to `root` with forward slashes, or null when `p` is not inside `root`. Windows
+* paths compare case-insensitively; the relative part keeps `p`'s own spelling, so whoever
+* matches files by name compares them case-insensitively too.
+*/
+function relativeTo(root, p) {
+	const win = isWindowsPath(root) || isWindowsPath(p);
+	const r = normalize(root);
+	const n = normalize(p);
+	const rk = win ? r.toLowerCase() : r;
+	const nk = win ? n.toLowerCase() : n;
+	const base = rk.endsWith("/") ? rk : rk + "/";
+	if (!nk.startsWith(base)) return null;
+	return n.slice(base.length);
+}
+/**
+* Answers are cached per folder and looked up again once older than `maxAgeMs` at `now`, so
+* worktrees added or removed and branches switched show up. Calls that pass the same `now` share
+* one answer per folder. Without options an answer is kept for the life of the returned object. A
+* folder git can't place resolves to null.
+*/
+function createGit(io) {
+	const cache = /* @__PURE__ */ new Map();
+	return { resolve(dir, { now = 0, maxAgeMs = Infinity } = {}) {
+		const key = pathKey(dir);
+		const hit = cache.get(key);
+		if (hit && now - hit.at <= maxAgeMs) return hit.result;
+		const result = resolveUncached(io, dir).catch(() => null);
+		cache.set(key, {
+			at: now,
+			result
+		});
+		return result;
+	} };
+}
+async function resolveUncached(io, dir) {
+	if (io.run) {
+		const viaCommand = await fromCommand(io.run, dir).catch(() => null);
+		if (viaCommand) return viaCommand;
+	}
+	return fromFiles(io, dir);
+}
+async function fromCommand(run, dir) {
+	const where = await run([
+		"git",
+		"rev-parse",
+		"--path-format=absolute",
+		"--show-toplevel",
+		"--git-common-dir"
+	], { cwd: dir });
+	if (!where || where.code !== 0) return null;
+	const [toplevel, commonDir] = where.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+	if (!toplevel || !commonDir) return null;
+	const head = await Promise.resolve().then(() => run([
+		"git",
+		"rev-parse",
+		"--abbrev-ref",
+		"HEAD"
+	], { cwd: dir })).catch(() => null);
+	const name = head && head.code === 0 ? head.stdout.trim() : "";
+	return {
+		toplevel: normalize(toplevel),
+		commonDir: normalize(commonDir),
+		branch: name && name !== "HEAD" ? name : null
+	};
+}
+async function fromFiles(io, dir) {
+	const self = await io.stat(dir);
+	if (!self || !self.isDir) return null;
+	let at = normalize(dir);
+	for (;;) {
+		const dotGit = join(at, ".git");
+		const s = await io.stat(dotGit);
+		if (s) {
+			let gitDir = dotGit;
+			let commonDir = dotGit;
+			if (!s.isDir) {
+				const pointer = /^gitdir:\s*(.+?)\s*$/m.exec(await io.read(dotGit));
+				if (!pointer) return null;
+				gitDir = join(at, pointer[1]);
+				const common = await readOptional(io, join(gitDir, "commondir"));
+				commonDir = common ? join(gitDir, common.trim()) : gitDir;
+			}
+			const head = await readOptional(io, join(gitDir, "HEAD")) || "";
+			const ref = /^ref:\s*refs\/heads\/(.+?)\s*$/m.exec(head);
+			return {
+				toplevel: at,
+				commonDir,
+				branch: ref ? ref[1] : null
+			};
+		}
+		const up = dirname(at);
+		if (up === at) return null;
+		at = up;
+	}
+}
+async function readOptional(io, p) {
+	try {
+		return await io.stat(p) ? await io.read(p) : null;
+	} catch {
+		return null;
+	}
+}
+//#endregion
 //#region src/data-layer/approved-file.ts
 /** The folder of what is kept for one office server alone: its list, and its pairing's lock. Named by a hash of its address. */
 const officeDir = (claudeDir, server) => path.join(claudeDir, "isoplan", "offices", createHash("sha256").update(server).digest("hex").slice(0, 12));
@@ -8316,160 +8470,6 @@ function createSessionGate({ approved, open }) {
 		},
 		mayConnect
 	};
-}
-//#endregion
-//#region src/data-layer/git.ts
-/** True for a Windows-shaped path: a drive letter, a UNC prefix, or any backslash. */
-function isWindowsPath(p) {
-	return /^[A-Za-z]:([\\/]|$)/.test(p) || p.startsWith("\\\\") || p.includes("\\");
-}
-function isAbsolute(p) {
-	return /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("/") || p.startsWith("\\");
-}
-/**
-* Forward slashes, "." and ".." folded away, no trailing slash, drive letter upper-cased.
-* The root keeps its slash ("C:/", "/").
-*/
-function normalize(p) {
-	let s = p.replace(/\\/g, "/");
-	let prefix = "";
-	const drive = /^([A-Za-z]):(\/|$)/.exec(s);
-	if (drive) {
-		prefix = drive[1].toUpperCase() + ":/";
-		s = s.slice(drive[0].length);
-	} else if (s.startsWith("//")) {
-		prefix = "//";
-		s = s.slice(2);
-	} else if (s.startsWith("/")) {
-		prefix = "/";
-		s = s.slice(1);
-	}
-	const out = [];
-	for (const part of s.split("/")) {
-		if (part === "" || part === ".") continue;
-		if (part === ".." && out.length && out[out.length - 1] !== "..") out.pop();
-		else if (part !== ".." || !prefix) out.push(part);
-	}
-	return prefix + out.join("/") || ".";
-}
-/** A comparison key: normalised, and case-folded for Windows paths (case-insensitive there). */
-function pathKey(p) {
-	const n = normalize(p);
-	return isWindowsPath(p) || /^[A-Z]:\//.test(n) ? n.toLowerCase() : n;
-}
-function join(base, rel) {
-	return isAbsolute(rel) ? normalize(rel) : normalize(base + "/" + rel);
-}
-function dirname(p) {
-	const n = normalize(p);
-	const i = n.lastIndexOf("/");
-	if (i < 0) return ".";
-	if (i === 0) return "/";
-	if (/^[A-Z]:$/.test(n.slice(0, i))) return n.slice(0, i + 1);
-	return n.slice(0, i);
-}
-/**
-* `p` relative to `root` with forward slashes, or null when `p` is not inside `root`. Windows
-* paths compare case-insensitively; the relative part keeps `p`'s own spelling, so whoever
-* matches files by name compares them case-insensitively too.
-*/
-function relativeTo(root, p) {
-	const win = isWindowsPath(root) || isWindowsPath(p);
-	const r = normalize(root);
-	const n = normalize(p);
-	const rk = win ? r.toLowerCase() : r;
-	const nk = win ? n.toLowerCase() : n;
-	const base = rk.endsWith("/") ? rk : rk + "/";
-	if (!nk.startsWith(base)) return null;
-	return n.slice(base.length);
-}
-/**
-* Answers are cached per folder and looked up again once older than `maxAgeMs` at `now`, so
-* worktrees added or removed and branches switched show up. Calls that pass the same `now` share
-* one answer per folder. Without options an answer is kept for the life of the returned object. A
-* folder git can't place resolves to null.
-*/
-function createGit(io) {
-	const cache = /* @__PURE__ */ new Map();
-	return { resolve(dir, { now = 0, maxAgeMs = Infinity } = {}) {
-		const key = pathKey(dir);
-		const hit = cache.get(key);
-		if (hit && now - hit.at <= maxAgeMs) return hit.result;
-		const result = resolveUncached(io, dir).catch(() => null);
-		cache.set(key, {
-			at: now,
-			result
-		});
-		return result;
-	} };
-}
-async function resolveUncached(io, dir) {
-	if (io.run) {
-		const viaCommand = await fromCommand(io.run, dir).catch(() => null);
-		if (viaCommand) return viaCommand;
-	}
-	return fromFiles(io, dir);
-}
-async function fromCommand(run, dir) {
-	const where = await run([
-		"git",
-		"rev-parse",
-		"--path-format=absolute",
-		"--show-toplevel",
-		"--git-common-dir"
-	], { cwd: dir });
-	if (!where || where.code !== 0) return null;
-	const [toplevel, commonDir] = where.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-	if (!toplevel || !commonDir) return null;
-	const head = await Promise.resolve().then(() => run([
-		"git",
-		"rev-parse",
-		"--abbrev-ref",
-		"HEAD"
-	], { cwd: dir })).catch(() => null);
-	const name = head && head.code === 0 ? head.stdout.trim() : "";
-	return {
-		toplevel: normalize(toplevel),
-		commonDir: normalize(commonDir),
-		branch: name && name !== "HEAD" ? name : null
-	};
-}
-async function fromFiles(io, dir) {
-	const self = await io.stat(dir);
-	if (!self || !self.isDir) return null;
-	let at = normalize(dir);
-	for (;;) {
-		const dotGit = join(at, ".git");
-		const s = await io.stat(dotGit);
-		if (s) {
-			let gitDir = dotGit;
-			let commonDir = dotGit;
-			if (!s.isDir) {
-				const pointer = /^gitdir:\s*(.+?)\s*$/m.exec(await io.read(dotGit));
-				if (!pointer) return null;
-				gitDir = join(at, pointer[1]);
-				const common = await readOptional(io, join(gitDir, "commondir"));
-				commonDir = common ? join(gitDir, common.trim()) : gitDir;
-			}
-			const head = await readOptional(io, join(gitDir, "HEAD")) || "";
-			const ref = /^ref:\s*refs\/heads\/(.+?)\s*$/m.exec(head);
-			return {
-				toplevel: at,
-				commonDir,
-				branch: ref ? ref[1] : null
-			};
-		}
-		const up = dirname(at);
-		if (up === at) return null;
-		at = up;
-	}
-}
-async function readOptional(io, p) {
-	try {
-		return await io.stat(p) ? await io.read(p) : null;
-	} catch {
-		return null;
-	}
 }
 //#endregion
 //#region src/data-layer/claude-paths.ts
@@ -20356,7 +20356,7 @@ async function reporting(o, c) {
 				server
 			} : line);
 		});
-		const shared = o.shared?.(office);
+		const shared = o.shared?.(office, config);
 		if (shared) {
 			run.pairing = {
 				...shared.pairing,
@@ -23665,6 +23665,42 @@ function createPairLinks(now = Date.now) {
 	};
 }
 //#endregion
+//#region src/runner/shared-offices.ts
+/** The office's pairing and list, made with `config` the first time the office is asked for. */
+function createSharedOffices({ claudeDir, account, emitFor, onEmail, log, machine = os.hostname() }) {
+	const shared = /* @__PURE__ */ new Map();
+	return (office, config) => {
+		const { server } = office;
+		let one = shared.get(server);
+		if (one) return one;
+		const pairing = createPairing({
+			file: pairingPath(claudeDir),
+			lock: pairingLockPath(claudeDir, office),
+			writeLock: pairingWriteLockPath(claudeDir),
+			server,
+			account,
+			machine,
+			emit: emitFor(office),
+			allowPlainWs: config.allowPlainWs,
+			legacy: !!office.legacy,
+			onEmail: (email) => onEmail(server, email)
+		});
+		one = {
+			pairing,
+			approved: createApproved({
+				server,
+				file: approvedPath(claudeDir, server),
+				pairing,
+				refreshMs: config.approvedRefreshMinutes * 6e4,
+				maxAgeMs: config.approvedMaxAgeMinutes * 6e4,
+				log
+			})
+		};
+		shared.set(server, one);
+		return one;
+	};
+}
+//#endregion
 //#region src/runner/start-where.ts
 /** Where a start may open other than the floor, for the runner's hello: a terminal only where take.ts can open one, Orca and the Claude app only where they are found. */
 function startPlaces(platform, orca, desktop) {
@@ -24021,12 +24057,11 @@ async function worker() {
 			label
 		}))
 	});
-	const emitFor = (server) => (line) => {
+	const emitFor = ({ server, label }) => (line) => {
 		if (line.type === "log") log(line.text);
 		else if (line.type === "error") log(`the office server at ${server} says: ${line.message} (${line.code})`);
 		else if (line.type === "pair") {
 			log(`to answer for this machine's sessions through ${line.server}, pair it: click ${line.url} on this computer and approve it in the office (it works until ${line.expires})`);
-			const label = offices.find((o) => o.server === line.server)?.label;
 			pairLinks.pair({
 				...line,
 				...label && { label }
@@ -24037,32 +24072,14 @@ async function worker() {
 			});
 		}
 	};
-	const shared = new Map(answering.map((office) => {
-		const { server } = office;
-		const pairing = createPairing({
-			file: pairingPath(claudeDir),
-			lock: pairingLockPath(claudeDir, office),
-			writeLock: pairingWriteLockPath(claudeDir),
-			server,
-			account,
-			machine: os.hostname(),
-			emit: emitFor(server),
-			allowPlainWs: first.allowPlainWs,
-			legacy: !!office.legacy,
-			onEmail: (email) => status.email(server, email)
-		});
-		return [server, {
-			pairing,
-			approved: createApproved({
-				server,
-				file: approvedPath(claudeDir, server),
-				pairing,
-				refreshMs: first.approvedRefreshMinutes * 6e4,
-				maxAgeMs: first.approvedMaxAgeMinutes * 6e4,
-				log
-			})
-		}];
-	}));
+	const shared = createSharedOffices({
+		claudeDir,
+		account,
+		emitFor,
+		onEmail: (server, email) => status.email(server, email),
+		log
+	});
+	for (const office of answering) shared(office, first);
 	const paths = {
 		claudeDir,
 		settings: path.join(claudeDir, "settings.json"),
@@ -24114,7 +24131,6 @@ async function worker() {
 		report: async ({ sessionId, cwd, notWanted, closed, hooks }) => {
 			const said = sessionLog(claudeDir, sessionId);
 			said.say(hooks ? `the runner reports this session for its hooks module, in ${cwd}` : `the runner reports this session, in ${cwd}`);
-			const shares = (office) => shared.get(office.server) ?? null;
 			const titled = (title) => void titles.set(sessionId, title);
 			const expertCreationSuggestionSignals = {
 				areas: (s) => expertCreationSuggestionsOnceStarted?.seen(s),
@@ -24138,7 +24154,7 @@ async function worker() {
 						pairLinks.sent(sessionId, line, hooks.send);
 					},
 					closed: Promise.race([closed, hooks.closed.then(() => "its hooks module's link to the runner closed")]),
-					shared: shares,
+					shared,
 					titled,
 					...expertCreationSuggestionSignals
 				}).finally(() => pairLinks.ended(sessionId, hooks.send));
@@ -24151,7 +24167,7 @@ async function worker() {
 					closed,
 					notWanted,
 					isOff: () => isOff(cwd),
-					shared: shares,
+					shared,
 					titled,
 					...expertCreationSuggestionSignals
 				});
@@ -24271,7 +24287,7 @@ async function worker() {
 	});
 	const runnerFor = (office, index) => {
 		const { server } = office;
-		const { pairing, approved } = shared.get(server);
+		const { pairing, approved } = shared(office, first);
 		const takes = async () => {
 			await approved.refresh();
 			return takesFrom(homeIo, approved.repos());
@@ -24414,7 +24430,7 @@ async function worker() {
 	const answerers = answering.map(runnerFor);
 	const hosts = answering.map((office, index) => hostExperts({
 		experts: hosted,
-		approved: shared.get(office.server).approved,
+		approved: shared(office, first).approved,
 		home: (folder, repos) => approvedHome(folder, expertHomeIo, repos),
 		scan: scanText,
 		log,
@@ -24524,7 +24540,7 @@ async function worker() {
 			status.opening(office.server);
 			return createLink({
 				url: office.server,
-				emit: emitFor(office.server),
+				emit: emitFor(office),
 				pairing,
 				onMessage: (message) => runner.take(message),
 				onDrive: (message) => drive.take(office.server, message),

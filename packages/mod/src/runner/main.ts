@@ -69,13 +69,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PROTOCOL_VERSION, type DrivenMessage, type ExpertSeniorMessage, type ExpertsMessage, type RefusalMessage, type ReplyMessage, type TakenMessage } from "@isoplan/protocol";
 import { loadConfig, loadSettings, officesOf, type Office } from "../data-layer/config.js";
-import { approvedPath, createApproved } from "../data-layer/approved.js";
 import { approvedHome, machineHomeIo, takesFrom } from "../data-layer/home.js";
 import { askingRemoteNames } from "../data-layer/remote-names.js";
 import { accountOf, claudePaths } from "../data-layer/identity.js";
 import { nodeIo } from "../data-layer/io.js";
 import { createLink, type RunnerExpertCreationSuggestionMessage } from "../data-layer/link.js";
-import { createPairing, pairingEntry, pairingLockPath, pairingPath, pairingWriteLockPath, readPairing } from "../data-layer/pairing.js";
+import { pairingEntry, pairingPath, readPairing } from "../data-layer/pairing.js";
 import { HOLD_OFF_MS, alive, holdOff, refreshLock, releaseLock, takeLock } from "../wake/lock.js";
 import { openLedger } from "./caps.js";
 import { createClaudeAnswerer, forkableId, forkEnv, killPid } from "./claude.js";
@@ -109,6 +108,7 @@ import { hostExperts } from "./expert-link.js";
 import { createExperts, expertIgnored, forOffice, type Experts } from "./experts.js";
 import { createPipeServer, type Hooked } from "../pipe/server.js";
 import { createPairLinks } from "./pair-links.js";
+import { createSharedOffices } from "./shared-offices.js";
 import { startPlaces, startWhere, tidyStarts } from "./start-where.js";
 import { runnerEnvPath } from "./environment.js";
 import { applyClaudeDir, LOCK_REFRESH_MS, RUNNER_FRESH_MS, runnerCode, runnerLockPath } from "./start.js";
@@ -225,39 +225,19 @@ async function worker(): Promise<number> {
   const pairLinks = createPairLinks();
   // Each office's link and the links to pair the machine, for the desktop app's menu (status.ts).
   const status = createStatus({ file: statusPath(claudeDir), offices: answering.map(({ server, label }) => ({ server, label })) });
-  const emitFor = (server: string): Parameters<typeof createLink>[0]["emit"] => (line) => {
+  const emitFor = ({ server, label }: Office): Parameters<typeof createLink>[0]["emit"] => (line) => {
     if (line.type === "log") log(line.text);
     else if (line.type === "error") log(`the office server at ${server} says: ${line.message} (${line.code})`);
     else if (line.type === "pair") {
       log(`to answer for this machine's sessions through ${line.server}, pair it: click ${line.url} on this computer and approve it in the office (it works until ${line.expires})`);
       // The machine's one pairing: its link is in the status line of each session waiting for it.
-      const label = offices.find((o) => o.server === line.server)?.label;
       pairLinks.pair({ ...line, ...(label && { label }) });
       status.pair({ ...line, ...(label && { label }) });
     }
   };
-  // Each office's pairing and list of repos (src/data-layer/approved.ts), one of each for the
-  // machine: the runner answers only for sessions in a repo the office takes, and the sessions it
-  // reports share them, so a machine not paired yet is paired once per office.
-  const shared = new Map(
-    answering.map((office) => {
-      const { server } = office;
-      const pairing = createPairing({
-        file: pairingPath(claudeDir),
-        lock: pairingLockPath(claudeDir, office),
-        writeLock: pairingWriteLockPath(claudeDir),
-        server,
-        account,
-        machine: os.hostname(),
-        emit: emitFor(server),
-        allowPlainWs: first.allowPlainWs,
-        legacy: !!office.legacy,
-        onEmail: (email) => status.email(server, email),
-      });
-      const approved = createApproved({ server, file: approvedPath(claudeDir, server), pairing, refreshMs: first.approvedRefreshMinutes * 60000, maxAgeMs: first.approvedMaxAgeMinutes * 60000, log });
-      return [server, { pairing, approved }] as const;
-    }),
-  );
+  // Each office's pairing and list of repos, one of each for the machine (shared-offices.ts).
+  const shared = createSharedOffices({ claudeDir, account, emitFor, onEmail: (server, email) => status.email(server, email), log });
+  for (const office of answering) shared(office, first);
   // Every session on the machine is reported from here (reporting.ts), started first, so a runner
   // started again has them on the floor again soon: those of hooks modules once they say hello, the
   // recent ones without once the first look's hold of twice runnerRetrySeconds has passed.
@@ -306,7 +286,6 @@ async function worker(): Promise<number> {
     report: async ({ sessionId, cwd, notWanted, closed, hooks }) => {
       const said = sessionLog(claudeDir, sessionId);
       said.say(hooks ? `the runner reports this session for its hooks module, in ${cwd}` : `the runner reports this session, in ${cwd}`);
-      const shares = (office: Office) => shared.get(office.server) ?? null;
       const titled = (title: string) => void titles.set(sessionId, title);
       // Each pass's areas, and the local model's word on which messages corrected the agent (expert-creation-suggestions.ts).
       const expertCreationSuggestionSignals = { areas: (s: Parameters<ExpertCreationSuggestions["seen"]>[0]) => expertCreationSuggestionsOnceStarted?.seen(s), corrected: (key: string, text: string, reply: string | null) => expertCreationSuggestionsOnceStarted?.corrected(sessionId, key, text, reply) ?? null };
@@ -329,11 +308,11 @@ async function worker(): Promise<number> {
               pairLinks.sent(sessionId, line, hooks.send);
             },
             closed: Promise.race([closed, hooks.closed.then(() => "its hooks module's link to the runner closed")]),
-            shared: shares,
+            shared,
             titled,
             ...expertCreationSuggestionSignals,
           }).finally(() => pairLinks.ended(sessionId, hooks.send));
-        return await reportSession({ sessionId, cwd, by: "runner", appDir, emit: said.emit, closed, notWanted, isOff: () => isOff(cwd), shared: shares, titled, ...expertCreationSuggestionSignals });
+        return await reportSession({ sessionId, cwd, by: "runner", appDir, emit: said.emit, closed, notWanted, isOff: () => isOff(cwd), shared, titled, ...expertCreationSuggestionSignals });
       } catch (err) {
         said.say(`stopping: something went wrong: ${errorText(err, await errorPatterns().catch(() => null))}`);
         throw err;
@@ -451,7 +430,7 @@ async function worker(): Promise<number> {
   // The runner answering what one office asks, for that office alone; it outlives its office's link.
   const runnerFor = (office: Office, index: number) => {
     const { server } = office;
-    const { pairing, approved } = shared.get(server)!;
+    const { pairing, approved } = shared(office, first);
     // The repos a handoff from the lead's folder may hand over: the office's alone (#91).
     const takes = async () => {
       await approved.refresh();
@@ -595,7 +574,7 @@ async function worker(): Promise<number> {
   const hosts = answering.map((office, index) =>
     hostExperts({
       experts: hosted,
-      approved: shared.get(office.server)!.approved,
+      approved: shared(office, first).approved,
       home: (folder, repos) => approvedHome(folder, expertHomeIo, repos),
       scan: scanText,
       log,
@@ -710,7 +689,7 @@ async function worker(): Promise<number> {
       status.opening(office.server);
       return createLink({
         url: office.server,
-        emit: emitFor(office.server),
+        emit: emitFor(office),
         pairing,
         onMessage: (message) => runner.take(message),
         onDrive: (message) => drive.take(office.server, message),

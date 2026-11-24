@@ -20,6 +20,7 @@ import { hookedEnv, reportSession, sessionLog, takesOver, type Ended, type Repor
 import { lockPath } from "../wake/lock.js";
 import { watchSessions, type Reporting, type ToReport } from "./reporting.js";
 import { loadPatterns } from "./scan.js";
+import { createSharedOffices } from "./shared-offices.js";
 
 vi.setConfig({ testTimeout: 30000 });
 
@@ -648,6 +649,28 @@ test("a hold-off: the session isn't reported before it ends; one no office took 
   expect(w.heldOff("s1")).toBe(false);
 });
 
+test("a hold-off ends once an office added to config.json since takes its repo; a list of an office not configured counts for nothing", async () => {
+  const m = machine();
+  m.write("s1");
+  const { w, started, ids } = watch(m);
+  await until(() => ids().length === 1);
+  started[0]!.end({ why: "held", holdOff: { until: Date.now() + 3600000, projects: ["github.com/team/app"], offices: ["ws://a/data-layer"], notWanted: {} } });
+  await until(() => w.reporting().length === 0);
+  const added = "ws://added/data-layer";
+  fs.mkdirSync(path.dirname(approvedPath(m.claudeDir, added)), { recursive: true });
+  fs.writeFileSync(approvedPath(m.claudeDir, added), JSON.stringify({ server: added, version: "v1", repos: ["github.com/team/app"], fetched: Date.now(), checked: Date.now() }));
+  await wait(20);
+  m.write("s1");
+  await w.look();
+  await w.look();
+  expect(ids()).toEqual(["s1"]);
+  m.config = { ...m.config, servers: [{ label: "a", server: "ws://a/data-layer" }, { label: "added", server: added }] };
+  await wait(20);
+  m.write("s1");
+  await until(() => ids().length === 2);
+  expect(w.heldOff("s1")).toBe(false);
+});
+
 test("a hold-off with no repos to wait for (no office wants the project) holds until it ends", async () => {
   const m = machine();
   m.write("s1");
@@ -761,6 +784,43 @@ function runnerWith(m: ReturnType<typeof machine>, s1: { emit?: (line: DataLayer
   watching.push(w);
   return { w, started: (id: string) => starts.filter((s) => s === id).length };
 }
+
+test("the runner's sessions share one pairing and list for each office, also for an office added to config.json since the runner started (#106)", async () => {
+  const { o, m, of } = await twoSessions();
+  vi.stubEnv("CLAUDE_CONFIG_DIR", m.claudeDir);
+  // As the worker makes them as it starts, for the offices config.json names then.
+  const shared = createSharedOffices({ claudeDir: m.claudeDir, account: { id: "claude:acc-1", name: "Adam" }, emitFor: () => () => {}, onEmail: () => {}, log: () => {} });
+  const first = shared({ label: "a", server: o.url }, m.config);
+  const b = await office();
+  fs.writeFileSync(path.join(m.claudeDir, "isoplan", "config.json"), JSON.stringify({ servers: [{ label: "a", server: o.url }, { label: "b", server: b.url }], streamSeconds: 1 }));
+  const given = new Map<string, Set<unknown>>();
+  const report = async ({ sessionId, cwd, notWanted, closed }: ToReport) => {
+    const log = sessionLog(m.claudeDir, sessionId);
+    const ended = await reportSession({
+      sessionId,
+      cwd,
+      by: "runner",
+      appDir: modDir,
+      emit: log.emit,
+      closed,
+      notWanted,
+      isOff: async () => false,
+      shared: (office, config) => {
+        const one = shared(office, config);
+        given.set(office.server, (given.get(office.server) ?? new Set()).add(one));
+        return one;
+      },
+    });
+    await log.flushed();
+    return ended;
+  };
+  const w = watchSessions({ claudeDir: m.claudeDir, io: nodeIo(), config: async () => m.config, report, isOff: async () => false, log: () => {}, patterns });
+  watching.push(w);
+  const onB = (id: string) => b.connections.find((c) => c.messages.some((msg) => msg.type === "full" && (msg as { facts?: { session?: { id?: string } } }).facts?.session?.id === `claude-code:${id}`));
+  await until(() => !!of("s1") && !!of("s2") && !!onB("s1") && !!onB("s2"));
+  expect([...given.get(o.url)!]).toEqual([first]);
+  expect(given.get(b.url)!.size).toBe(1);
+});
 
 test("a session whose report throws in one of its link's handlers ends alone, its lock gone and its log saying why, while another session the runner reports goes on; it starts again once its transcript moves", async () => {
   const { m, of, logOf } = await twoSessions();

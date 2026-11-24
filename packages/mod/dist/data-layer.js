@@ -8028,6 +8028,28 @@ async function scriptHostOff(run) {
 	return false;
 }
 //#endregion
+//#region src/install/stable-node.ts
+/** The paths that follow the current Node version, for this platform and environment. */
+function stableNodeCandidates(env, platform) {
+	if (platform === "win32") {
+		const join = path.win32.join;
+		return [...env.NVM_SYMLINK ? [join(env.NVM_SYMLINK, "node.exe")] : [], ...env.FNM_DIR ? [join(env.FNM_DIR, "aliases", "default", "node.exe")] : []];
+	}
+	const join = path.posix.join;
+	const brew = [...new Set([
+		env.HOMEBREW_PREFIX,
+		"/opt/homebrew",
+		"/usr/local"
+	].filter((p) => !!p))];
+	return [...env.FNM_DIR ? [join(env.FNM_DIR, "aliases", "default", "bin", "node")] : [], ...brew.map((p) => join(p, "bin", "node"))];
+}
+/** The path to register for `node`: the first candidate that leads to the same binary, else its real path. */
+async function stableNode(node, env, platform) {
+	const real = await fs.realpath(node).catch(() => node);
+	for (const candidate of stableNodeCandidates(env, platform)) if (await fs.realpath(candidate).catch(() => null) === real) return candidate;
+	return real;
+}
+//#endregion
 //#region src/install/link-handler.ts
 const KEY = "HKCU\\Software\\Classes\\isoplan";
 const OPEN_KEY = `${KEY}\\shell\\open`;
@@ -8095,7 +8117,7 @@ async function registerLinkHandler(given) {
 async function register$1(given) {
 	const h = {
 		...given,
-		node: await fs.realpath(given.node).catch(() => given.node)
+		node: await stableNode(given.node, given.env ?? process.env, given.platform)
 	};
 	const run = h.run ?? exec;
 	const must = async (file, args) => {
@@ -8514,7 +8536,7 @@ async function registerLoginItem(given) {
 async function register(given) {
 	const h = {
 		...given,
-		node: await fs.realpath(given.node).catch(() => given.node)
+		node: await stableNode(given.node, given.env ?? process.env, given.platform)
 	};
 	const run = h.run ?? exec;
 	const must = async (file, args) => {
