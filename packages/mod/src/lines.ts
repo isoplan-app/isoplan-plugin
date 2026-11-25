@@ -198,7 +198,17 @@ export interface ExpertCreationSuggestionLine {
   why: ExpertCreationSuggestionMessage["why"];
   /** An office-wide suggestion's: why it is office-wide, which its transcript line says. */
   officeWideReason?: OfficeWideReason;
+  /** A session's: what was done in its area again, which its transcript line says. */
+  repetition?: ExpertCreationSuggestionRepetition;
 }
+
+/**
+ * What was done in an expert creation suggestion's area again, which suggested it (isoplan-app#338):
+ * its `file` read most was read `readings` times, one reading a turn, over `sessions` sessions
+ * (this one among them), with `files` - 1 other files of its area read again too; or its folder was
+ * searched `searches` times.
+ */
+export type ExpertCreationSuggestionRepetition = { readings: number; sessions: number; file: string; files: number } | { searches: number };
 
 /** Why an office-wide suggestion was made: how many sessions in the office, on any machine, searched its folder within the last `searchWindowDays` days. */
 export interface OfficeWideReason {

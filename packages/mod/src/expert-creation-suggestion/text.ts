@@ -5,7 +5,9 @@
 // the repo's top folder. Why it was suggested follows the floor's review card: about how many
 // minutes, and the share of the session's context or, without one, about how many tokens, that
 // the session spent there, and how often its person corrected the agent there; for an office-wide
-// suggestion, how many sessions searched the folder and over how many days.
+// suggestion, how many sessions searched the folder and over how many days. A session's suggestion
+// says first what was done there again, which suggested it (isoplan-app#338): the file read most
+// and how often, in how many sessions, or how often the folder was searched.
 
 import type { ExpertCreationSuggestionLine, ExpertReadyLine } from "../lines.js";
 
@@ -28,12 +30,25 @@ export const expertCreationSuggestionStatusLineText = (line: ExpertCreationSugge
 /** The one transcript line of a suggestion: why it was made, and where to review it. */
 export function expertCreationSuggestionTranscriptText(line: ExpertCreationSuggestionLine): string {
   const where = folderWords(line.folder);
+  const review = `Review it: ${line.url} (or type /isoplan:review-expert-suggestion)`;
   const wide = line.officeWideReason;
   if (wide) {
     const when = wide.searchWindowDays === 7 ? "this week" : `in the last ${wide.searchWindowDays} days`;
-    return `Isoplan: ${wide.searchedBySessions} sessions ${when} searched ${where}. ${article(line.name)} ${line.name} could answer questions about ${where} without searching it again. Review it: ${line.url} (or type /isoplan:review-expert-suggestion)`;
+    return `Isoplan: ${wide.searchedBySessions} sessions ${when} searched ${where}. ${article(line.name)} ${line.name} could answer questions about ${where} without searching it again. ${review}`;
   }
   const { minutes, share, tokens: used, corrections } = line.why;
+  const again = line.repetition;
+  if (again) {
+    const m = Math.round(minutes);
+    const spent = [m >= 1 ? `about ${m} minute${m === 1 ? "" : "s"}` : null, share >= 0.01 ? `${Math.round(share * 100)}% of ${"sessions" in again && again.sessions > 1 ? "this session's" : "its"} context` : null].filter((x) => x !== null);
+    const more = `${spent.length ? `, ${spent.join(" and ")}` : ""}${corrections > 0 ? `, and you corrected it ${times(corrections)} there` : ""}`;
+    if ("searches" in again) return `Isoplan: this session searched ${where} ${times(again.searches)}${more}. ${article(line.name)} ${line.name} could answer questions about ${where} without searching it again. ${review}`;
+    const others = again.files - 1;
+    const read = again.sessions > 1 ? `${again.file} was read ${times(again.readings)} in ${again.sessions} sessions` : `this session read ${again.file} ${times(again.readings)}`;
+    const withIt = others ? `, and ${others} other file${others === 1 ? " was" : "s were"} read again with it` : "";
+    const about = others ? `${again.file} and ${others === 1 ? "the other file" : `the ${others} other files`}` : again.file;
+    return `Isoplan: ${read}${more}${withIt}. ${article(line.name)} ${line.name} could answer questions about ${about} without reading ${others ? "them" : "it"} again. ${review}`;
+  }
   const m = Math.round(minutes);
   const spent = [m >= 1 ? `about ${m} minute${m === 1 ? "" : "s"}` : null, share >= 0.01 ? `${Math.round(share * 100)}% of its context` : used > 0 ? `about ${tokens(used)} tokens` : null].filter((x) => x !== null);
   const why = spent.length
@@ -41,7 +56,7 @@ export function expertCreationSuggestionTranscriptText(line: ExpertCreationSugge
     : corrections > 0
       ? `you corrected this session ${times(corrections)} while it worked in ${where}`
       : `this session has searched ${where}`;
-  return `Isoplan: ${why}. ${article(line.name)} ${line.name} could answer questions about ${where} without searching it again. Review it: ${line.url} (or type /isoplan:review-expert-suggestion)`;
+  return `Isoplan: ${why}. ${article(line.name)} ${line.name} could answer questions about ${where} without searching it again. ${review}`;
 }
 
 /** The note on a later tool result once the expert created from the session's suggestion is ready. */

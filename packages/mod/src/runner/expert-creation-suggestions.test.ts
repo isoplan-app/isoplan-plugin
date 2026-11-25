@@ -2,14 +2,16 @@ import fs from "node:fs";
 import path from "node:path";
 import { PROTOCOL_VERSION, type AreaFact, type DraftOfficeWideExpertCreationSuggestionMessage, type ExpertCreationSuggestionDismissal, type CreateExpertFromSuggestionMessage, type ExpertCreationSuggestionDismissalsMessage } from "@isoplan/protocol";
 import { expect, test } from "vitest";
-import { modDir, tempRoot } from "../data-layer/fixture.js";
+import type { FileReading } from "../data-layer/claude-code.js";
+import { at, line as transcript, gitRepo, modDir, session, sourceIn, tempRoot } from "../data-layer/fixture.js";
 import type { RunnerExpertCreationSuggestionMessage } from "../data-layer/link.js";
 import type { SessionAreas } from "../data-layer/report-session.js";
-import type { DataLayerLine } from "../lines.js";
+import { expertCreationSuggestionTranscriptText } from "../expert-creation-suggestion/text.js";
+import type { DataLayerLine, ExpertCreationSuggestionLine } from "../lines.js";
 import { parseExpertFile } from "./expert-file.js";
 import type { HostedExpert } from "./expert.js";
 import type { Draft, DraftInput } from "./expert-creation-suggestion-model-calls.js";
-import { cloneUrls, createExpertCreationSuggestions, EXCERPT_CHARS, EXPERT_CREATION_LIMIT_MS, folderExcerpts, folderFiles, passed, passes, RETRY_MS, reviewUrl, signalsOf, type ExpertCreationSuggestionSettings, type ExpertCreationSuggestionsOptions } from "./expert-creation-suggestions.js";
+import { areaTokens, cloneUrls, createExpertCreationSuggestions, EXCERPT_CHARS, EXPERT_CREATION_LIMIT_MS, folderExcerpts, folderFiles, ownSearches, passed, repeated, RETRY_MS, reviewUrl, signalsOf, type ExpertCreationSuggestionSettings, type ExpertCreationSuggestionsOptions } from "./expert-creation-suggestions.js";
 
 const SETTINGS: ExpertCreationSuggestionSettings = JSON.parse(fs.readFileSync(path.join(modDir, "runner.json"), "utf8")).expertCreationSuggestions;
 // The correction check turned on, as runner.json doesn't by default.
@@ -21,6 +23,10 @@ const OTHER = { id: "github.com/team/lib", name: "lib" };
 const DRAFT: Draft = { key: "parser", subject: "How the parser reads a file. Ask before changing it.", proof: { question: "Where does parsing start?", answer: "In parse.ts." } };
 
 const area = (folder: string, tokens: number, more: Partial<AreaFact> = {}): AreaFact => ({ folder, reads: 1, searches: 0, tokens, ms: 0, corrections: 0, ...more });
+// A folder searched in itself as often as makes it pass.
+const searched = (folder: string, tokens: number, more: Partial<AreaFact> = {}): AreaFact => area(folder, tokens, { searches: SETTINGS.searches, ...more });
+// A file the session read in `readings` turns, `tokensAgain` of what its reads took being past its first.
+const reading = (file: string, readings: number, tokensAgain = 0, more: Partial<FileReading> = {}): FileReading => ({ file, readings, tokens: tokensAgain + 100, tokensAgain, ...more });
 const dismissals = (list: ExpertCreationSuggestionDismissal[] = []): ExpertCreationSuggestionDismissalsMessage => ({ type: "expert-creation-suggestion-dismissals", v: PROTOCOL_VERSION, dismissals: list });
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const idOf = (s: { message: RunnerExpertCreationSuggestionMessage }) => (s.message as { id: string }).id;
@@ -88,7 +94,7 @@ async function harness(o: Partial<ExpertCreationSuggestionsOptions> = {}, root =
   };
   const expertCreationSuggestions = createExpertCreationSuggestions(opts);
   await expertCreationSuggestions.start();
-  const seen = (areas: AreaFact[], more: Partial<SessionAreas> = {}): SessionAreas => ({ server: A, session: "claude-code:s1", bare: "s1", project: PROJECT, checkout, window: 200000, model: null, areas, said: async () => ["Asked: how does the parser work?"], ...more });
+  const seen = (areas: AreaFact[], more: Partial<SessionAreas> = {}): SessionAreas => ({ server: A, session: "claude-code:s1", bare: "s1", project: PROJECT, checkout, window: 200000, model: null, areas, said: async () => ["Asked: how does the parser work?"], readings: [], ...more });
   const sentExpertCreationSuggestions = () => sent.filter((s) => s.message.type === "expert-creation-suggestion");
   return { root, isoplanDir, checkout, expertCreationSuggestions, sent, up, lines, hooked, drafts, logs, state, clones, seen, sentExpertCreationSuggestions };
 }
@@ -98,17 +104,18 @@ test("reviewUrl: the office's http address with /?expert-creation-suggestion=<id
   expect(reviewUrl("wss://office.team.com/team/data-layer", "x")).toBe("https://office.team.com/team/?expert-creation-suggestion=x");
 });
 
-test("signals: a folder passes on its share of the context window, its tokens, its minutes or its corrections", () => {
+test("signals: only what was done again passes: a file read again readAgain times, reading again that took contextShare of the window, or a folder searched searches times in itself; minutes, corrections and tokens are said only alongside", () => {
   const t = SETTINGS;
+  const why = (share: number) => ({ share, tokens: 0, minutes: 0, corrections: 0 });
+  expect(repeated({ readings: 4, sessions: 3, file: "docs/adr/0004.md", files: 1 }, why(0), t)).toBe(true);
+  expect(repeated({ readings: 3, sessions: 3, file: "docs/adr/0004.md", files: 2 }, why(0.14), t)).toBe(false);
+  expect(repeated({ readings: 2, sessions: 1, file: "docs/adr/0004.md", files: 1 }, why(0.15), t)).toBe(true);
+  expect(repeated({ searches: 5 }, why(0), t)).toBe(true);
+  expect(repeated({ searches: 4 }, why(0.9), t)).toBe(false);
   expect(signalsOf(area("src", 30000, { ms: 90000, corrections: 1 }), 200000)).toEqual({ share: 0.15, tokens: 30000, minutes: 1.5, corrections: 1 });
   expect(signalsOf(area("src", 30000), null).share).toBe(0);
-  expect(passes(signalsOf(area("src", 25000), 100000), t)).toBe(true); // 25% of the window
-  expect(passes(signalsOf(area("src", 30000), 1000000), t)).toBe(true); // 30,000 tokens
-  expect(passes(signalsOf(area("src", 10, { ms: 600000 }), 1000000), t)).toBe(true); // 10 minutes
-  expect(passes(signalsOf(area("src", 10, { corrections: 2 }), 1000000), t)).toBe(true);
-  expect(passes(signalsOf(area("src", 29999, { ms: 599000, corrections: 1 }), 1000000), t)).toBe(false);
-  // A suggestion gives only the signals that passed.
-  expect(passed(signalsOf(area("src", 35000, { ms: 90000, corrections: 1 }), 1000000), t)).toEqual({ share: 0.035, tokens: 35000, minutes: 0, corrections: 0 });
+  // A suggestion gives only the signals that passed: 35,000 tokens that are 3.5% of the window aren't one.
+  expect(passed(signalsOf(area("src", 35000, { ms: 90000, corrections: 1 }), 1000000), t)).toEqual({ share: 0, tokens: 0, minutes: 0, corrections: 0 });
   expect(passed(signalsOf(area("src", 10, { ms: 600000, corrections: 2 }), 1000000), t)).toEqual({ share: 0, tokens: 0, minutes: 10, corrections: 2 });
 });
 
@@ -125,9 +132,9 @@ test("folderFiles and folderExcerpts: a draft sees a folder's files, and the sta
   expect(await folderExcerpts(dir, ["d.ts", "a.ts"], 1)).toEqual([{ file: "d.ts", text: "d" }]);
 });
 
-test("a session's deepest folder that passes is drafted once, from its files' names and starts, and suggested to each office that takes the repo, once that office's connection has had its dismissals; never again for that session, nor inside or above it, a restart included", async () => {
+test("a session's deepest folder searched enough is drafted once, from its files' names and starts, and suggested to each office that takes the repo, once that office's connection has had its dismissals; never again for that session, nor inside or above it, a restart included", async () => {
   const h = await harness();
-  const areas = [area("src", 40000), area("src/parser", 35000), area("docs", 100)];
+  const areas = [area("src", 40000, { searches: SETTINGS.searches }), searched("src/parser", 35000), area("docs", 100)];
   // A pass before its office has said the person's dismissals isn't looked at.
   h.expertCreationSuggestions.seen(h.seen(areas));
   await sleep(30);
@@ -150,11 +157,13 @@ test("a session's deepest folder that passes is drafted once, from its files' na
   const suggestion = h.sentExpertCreationSuggestions()[0]!;
   expect(suggestion.server).toBe(A);
   expect(suggestion.message).toMatchObject({ type: "expert-creation-suggestion", session: "claude-code:s1", project: PROJECT, folder: "src/parser", scope: "session", key: "parser", subject: DRAFT.subject, area: ["src/parser"], proof: DRAFT.proof, why: { share: 0.175, tokens: 35000, minutes: 0, corrections: 0 } });
+  await until(() => h.lines.length > 0);
+  expect(h.lines[0]!.line).toMatchObject({ folder: "src/parser", repetition: { searches: SETTINGS.searches } });
   h.expertCreationSuggestions.take(1, dismissals());
   await until(() => h.sentExpertCreationSuggestions().length === 2);
   expect(h.sentExpertCreationSuggestions()[1]).toMatchObject({ server: B, message: { id: (suggestion.message as { id: string }).id } });
 
-  for (const more of [[area("src/parser/lexer", 35000)], [area("src", 90000)]]) h.expertCreationSuggestions.seen(h.seen(more));
+  for (const more of [[searched("src/parser/lexer", 35000)], [searched("src", 90000)]]) h.expertCreationSuggestions.seen(h.seen(more));
   await sleep(30);
   const again = await harness({}, h.root);
   again.expertCreationSuggestions.take(0, dismissals());
@@ -167,7 +176,7 @@ test("a suggestion goes only to the offices that may be told of its repo: one on
   const h = await harness();
   for (const index of [0, 1]) h.expertCreationSuggestions.take(index, dismissals());
   // A holds the other repo, so its pass names it; B's pass has only the session's own repo.
-  h.expertCreationSuggestions.seen(h.seen([area("src/parser", 35000, { project: OTHER }), area("docs", 100)]));
+  h.expertCreationSuggestions.seen(h.seen([searched("src/parser", 35000, { project: OTHER }), area("docs", 100)]));
   h.expertCreationSuggestions.seen(h.seen([area("docs", 100)], { server: B }));
   await until(() => h.lines.length === 1);
   expect(h.sentExpertCreationSuggestions().map((s) => [s.server, (s.message as { project: unknown }).project])).toEqual([[A, OTHER]]);
@@ -180,41 +189,152 @@ test("a suggestion goes only to the offices that may be told of its repo: one on
 test("no expert is suggested on a folder the person dismissed, whatever the letter case, even after a restart, one an expert here covers, or one whose path or draft matches a secret pattern, each said why where there is one", async () => {
   const h = await harness();
   // Before the office has said the dismissals, a pass isn't looked at: a dismissal for good holds.
-  h.expertCreationSuggestions.seen(h.seen([area("src/parser", 35000)]));
+  h.expertCreationSuggestions.seen(h.seen([searched("src/parser", 35000)]));
   await sleep(30);
   h.expertCreationSuggestions.take(0, dismissals([{ project: PROJECT.id.toUpperCase(), folder: "SRC/Parser", forever: true }]));
-  h.expertCreationSuggestions.seen(h.seen([area("src/parser", 35000)]));
+  h.expertCreationSuggestions.seen(h.seen([searched("src/parser", 35000)]));
   h.state.experts = [{ name: "docs", repo: "/work/app", subject: "The docs.", state: "ready", senior: false, areas: ["Docs/**"] }];
-  h.expertCreationSuggestions.seen(h.seen([area("docs/adr", 35000)], { session: "claude-code:s2", bare: "s2" }));
+  h.expertCreationSuggestions.seen(h.seen([searched("docs/adr", 35000)], { session: "claude-code:s2", bare: "s2" }));
   await sleep(30);
   expect(h.drafts).toEqual([]);
 
   // The folder is checked before any draft is made of it, and the whole draft after.
-  h.expertCreationSuggestions.seen(h.seen([area("src/AKIA" + "ABCDEFGHIJKLMNOP", 35000)], { session: "claude-code:s3", bare: "s3" }));
+  h.expertCreationSuggestions.seen(h.seen([searched("src/AKIA" + "ABCDEFGHIJKLMNOP", 35000)], { session: "claude-code:s3", bare: "s3" }));
   await until(() => h.logs.some((l) => l.includes("secret pattern")));
   expect(h.logs.at(-1)).toBe('no expert is suggested on a folder of app: its path matches the secret pattern "AWS access key"');
   expect(h.drafts).toEqual([]);
   h.state.draft = { ...DRAFT, subject: "Uses the key AKIA" + "ABCDEFGHIJKLMNOP." };
-  h.expertCreationSuggestions.seen(h.seen([area("src", 35000)], { session: "claude-code:s4", bare: "s4" }));
+  h.expertCreationSuggestions.seen(h.seen([], { session: "claude-code:s4", bare: "s4", readings: [reading("src/main.ts", 4)] }));
   await until(() => h.logs.some((l) => l.includes("its draft matches")));
-  expect(h.logs.at(-1)).toBe('no expert is suggested on src of app: its draft matches the secret pattern "AWS access key"');
+  expect(h.logs.at(-1)).toBe('no expert is suggested on src/main.ts of app: its draft matches the secret pattern "AWS access key"');
   expect(h.sentExpertCreationSuggestions()).toEqual([]);
 });
 
-test("a folder whose reads were all in a passing folder the person dismissed is never suggested for them", async () => {
+test("no folder passes on its folders' searches: one whose searches were all in a folder the person dismissed, or spread over folders that don't pass on their own, is never suggested; its own searches still count", async () => {
   const h = await harness();
-  h.expertCreationSuggestions.take(0, dismissals([{ project: PROJECT.id, folder: "src/shipping", forever: true }]));
-  h.expertCreationSuggestions.seen(h.seen([area("src", 35000), area("src/shipping", 35000)]));
+  h.expertCreationSuggestions.take(0, dismissals([{ project: PROJECT.id, folder: "src/parser/shipping", forever: true }]));
+  h.expertCreationSuggestions.seen(h.seen([searched("src/parser", 35000), searched("src/parser/shipping", 35000)]));
+  const n = SETTINGS.searches;
+  const spread = [area("src/parser", 35000, { searches: 2 * n - 2 }), area("src/parser/lexer", 20000, { searches: n - 1 }), area("src/parser/rules", 15000, { searches: n - 1 })];
+  expect(ownSearches(spread, spread[0]!)).toBe(0);
+  h.expertCreationSuggestions.seen(h.seen(spread, { session: "claude-code:s2", bare: "s2" }));
   await sleep(30);
   expect(h.drafts).toEqual([]);
+  spread[0]!.searches += n;
+  h.expertCreationSuggestions.seen(h.seen(spread, { session: "claude-code:s2", bare: "s2" }));
+  await until(() => h.drafts.length === 1);
+  expect(h.drafts[0]!.folder).toBe("src/parser");
 });
 
-test("a folder whose reads are spread over folders inside it that don't pass on their own is suggested", async () => {
+test("an area whose files total more than groundingBudgetTokens is never suggested, whatever its signals: a folder, or a file read again; of the files read again, those that fit are the area", async () => {
+  const h = await harness();
+  h.hooked.add("s2");
+  h.expertCreationSuggestions.take(0, dismissals());
+  fs.writeFileSync(path.join(h.checkout, "src", "parser", "grammar.ts"), "x".repeat(4 * SETTINGS.groundingBudgetTokens + 4));
+  expect(await areaTokens(h.checkout, ["src/parser"], SETTINGS.groundingBudgetTokens)).toBeGreaterThan(SETTINGS.groundingBudgetTokens);
+  const grammar = reading("src/parser/grammar.ts", 9, 90000);
+  h.expertCreationSuggestions.seen(h.seen([searched("src/parser", 35000, { searches: 50 })], { readings: [grammar] }));
+  await until(() => h.expertCreationSuggestions.idle());
+  expect(h.drafts).toEqual([]);
+  h.expertCreationSuggestions.seen(h.seen([], { session: "claude-code:s2", bare: "s2", readings: [grammar, reading("src/parser/lex.ts", 4)] }));
+  await until(() => h.lines.length === 1);
+  expect(h.sentExpertCreationSuggestions()[0]!.message).toMatchObject({ folder: "src/parser/lex.ts", area: ["src/parser/lex.ts"] });
+});
+
+test("never the repo's top folder or one of its top-level folders, nor a folder holding the area of an expert here: not for a session, nor office-wide, which is answered no-draft, saying why", async () => {
   const h = await harness();
   h.expertCreationSuggestions.take(0, dismissals());
-  h.expertCreationSuggestions.seen(h.seen([area("src", 35000), area("src/parser", 20000), area("src/lexer", 15000)]));
-  await until(() => h.drafts.length === 1);
-  expect(h.drafts[0]!.folder).toBe("src");
+  h.state.experts = [{ name: "lexer", repo: h.checkout, subject: "The lexer.", state: "ready", senior: false, areas: ["src/parser/lex.ts"] }];
+  h.expertCreationSuggestions.seen(h.seen([searched("src", 40000, { searches: 2 * SETTINGS.searches }), searched("src/parser", 35000)]));
+  await until(() => h.expertCreationSuggestions.idle());
+  h.expertCreationSuggestions.take(0, draftOfficeWideExpertCreationSuggestion("office-5", "src", ["claude-code:s1"]));
+  h.expertCreationSuggestions.take(0, draftOfficeWideExpertCreationSuggestion("office-6", "src/parser", ["claude-code:s1"]));
+  await until(() => h.sent.filter((s) => s.message.type === "expert-creation-suggestion-ended").length === 2);
+  expect(h.drafts).toEqual([]);
+  expect(h.sent.map((s) => s.message).sort((a, b) => ((a as { id: string }).id < (b as { id: string }).id ? -1 : 1))).toEqual(["office-5", "office-6"].map((id) => ({ type: "expert-creation-suggestion-ended", v: PROTOCOL_VERSION, id, why: "no-draft" })));
+  expect(h.logs.filter((l) => l.startsWith("no office-wide expert")).sort()).toEqual([
+    "no office-wide expert is suggested on src of app (office-5): it is the repo's top folder or one of its top-level folders, too broad for one expert",
+    "no office-wide expert is suggested on src/parser of app (office-6): an expert on this computer covers it, or has its area inside it",
+  ]);
+});
+
+test("one read of one large file never counts, however much of the context it took; the same file read again across sessions does, the file itself being the area, and the session's line says so", async () => {
+  const h = await harness();
+  h.hooked.add("s4");
+  h.expertCreationSuggestions.take(0, dismissals());
+  const once = (bare: string) => h.seen([area("src/parser", 40000)], { session: `claude-code:${bare}`, bare, readings: [reading("src/parser/parse.ts", 1, 0, { tokens: 40000 })] });
+  for (const bare of ["s1", "s2", "s3"]) {
+    h.expertCreationSuggestions.seen(once(bare));
+    await until(() => h.expertCreationSuggestions.idle());
+  }
+  expect(h.drafts).toEqual([]);
+  h.expertCreationSuggestions.seen(once("s4"));
+  await until(() => h.lines.length === 1);
+  expect(h.drafts.map((d) => [d.folder, d.files])).toEqual([["src/parser/parse.ts", ["src/parser/parse.ts"]]]);
+  expect(h.sentExpertCreationSuggestions()[0]!.message).toMatchObject({ session: "claude-code:s4", folder: "src/parser/parse.ts", area: ["src/parser/parse.ts"], why: { share: 0, tokens: 0, minutes: 0, corrections: 0 } });
+  expect(h.lines[0]!.line).toMatchObject({ folder: "src/parser/parse.ts", repetition: { readings: 4, sessions: 4, file: "src/parser/parse.ts", files: 1 } });
+});
+
+// A session of `repo`, its turns each reading the files named, as the data layer reads its transcript.
+async function readThrough(home: string, repo: string, id: string, turns: string[][]) {
+  let age = 1000;
+  let n = 0;
+  const lines = turns.flatMap((files) => [
+    transcript.user(repo, "how does this work?", age--),
+    ...files.flatMap((file) => {
+      const call = `r${n++}`;
+      return [
+        { type: "assistant", cwd: repo, timestamp: at(age), message: { role: "assistant", content: [{ type: "tool_use", id: call, name: "Read", input: { file_path: path.join(repo, file) } }] } },
+        { type: "user", cwd: repo, timestamp: at(age--), message: { role: "user", content: [{ type: "tool_result", tool_use_id: call, content: fs.readFileSync(path.join(repo, file), "utf8"), is_error: false }] } },
+      ];
+    }),
+  ]);
+  session(home, id, lines);
+  return sourceIn(home)(id, repo);
+}
+
+test("the session of 20 Nov 2026 that read a large design once and two ADRs, which once suggested an expert on all of docs, suggests nothing", async () => {
+  const root = tempRoot();
+  const repo = gitRepo(path.join(root, "isoplan-app"));
+  const docs = { "docs/designs/agent-expertise.md": 104000, "docs/adr/0004-what-leaves-a-machine.md": 8000, "docs/adr/0013-nuanced-features-offer-themselves.md": 8000, "docs/designs/hosting.md": 60000, "docs/contracts.md": 40000 };
+  for (const [file, chars] of Object.entries(docs)) {
+    fs.mkdirSync(path.dirname(path.join(repo, file)), { recursive: true });
+    fs.writeFileSync(path.join(repo, file), "d".repeat(chars));
+  }
+  const r = await readThrough(path.join(root, "home"), repo, "s1", [["docs/designs/agent-expertise.md"], ["docs/adr/0004-what-leaves-a-machine.md", "docs/adr/0013-nuanced-features-offer-themselves.md"]]);
+  // As then: docs took 30,000 tokens, which its subfolders didn't alone.
+  expect(r.facts!.areas!.map((a) => [a.folder, a.tokens])).toEqual([["docs", 30000], ["docs/designs", 26000], ["docs/adr", 4000]]);
+  const h = await harness({}, root);
+  h.state.experts = [{ name: "decisions", repo, subject: "The ADRs.", state: "ready", senior: false, areas: ["docs/adr"] }];
+  h.expertCreationSuggestions.take(0, dismissals());
+  h.expertCreationSuggestions.seen(h.seen(r.facts!.areas!, { checkout: repo, window: 1000000, readings: r.readings!, said: r.said! }));
+  await until(() => h.expertCreationSuggestions.idle());
+  expect([h.drafts, h.sentExpertCreationSuggestions()]).toEqual([[], []]);
+});
+
+test("one ADR and the code it governs, read again across sessions, are suggested as an area of those files, its reason what was read again", async () => {
+  const root = tempRoot();
+  const home = path.join(root, "home");
+  const repo = gitRepo(path.join(root, "isoplan-app"));
+  const adr = "docs/adr/0007-one-isoplan-process-per-machine.md";
+  const code = "packages/server/src/runners.ts";
+  for (const [file, chars] of [[adr, 6000], [code, 12000], ["packages/server/src/live.ts", 80000], ["docs/adr/0004-what-leaves-a-machine.md", 8000]] as const) {
+    fs.mkdirSync(path.dirname(path.join(repo, file)), { recursive: true });
+    fs.writeFileSync(path.join(repo, file), "c".repeat(chars));
+  }
+  const h = await harness({}, root);
+  h.hooked.add("c");
+  h.expertCreationSuggestions.take(0, dismissals());
+  for (const [id, turns] of [["a", [[adr, code, "packages/server/src/live.ts"], [adr]]], ["b", [[adr, code]]], ["c", [[adr, code, "docs/adr/0004-what-leaves-a-machine.md"]]]] as const) {
+    const r = await readThrough(home, repo, id, turns.map((t) => [...t]));
+    h.expertCreationSuggestions.seen(h.seen(r.facts!.areas!, { session: `claude-code:${id}`, bare: id, checkout: repo, window: 1000000, readings: r.readings!, said: r.said! }));
+    await until(() => h.expertCreationSuggestions.idle());
+    expect(h.drafts.length).toBe(id === "c" ? 1 : 0);
+  }
+  expect(h.drafts[0]).toMatchObject({ folder: adr, files: [adr, code] });
+  await until(() => h.lines.length === 1);
+  expect(h.sentExpertCreationSuggestions()[0]!.message).toMatchObject({ session: "claude-code:c", folder: adr, area: [adr, code] });
+  expect(expertCreationSuggestionTranscriptText(h.lines[0]!.line as ExpertCreationSuggestionLine).split(". A")[0]).toBe(`Isoplan: ${adr} was read 4 times in 3 sessions, and 1 other file was read again with it`);
 });
 
 test("a folder whose draft couldn't be made waits RETRY_MS for that session, with the folders inside and above it, a restart included, then is tried again", async () => {
@@ -222,18 +342,18 @@ test("a folder whose draft couldn't be made waits RETRY_MS for that session, wit
   const h = await harness({ now: () => clock });
   h.expertCreationSuggestions.take(0, dismissals());
   h.state.draft = null;
-  h.expertCreationSuggestions.seen(h.seen([area("src/parser", 35000)]));
+  h.expertCreationSuggestions.seen(h.seen([searched("src/parser", 35000)]));
   await until(() => h.logs.some((l) => l.includes("no usable draft came")));
   // The hold is on disk before the runner stops.
   await until(() => (savedFile(h.isoplanDir) as { held?: unknown[] } | null)?.held?.length === 1);
   h.expertCreationSuggestions.close();
   const again = await harness({ now: () => clock }, h.root);
   again.expertCreationSuggestions.take(0, dismissals());
-  again.expertCreationSuggestions.seen(again.seen([area("src/parser", 35000), area("src", 40000)]));
+  again.expertCreationSuggestions.seen(again.seen([searched("src/parser", 35000), searched("src/parser/lexer", 40000)]));
   await sleep(30);
   expect(again.drafts).toHaveLength(0);
   clock += RETRY_MS;
-  again.expertCreationSuggestions.seen(again.seen([area("src/parser", 35000)]));
+  again.expertCreationSuggestions.seen(again.seen([searched("src/parser", 35000)]));
   await until(() => again.sentExpertCreationSuggestions().length === 1);
   expect(again.drafts).toHaveLength(1);
 });
@@ -241,11 +361,11 @@ test("a folder whose draft couldn't be made waits RETRY_MS for that session, wit
 test("the session's hooks module is told of an open suggestion in each office, again when it connects, and when it ends; made in one office, it is withdrawn from the other, and the session told the expert is ready", async () => {
   const h = await harness();
   for (const index of [0, 1]) h.expertCreationSuggestions.take(index, dismissals());
-  h.expertCreationSuggestions.seen(h.seen([area("src/parser", 35000)]));
-  h.expertCreationSuggestions.seen(h.seen([area("src/parser", 35000)], { server: B }));
+  h.expertCreationSuggestions.seen(h.seen([searched("src/parser", 35000)]));
+  h.expertCreationSuggestions.seen(h.seen([searched("src/parser", 35000)], { server: B }));
   await until(() => h.lines.length === 2);
   const id = (h.sentExpertCreationSuggestions()[0]!.message as { id: string }).id;
-  const line = (server: string, label: string) => ({ type: "expert-creation-suggestion", server, label, id, key: "parser", name: "Parser Expert", folder: "src/parser", url: reviewUrl(server, id), why: { share: 0.175, tokens: 35000, minutes: 0, corrections: 0 } });
+  const line = (server: string, label: string) => ({ type: "expert-creation-suggestion", server, label, id, key: "parser", name: "Parser Expert", folder: "src/parser", url: reviewUrl(server, id), why: { share: 0.175, tokens: 35000, minutes: 0, corrections: 0 }, repetition: { searches: SETTINGS.searches } });
   expect(h.lines.map((l) => l.line)).toEqual([line(A, "dev"), line(B, "team")]);
   const file = path.join(h.isoplanDir, "expert-creation-suggestions", "s1.json");
   await until(() => fs.existsSync(file) && JSON.parse(fs.readFileSync(file, "utf8")).expertCreationSuggestions.length === 2);
@@ -269,7 +389,7 @@ test("the session's hooks module is told of an open suggestion in each office, a
 test("a suggestion dismissed or expired in an office says so to the session's hooks module", async () => {
   const h = await harness();
   h.expertCreationSuggestions.take(0, dismissals());
-  h.expertCreationSuggestions.seen(h.seen([area("src/parser", 35000)]));
+  h.expertCreationSuggestions.seen(h.seen([searched("src/parser", 35000)]));
   await until(() => h.lines.length === 1);
   const id = (h.sentExpertCreationSuggestions()[0]!.message as { id: string }).id;
   h.expertCreationSuggestions.take(0, { type: "expert-creation-suggestion-ended", v: PROTOCOL_VERSION, id, why: "dismissed" });
@@ -279,8 +399,8 @@ test("a suggestion dismissed or expired in an office says so to the session's ho
 test("a suggestion dismissed in one office is withdrawn from the others", async () => {
   const h = await harness();
   for (const index of [0, 1]) h.expertCreationSuggestions.take(index, dismissals());
-  h.expertCreationSuggestions.seen(h.seen([area("src/parser", 35000)]));
-  h.expertCreationSuggestions.seen(h.seen([area("src/parser", 35000)], { server: B }));
+  h.expertCreationSuggestions.seen(h.seen([searched("src/parser", 35000)]));
+  h.expertCreationSuggestions.seen(h.seen([searched("src/parser", 35000)], { server: B }));
   await until(() => h.lines.length === 2);
   const id = idOf(h.sentExpertCreationSuggestions()[0]!);
   h.expertCreationSuggestions.take(0, { type: "expert-creation-suggestion-ended", v: PROTOCOL_VERSION, id, why: "dismissed" });
@@ -291,8 +411,8 @@ test("a suggestion dismissed in one office is withdrawn from the others", async 
 test("a suggestion an office refused ends there alone: the session hears it ended there, not that it was dismissed, and it stays open in the others", async () => {
   const h = await harness();
   for (const index of [0, 1]) h.expertCreationSuggestions.take(index, dismissals());
-  h.expertCreationSuggestions.seen(h.seen([area("src/parser", 35000)]));
-  h.expertCreationSuggestions.seen(h.seen([area("src/parser", 35000)], { server: B }));
+  h.expertCreationSuggestions.seen(h.seen([searched("src/parser", 35000)]));
+  h.expertCreationSuggestions.seen(h.seen([searched("src/parser", 35000)], { server: B }));
   await until(() => h.lines.length === 2);
   const id = idOf(h.sentExpertCreationSuggestions()[0]!);
   const sent = h.sent.length;
@@ -327,7 +447,7 @@ test("an expert-creation-suggestions.json that can't be read is said, and moved 
   expect(h.expertCreationSuggestions.corrected("s1", "k1", "no, the other file", null)).toBe(null);
   await until(() => h.logs.some((l) => l.includes("couldn't check whether a message corrected the agent")));
   broken = false;
-  h.expertCreationSuggestions.seen(h.seen([area("src/parser", 35000)]));
+  h.expertCreationSuggestions.seen(h.seen([searched("src/parser", 35000)]));
   await until(() => h.sentExpertCreationSuggestions().length === 1);
   expect(h.expertCreationSuggestions.corrected("s1", "k1", "no, the other file", null)).toBe(null);
   await until(() => asked.length === 1);
@@ -338,18 +458,18 @@ test("a suggestion the office ends at once is never shown in the session: dismis
   const h = await harness({ keptMs: 300 });
   h.hooked.add("s2");
   h.expertCreationSuggestions.take(0, dismissals());
-  h.expertCreationSuggestions.seen(h.seen([area("src/parser", 35000)]));
+  h.expertCreationSuggestions.seen(h.seen([searched("src/parser", 35000)]));
   await until(() => h.sentExpertCreationSuggestions().length === 1);
   h.expertCreationSuggestions.take(0, { type: "expert-creation-suggestion-ended", v: PROTOCOL_VERSION, id: idOf(h.sentExpertCreationSuggestions()[0]!), why: "dismissed" });
-  h.expertCreationSuggestions.seen(h.seen([area("src", 40000)], { session: "claude-code:s2", bare: "s2" }));
+  h.expertCreationSuggestions.seen(h.seen([searched("src/parser", 40000)], { session: "claude-code:s2", bare: "s2" }));
   await until(() => h.sentExpertCreationSuggestions().length === 2);
   const covered = idOf(h.sentExpertCreationSuggestions()[1]!);
   h.expertCreationSuggestions.take(0, { type: "expert-creation-suggestion-ended", v: PROTOCOL_VERSION, id: covered, why: "made", key: "app-src" });
   await sleep(400);
-  expect(h.lines.map((l) => l.line)).toEqual([{ type: "expert-ready", server: A, id: covered, key: "app-src", name: "App Src Expert", folder: "src" }]);
+  expect(h.lines.map((l) => l.line)).toEqual([{ type: "expert-ready", server: A, id: covered, key: "app-src", name: "App Src Expert", folder: "src/parser" }]);
   expect(["s1", "s2"].map((bare) => fs.existsSync(path.join(h.isoplanDir, "expert-creation-suggestions", `${bare}.json`)))).toEqual([false, false]);
 
-  h.expertCreationSuggestions.seen(h.seen([area("src/parser", 35000)], { session: "claude-code:s3", bare: "s3" }));
+  h.expertCreationSuggestions.seen(h.seen([searched("src/parser", 35000)], { session: "claude-code:s3", bare: "s3" }));
   await until(() => h.sentExpertCreationSuggestions().length === 3);
   h.expertCreationSuggestions.linked(0);
   h.expertCreationSuggestions.take(0, dismissals());
@@ -360,7 +480,7 @@ test("a suggestion the office ends at once is never shown in the session: dismis
 test("each suggestion open in an office goes again on each new connection there, once its dismissals came, so an end that was lost comes again; it stays open meanwhile", async () => {
   const h = await harness();
   h.expertCreationSuggestions.take(0, dismissals());
-  h.expertCreationSuggestions.seen(h.seen([area("src/parser", 35000)]));
+  h.expertCreationSuggestions.seen(h.seen([searched("src/parser", 35000)]));
   await until(() => h.lines.length === 1);
   const id = idOf(h.sentExpertCreationSuggestions()[0]!);
   h.expertCreationSuggestions.linked(0);
@@ -383,14 +503,14 @@ test("the folder of a suggestion every office it went to refused may be suggeste
   let clock = Date.now();
   const h = await harness({ now: () => clock });
   for (const index of [0, 1]) h.expertCreationSuggestions.take(index, dismissals());
-  h.expertCreationSuggestions.seen(h.seen([area("src/parser", 35000)]));
-  h.expertCreationSuggestions.seen(h.seen([area("src/parser", 35000)], { server: B }));
+  h.expertCreationSuggestions.seen(h.seen([searched("src/parser", 35000)]));
+  h.expertCreationSuggestions.seen(h.seen([searched("src/parser", 35000)], { server: B }));
   await until(() => h.sentExpertCreationSuggestions().length === 2);
   const id = idOf(h.sentExpertCreationSuggestions()[0]!);
   h.expertCreationSuggestions.take(0, { type: "expert-creation-suggestion-ended", v: PROTOCOL_VERSION, id, why: "refused" });
   clock += RETRY_MS;
   // Still open in B, so not suggested again.
-  h.expertCreationSuggestions.seen(h.seen([area("src/parser", 35000)]));
+  h.expertCreationSuggestions.seen(h.seen([searched("src/parser", 35000)]));
   await sleep(30);
   expect(h.drafts).toHaveLength(1);
   h.expertCreationSuggestions.take(1, { type: "expert-creation-suggestion-ended", v: PROTOCOL_VERSION, id, why: "refused" });
@@ -399,11 +519,11 @@ test("the folder of a suggestion every office it went to refused may be suggeste
   h.expertCreationSuggestions.close();
   const again = await harness({ now: () => clock }, h.root);
   again.expertCreationSuggestions.take(0, dismissals());
-  again.expertCreationSuggestions.seen(again.seen([area("src/parser", 35000)]));
+  again.expertCreationSuggestions.seen(again.seen([searched("src/parser", 35000)]));
   await sleep(30);
   expect(again.drafts).toHaveLength(0);
   clock += RETRY_MS;
-  again.expertCreationSuggestions.seen(again.seen([area("src/parser", 35000)]));
+  again.expertCreationSuggestions.seen(again.seen([searched("src/parser", 35000)]));
   await until(() => again.sentExpertCreationSuggestions().length === 1);
   expect(idOf(again.sentExpertCreationSuggestions()[0]!)).not.toBe(id);
 });
@@ -413,7 +533,7 @@ const draftOfficeWideExpertCreationSuggestion = (request: string, folder: string
 test("draft-office-wide-expert-creation-suggestion: an office-wide suggestion is drafted from the newest of its sessions this runner reported to that office, once however often it is asked, and goes to that office alone, with the request's id; one with no draft is answered no-draft", async () => {
   const h = await harness();
   // Seen before the dismissals, so it isn't suggested on its own.
-  h.expertCreationSuggestions.seen(h.seen([area("src/parser", 35000, { searches: 4 })]));
+  h.expertCreationSuggestions.seen(h.seen([searched("src/parser", 35000, { searches: 4 })]));
   h.expertCreationSuggestions.take(0, dismissals());
   h.expertCreationSuggestions.take(1, dismissals());
   h.expertCreationSuggestions.take(0, draftOfficeWideExpertCreationSuggestion("office-1", "src/parser", ["claude-code:s9", "claude-code:s1"]));
@@ -426,7 +546,7 @@ test("draft-office-wide-expert-creation-suggestion: an office-wide suggestion is
   expect([h.drafts.length, h.sentExpertCreationSuggestions().length]).toEqual([1, 1]);
 
   h.state.draft = null;
-  h.expertCreationSuggestions.take(1, draftOfficeWideExpertCreationSuggestion("office-2", "docs", ["claude-code:s1"]));
+  h.expertCreationSuggestions.take(1, draftOfficeWideExpertCreationSuggestion("office-2", "src/parser", ["claude-code:s1"]));
   await until(() => h.sent.some((s) => s.message.type === "expert-creation-suggestion-ended"));
   expect(h.sent.at(-1)).toEqual({ server: B, message: { type: "expert-creation-suggestion-ended", v: PROTOCOL_VERSION, id: "office-2", why: "no-draft" } });
 });

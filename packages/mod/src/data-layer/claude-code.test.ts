@@ -1078,6 +1078,39 @@ test("areas: a subagent's calls count to its session's areas, and still do once 
   expect(later.areas).toEqual(expected);
 });
 
+test("readings: each file Read read counts one reading a turn, however often that turn read it, a subagent's too, with what its reads took in all and past its first reading; a read that failed, or one in node_modules, is none", async () => {
+  const { home, main } = office();
+  const adr = path.join(main, "docs", "adr");
+  fs.mkdirSync(path.join(main, "node_modules", "zod"), { recursive: true });
+  fs.mkdirSync(adr, { recursive: true });
+  const file = path.join(adr, "0004.md");
+  session(home, "s", [
+    line.user(main, "what leaves a machine?", 100),
+    // Paged through in one turn: one reading.
+    call(main, "r1", "Read", { file_path: file, limit: 100 }, 95),
+    result(main, "r1", "x".repeat(4000), 95),
+    call(main, "r2", "Read", { file_path: file, offset: 100 }, 94),
+    result(main, "r2", "x".repeat(4000), 94),
+    call(main, "r3", "Read", { file_path: path.join(main, "README.md") }, 93),
+    result(main, "r3", "y".repeat(400), 93),
+    call(main, "r4", "Read", { file_path: path.join(main, "node_modules", "zod", "index.js") }, 92),
+    result(main, "r4", "z".repeat(400), 92),
+    call(main, "r5", "Read", { file_path: path.join(adr, "gone.md") }, 91),
+    result(main, "r5", "File does not exist.", 91, { isError: true }),
+    line.user(main, "and again?", 80),
+    call(main, "r6", "Read", { file_path: file }, 75),
+    result(main, "r6", "x".repeat(8000), 75),
+  ]);
+  agent(home, "s", "a1", { agentType: "Explore" }, [line.user(main, "read the ADR", 50), call(main, "r7", "Read", { file_path: file }, 40), result(main, "r7", "x".repeat(8000), 39)], { age: 39 });
+  const r = await sourceIn(home)("s");
+  expect(r.readings).toEqual([
+    { file: "docs/adr/0004.md", readings: 3, tokens: 6000, tokensAgain: 4000 },
+    { file: "README.md", readings: 1, tokens: 100, tokensAgain: 0 },
+  ]);
+  // Never sent.
+  expect(JSON.stringify(r.facts)).not.toContain("readings");
+});
+
 test("areas: an interruption, a turned-down call and a message the local model calls a correction each count once in every folder their turn worked in", async () => {
   const { home, main } = office();
   for (const dir of ["a/b", "c"]) fs.mkdirSync(path.join(main, dir), { recursive: true });
