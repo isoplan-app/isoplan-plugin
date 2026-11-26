@@ -35,7 +35,9 @@
 // expert directory, records, definition results, deletions, set-ups, set-up offers' ends and the
 // counts of its person's questions on their other computers (`onExpertRecordMessages`), and sends
 // its definitions, records wanted, instance states, wordless question records, set-up offers and
-// failed proofs live as well (runner/expert-record-link.ts).
+// failed proofs live as well (runner/expert-record-link.ts); and, sharing what instances learn
+// (protocol 0.18.0, isoplan-app#366), the answers to what it sent, what other instances learned and
+// refused asks, as it sends what its own learned and its asks (runner/what-was-learned-link.ts).
 // A session's link passes the experts it may ask (`expert-rights`) on as a line, as `ask-rights`.
 // A runner that can create experts from suggestions (protocol 0.15.0) is given the server's `expert-creation-suggestion-dismissals`,
 // `draft-office-wide-expert-creation-suggestion`, `create-expert-from-suggestion` and `expert-creation-suggestion-ended` (`onExpertCreationSuggestionMessages`), and sends its `expert-creation-suggestion`,
@@ -59,7 +61,12 @@ import {
   type ExpertDefinitionResultMessage,
   type ExpertDeletedMessage,
   type ExpertDirectoryMessage,
+  type ExpertInstanceLearnedMessage,
+  type ExpertInstanceLearnedReceivedMessage,
   type ExpertInstanceStatesMessage,
+  type ExpertLearnedSinceMessage,
+  type ExpertLearnedWantedAfterMessage,
+  type ExpertLearnedWantedAfterRefusedMessage,
   type ExpertProofFailedMessage,
   type ExpertQuestionMessage,
   type ExpertQuestionsAskedOnYourOtherComputersMessage,
@@ -153,13 +160,13 @@ export type ServerExpertCreationSuggestionMessage = ExpertCreationSuggestionDism
 /** What a runner that can create experts from suggestions sends, live. */
 export type RunnerExpertCreationSuggestionMessage = ExpertCreationSuggestionMessage | RunnerExpertCreationSuggestionEndedMessage | ExpertCreationProgressMessage;
 
-/** What the server tells a runner that keeps instances of experts (protocol 0.17.0). */
-export type ServerExpertRecordMessage = ExpertDirectoryMessage | ExpertRecordMessage | ExpertDefinitionResultMessage | ExpertDeletedMessage | SetUpExpertInstanceMessage | ExpertSetUpOfferEndedMessage | ExpertQuestionsAskedOnYourOtherComputersMessage;
+/** What the server tells a runner that keeps instances of experts (protocol 0.17.0), and what instances learn (0.18.0). */
+export type ServerExpertRecordMessage = ExpertDirectoryMessage | ExpertRecordMessage | ExpertDefinitionResultMessage | ExpertDeletedMessage | SetUpExpertInstanceMessage | ExpertSetUpOfferEndedMessage | ExpertQuestionsAskedOnYourOtherComputersMessage | ExpertInstanceLearnedReceivedMessage | ExpertLearnedSinceMessage | ExpertLearnedWantedAfterRefusedMessage;
 
 /** What a runner that keeps instances of experts sends, live. */
-export type RunnerExpertRecordMessage = ExpertDefinitionMessage | ExpertRecordWantedMessage | ExpertInstanceStatesMessage | ExpertQuestionMessage | ExpertSetUpOfferedMessage | ExpertProofFailedMessage;
+export type RunnerExpertRecordMessage = ExpertDefinitionMessage | ExpertRecordWantedMessage | ExpertInstanceStatesMessage | ExpertQuestionMessage | ExpertSetUpOfferedMessage | ExpertProofFailedMessage | ExpertInstanceLearnedMessage | ExpertLearnedWantedAfterMessage;
 
-const SERVER_EXPERT_RECORD_TYPES = new Set<string>(["expert-directory", "expert-record", "expert-definition-result", "expert-deleted", "set-up-expert-instance", "expert-set-up-offer-ended", "expert-questions-asked-on-your-other-computers"]);
+const SERVER_EXPERT_RECORD_TYPES = new Set<string>(["expert-directory", "expert-record", "expert-definition-result", "expert-deleted", "set-up-expert-instance", "expert-set-up-offer-ended", "expert-questions-asked-on-your-other-computers", "expert-instance-learned-received", "expert-learned-since", "expert-learned-wanted-after-refused"]);
 
 export interface Link {
   /** The session's facts now; what differs from what the server has goes out when the pace allows. */

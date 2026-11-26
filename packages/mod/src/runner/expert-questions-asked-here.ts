@@ -23,8 +23,11 @@
 // 7. Kept in the file, then given to the instance, whose own caps (its expert or instance file) give
 //    EXPERT_CAP too, saying where to raise them.
 //
-// Then: with no junior yet (setting up, or a junior lost while its replacement grounds) the agent is
-// told EXPERT_STARTING at once, and the answer comes later. A blocking question waits up to
+// Then: with no junior yet (setting up, or a junior lost while its replacement grounds), or a junior
+// that more was learned for on other computers than one question carries (its new generation
+// grounds first, isoplan-app#366, D17), the agent is told EXPERT_STARTING at once, and the answer
+// comes later. The instance is told before each question it is given (`beforeQuestion`), so it can
+// start that generation. A blocking question waits up to
 // runner.json's expertWaitSeconds from when the runner was asked, then is told to explore meanwhile;
 // any other is told it was asked. An end told in the call is shown once its line was written to the
 // script; any other goes to the session's hooks module as an `asked` line, now if it is connected,
@@ -254,6 +257,7 @@ export function createExpertQuestionsAskedHere(o: ExpertQuestionsAskedHereOption
     given.add(k(q));
     await o.instances.beforeQuestion(q.server, q.key).catch((err: Error) => o.log(`expert ${q.key}: couldn't apply its newer revision: ${err.message}`));
     if (q.state !== "asking") return;
+    found.running.expert.beforeQuestion();
     found.running.expert.answer(
       { id: q.id, question: q.text ?? "", blocking: q.blocking, asker: q.session },
       (out) => outcome(q, out, found.capsIn),
@@ -397,8 +401,9 @@ export function createExpertQuestionsAskedHere(o: ExpertQuestionsAskedHereOption
       const cap = officeCap(server, r.expert, directory.asking);
       if (cap) return { text: expertText("EXPERT_CAP", { ...a, words: cap }), failed: true, code: "EXPERT_CAP" };
 
-      // With no junior yet, its record says it waits for one (EXPERT_STARTING).
-      const starting = instance.kind === "setting-up" || (instance.kind === "running" && instance.running.expert.hosted().state === "starting");
+      // With no junior yet, or one catching up on what its other instances learned, its record says it waits (EXPERT_STARTING).
+      if (instance.kind === "running") instance.running.expert.beforeQuestion();
+      const starting = instance.kind === "setting-up" || (instance.kind === "running" && (instance.running.expert.hosted().state === "starting" || instance.running.expert.catchingUp()));
       const q: Kept = { id: r.key, session: r.session, server, key: r.expert, expertRecordId: instance.expertRecordId, blocking: r.blocking, text: question, state: "asking", ...(starting && { code: "EXPERT_STARTING" as const }), askedAt: received, shown: false, counts: true, restarts: 0, sent: instance.expertRecordId ? null : "never" };
       kept.set(k(q), q);
       await save();

@@ -42,6 +42,10 @@
 //   `answerHeld`).
 // - The listing (A9): each instance of a server's records, never another server's, by its key and
 //   record, its state and step, its senior and its junior's grounding size, or why it failed.
+// - The records each file here is tied to (`tiedRecords`): an instance file's own server's record,
+//   and for an expert file each server's record whose last publish was `published`; never one still
+//   being set up. What an instance learns goes to these, and what their other instances learned comes
+//   from them (isoplan-app#366, what-was-learned-link.ts).
 
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -111,6 +115,10 @@ export interface ExpertInstances {
   beforeQuestion(server: string, key: string): Promise<void>;
   /** Sends again what didn't go: after each new connection's first directory. */
   afterDirectory(server: string): void;
+  /** The records of `server` this computer's files are tied to, by key. */
+  tiedRecords(server: string): { key: string; expertRecordId: string }[];
+  /** The records the key's file here is tied to, on every server. */
+  tiedRecordsOf(key: string): { server: string; expertRecordId: string }[];
 }
 
 const held = (m: ExpertRecordMessage): HeldExpertRecord => ({ expertRecordId: m.expertRecordId, revision: m.revision, owner: m.owner, yours: m.yours === true, definition: m.definition });
@@ -271,6 +279,15 @@ export function createExpertInstances(o: ExpertInstancesOptions): ExpertInstance
     if (r?.record?.expertRecordId === id && running && (running.from === "expert-file" || running.instance?.server === server)) return running;
     return null;
   };
+
+  // The record of `server` the key's file here is tied to: an instance file's own server's, or an expert file's published there.
+  function tiedOn(server: string, key: string): string | null {
+    const running = o.experts.running(key);
+    const r = heldOn(server, key);
+    if (!running || !r?.record) return null;
+    if (running.from === "instance-file") return running.instance?.server === server ? r.record.expertRecordId : null;
+    return r.lastResult === "published" ? r.record.expertRecordId : null;
+  }
 
   async function sendProofFailed(server: string, key: string) {
     const r = heldOn(server, key);
@@ -512,6 +529,18 @@ export function createExpertInstances(o: ExpertInstancesOptions): ExpertInstance
       log(key, `revision ${newer.revision} of its record applies now, before its next question`);
       await o.experts.refresh(key);
     },
+
+    tiedRecords: (server) =>
+      [...records.keys()].sort().flatMap((key) => {
+        const expertRecordId = tiedOn(server, key);
+        return expertRecordId ? [{ key, expertRecordId }] : [];
+      }),
+
+    tiedRecordsOf: (key) =>
+      Object.keys(recordsOf(key).servers).flatMap((server) => {
+        const expertRecordId = tiedOn(server, key);
+        return expertRecordId ? [{ server, expertRecordId }] : [];
+      }),
 
     afterDirectory(server) {
       for (const key of records.keys()) {

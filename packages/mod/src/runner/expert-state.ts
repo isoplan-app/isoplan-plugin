@@ -1,14 +1,19 @@
 // What an expert keeps in its folder, ~/.claude/isoplan/experts/<name>/, across runner restarts:
 //
 // - state.json: its generations, each with its trunk's session id, the model id it resolved to,
-//   the commit it was grounded at, its meter and learned notes, its role and its proof, and the
-//   uuid of its trunk transcript's last user or assistant entry as the runner left it; and the
-//   fingerprint of the expert file fields a new generation is grounded for. Version 2 (#340) is a
-//   state whose generations were all grounded since this computer kept instances set up from
-//   expert records (`setUpFromExpertRecord`); version 1, from before, still reads, and its expert
-//   grounds a new generation that retires the old ones once it passes (expert.ts).
+//   the commit it was grounded at, its meter, its role and its proof, the uuid of its trunk
+//   transcript's last user or assistant entry as the runner left it, and what its trunk holds of what
+//   this expert's instances learned (`addedToItsTrunk`, each by its id) with how far it has taken
+//   each expert record's sequence into account (`pickedUpTo`); and the fingerprint of the expert
+//   file fields a new generation is grounded for. Version 3 (#366) keeps those two. Version 2 (#340)
+//   is a state whose generations were all grounded since this computer kept instances set up from
+//   expert records (`setUpFromExpertRecord`), and counted what was added to a trunk with no ids: it
+//   still reads, its count kept as `addedBeforeEachHadAnId`, and is written as version 3. Version 1,
+//   from before, still reads too, and its expert grounds a new generation that retires the old ones
+//   once it passes (expert.ts).
 // - index-<n>.json: generation n's file → commit index, `{ "version": 1, "files": { path: commit } }`,
-//   the commit each file the generation read (or cited) was read at.
+//   the commit each file the generation read, cited or was told of (a file a thing it was given
+//   rests on) was read at.
 //
 // Both are written to a temporary file and renamed into place, so a reader never sees half of one.
 // A file that is missing or doesn't parse reads as none.
@@ -31,8 +36,12 @@ export interface SavedGeneration {
   meter: number;
   /** Its trunk's context right after its grounding; missing in a state from before it was recorded. */
   groundingTokens?: number;
-  /** How many learned notes were appended to it. */
-  notes: number;
+  /** What its trunk holds of what this expert's instances learned, here and elsewhere: by its grounding or an addition. */
+  addedToItsTrunk: AddedToItsTrunk[];
+  /** By expert record: the arrival number up to which it has taken that record's sequence into account. */
+  pickedUpTo: Record<string, number>;
+  /** From a state before version 3: how many things were added to its trunk before each had an id. */
+  addedBeforeEachHadAnId?: number;
   state: "grounding" | "junior" | "senior" | "retired" | "failed";
   proof?: { passed: boolean; at: number };
   /**
@@ -45,10 +54,19 @@ export interface SavedGeneration {
   why?: string;
 }
 
+/** A thing learned its trunk holds. */
+export interface AddedToItsTrunk {
+  id: string;
+  firstLine: string;
+  /** The record and arrival number it came with, for one learned elsewhere. */
+  expertRecordId?: string;
+  arrivalNumber?: number;
+}
+
 /** state.json. */
 export interface SavedExpert {
-  version: 1 | 2;
-  /** With version 2: every generation was grounded since this computer kept instances set up from expert records. */
+  version: 1 | 2 | 3;
+  /** With version 2 or 3: every generation was grounded since this computer kept instances set up from expert records. */
   setUpFromExpertRecord?: true;
   fingerprint: string;
   repo: string;
@@ -62,10 +80,25 @@ export const indexPath = (dir: string, n: number) => path.join(dir, `index-${n}.
 
 const STATES = ["grounding", "junior", "senior", "retired", "failed"];
 
-const isGeneration = (g: unknown): g is SavedGeneration => {
-  const o = g as SavedGeneration | null;
-  return !!o && Number.isInteger(o.n) && typeof o.trunk === "string" && typeof o.model === "string" && typeof o.commit === "string" && Number.isFinite(o.groundedAt) && Number.isFinite(o.meter) && Number.isInteger(o.notes) && STATES.includes(o.state) && (o.last === undefined || o.last === null || typeof o.last === "string");
+/** The name a state before version 3 gave its generation's count of what was added to its trunk: read, never written. */
+export const COUNT_BEFORE_VERSION_3 = "notes";
+
+type Before3 = SavedGeneration & { [COUNT_BEFORE_VERSION_3]?: number };
+
+// A generation of version 3, or of a version before it, which counted what was added to its trunk.
+const isGeneration = (g: unknown): g is Before3 => {
+  const o = g as Before3 | null;
+  const holds = Number.isInteger(o?.[COUNT_BEFORE_VERSION_3]) || (Array.isArray(o?.addedToItsTrunk) && o.addedToItsTrunk.every((x) => typeof x?.id === "string") && !!o.pickedUpTo && typeof o.pickedUpTo === "object");
+  return !!o && Number.isInteger(o.n) && typeof o.trunk === "string" && typeof o.model === "string" && typeof o.commit === "string" && Number.isFinite(o.groundedAt) && Number.isFinite(o.meter) && holds && STATES.includes(o.state) && (o.last === undefined || o.last === null || typeof o.last === "string");
 };
+
+// A generation of a state before version 3, as version 3 keeps it.
+function asVersion3(g: Before3): SavedGeneration {
+  const count = g[COUNT_BEFORE_VERSION_3];
+  if (count === undefined) return g;
+  const { [COUNT_BEFORE_VERSION_3]: _, ...rest } = g;
+  return { ...rest, addedToItsTrunk: [], pickedUpTo: {}, ...(count > 0 && { addedBeforeEachHadAnId: count }) };
+}
 
 export async function readJson(file: string): Promise<unknown> {
   try {
@@ -91,11 +124,11 @@ export async function writeJson(file: string, value: unknown): Promise<void> {
   }
 }
 
-/** The expert's state.json, or null when there is none it can use. */
+/** The expert's state.json, or null when there is none it can use; a version 2 reads as version 3. */
 export async function readState(dir: string): Promise<SavedExpert | null> {
   const o = (await readJson(statePath(dir))) as SavedExpert | null;
-  if (!o || (o.version !== 1 && o.version !== 2) || typeof o.fingerprint !== "string" || typeof o.repo !== "string" || typeof o.branch !== "string" || !Array.isArray(o.generations) || !o.generations.every(isGeneration)) return null;
-  return o;
+  if (!o || (o.version !== 1 && o.version !== 2 && o.version !== 3) || typeof o.fingerprint !== "string" || typeof o.repo !== "string" || typeof o.branch !== "string" || !Array.isArray(o.generations) || !o.generations.every(isGeneration)) return null;
+  return { ...o, version: o.version === 2 ? 3 : o.version, generations: o.generations.map(asVersion3) };
 }
 
 export const writeState = (dir: string, s: SavedExpert) => writeJson(statePath(dir), s);

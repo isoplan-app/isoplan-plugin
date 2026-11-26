@@ -1,6 +1,7 @@
 // One computer's expert stack in the tests, a copy of how the runner's worker puts it together
 // (main.ts, which expert-two-computers.e2e.test.ts runs itself): its experts (experts.ts, with the
-// fake `claude` and git of expert-fixture.ts), their instances, the set-up offers, what each session may ask, the asking module, and a record link per office,
+// fake `claude` and git of expert-fixture.ts), their instances, the set-up offers, what each session may ask, the asking module, and a record link per office
+// with its link for what instances learn (checked against a stand-in secret pattern and the mod's personal-data patterns),
 // whose live sends go to a stand-in office's list while it is up. Real files in a temp Claude folder;
 // a session folder that is a real git repo with an origin, for the asking module's office pick.
 
@@ -23,6 +24,9 @@ import { createExpertRecordsPerOffice, expertRecordsPerOfficePath } from "./expe
 import { createExpertRightsOnThisComputer } from "./expert-rights-on-this-computer.js";
 import type { ExpertSettings } from "./expert.js";
 import { createExperts } from "./experts.js";
+import { loadPatterns } from "./scan.js";
+import { createCheckBeforeItLeaves } from "./what-was-learned-before-it-leaves.js";
+import { createWhatWasLearnedLink, type WhatWasLearnedLink } from "./what-was-learned-link.js";
 
 export const SERVER = "ws://127.0.0.1:4799/data-layer";
 export const OTHER_SERVER = "ws://127.0.0.1:4798/data-layer";
@@ -37,7 +41,9 @@ export const ASKING = { openPerPersonPerExpert: 3, perPersonPerDay: 30, maxAgeHo
 export const DEFINITION: ExpertDefinition = { key: "adr", project: PROJECT, subject: "What may leave a machine.", model: "sonnet", promoteAtTokens: 200000, areas: [], proof: { question: "What is the answer?", answer: "Forty-two." } };
 
 export const entryOf = (o: Partial<ExpertDirectoryEntry> = {}): ExpertDirectoryEntry => ({ key: "adr", expertRecordId: RECORD, project: PROJECT, owner: ADA, revision: 1, ...o });
-export const directoryOf = (experts: ExpertDirectoryEntry[], asking = ASKING): ExpertDirectoryMessage => ({ type: "expert-directory", v: PROTOCOL_VERSION, experts, asking });
+export const directoryOf = (experts: ExpertDirectoryEntry[], asking = ASKING, shares = false): ExpertDirectoryMessage => ({ type: "expert-directory", v: PROTOCOL_VERSION, experts, asking, ...(shares && { sharesWhatExpertInstancesLearn: true as const }) });
+/** A directory from an office that shares what instances of experts learn (protocol 0.18.0). */
+export const sharingDirectoryOf = (experts: ExpertDirectoryEntry[], asking = ASKING) => directoryOf(experts, asking, true);
 
 export interface ComputerOptions {
   account?: { id: string; name: string };
@@ -45,7 +51,7 @@ export interface ComputerOptions {
   /** This computer's checkout of the project; null for none. */
   checkout?: string | null;
   /** Isoplan's own clone, by address: its folder, or why git refused. */
-  clone?: (url: string) => string | { problem: string; reason?: string };
+  clone?: (url: string) => string | { problem: string; reason?: string } | Promise<string | { problem: string; reason?: string }>;
   servers?: string[];
   minuteMs?: number;
   setUpWithoutAsking?: boolean;
@@ -61,6 +67,8 @@ export interface ComputerOptions {
   takes?: Record<string, string[] | null>;
   /** A folder's project, in place of PROJECT for the folders in it; undefined leaves it to them. */
   projectOf?: (folder: string) => Project | null | undefined;
+  /** How often the links look again: the record link's listing, and what instances learned waiting. */
+  checkMs?: number;
 }
 
 export async function computer(o: ComputerOptions = {}) {
@@ -124,7 +132,7 @@ export async function computer(o: ComputerOptions = {}) {
     checkoutOf: async (_server, project) => (project.id === PROJECT.id ? checkout : null),
     clone: async (url) => {
       cloned.push(url);
-      const got = o.clone?.(url) ?? { problem: "git refused", reason: `fatal: could not read from ${url}` };
+      const got = await (o.clone?.(url) ?? { problem: "git refused", reason: `fatal: could not read from ${url}` });
       if (typeof got === "string") inProject.add(got);
       return got;
     },
@@ -176,10 +184,17 @@ export async function computer(o: ComputerOptions = {}) {
       scan,
       log,
       send: (m) => (up.get(server) ? (sent.get(server)!.push(m), true) : false),
-      checkMs: 3600000,
+      checkMs: o.checkMs ?? 3600000,
     });
     link.onDirectory(() => offers.afterDirectory(server));
     links.set(server, link);
+  }
+  const check = createCheckBeforeItLeaves({ secretPatterns: async () => [{ name: "test secret", regex: /SECRET/ }], personalDataPatterns: () => loadPatterns(path.join(modDir, "personal-data-patterns.json"), path.join(isoplanDir, "personal-data-patterns.json"), log) });
+  const learnedLinks = new Map<string, WhatWasLearnedLink>();
+  for (const server of servers) {
+    const link = createWhatWasLearnedLink({ server, recordLink: links.get(server)!, instances, whatWasLearned: (key) => experts.whatWasLearned(key), health: (key) => experts.health(key), check, send: (m) => (up.get(server) ? (sent.get(server)!.push(m), true) : false), log, checkMs: o.checkMs ?? 3600000 });
+    links.get(server)!.onWhatWasLearned((m) => link.take(m));
+    learnedLinks.set(server, link);
   }
   const rights = createExpertRightsOnThisComputer({ instances, store, person: () => account.name, projectOf: (server, folder) => home(folder, takes(server) ?? new Set()), send: (session, line) => hooked(session)?.send(line), log });
   const asking = createExpertQuestionsAskedHere({
@@ -196,9 +211,19 @@ export async function computer(o: ComputerOptions = {}) {
   });
   await experts.start();
   await instances.start();
+  // Once the instances have read what each key keeps of its records, as the runner binds them.
+  experts.bindWhatWasLearned((key) => ({
+    tied: () => instances.tiedRecordsOf(key),
+    held: (server) => instances.heldOn(server, key)?.record?.expertRecordId,
+    servers,
+    catchUp: (server, expertRecordId) => learnedLinks.get(server)?.catchUp(expertRecordId) ?? "cannot",
+    waiting: () => learnedLinks.forEach((l) => l.sendWaiting()),
+  }));
+  instances.onChange(() => experts.tiesMayHaveChanged());
   await offers.start();
   await asking.start();
   for (const link of links.values()) link.onOpen();
+  for (const link of learnedLinks.values()) link.onOpen();
 
   const claude = () => fs.readFileSync(claudeLog, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as { kind: string; trunk: string | null; argv?: string[]; turn?: number; text?: string });
   const health = (key = "adr") => {
@@ -236,11 +261,14 @@ export async function computer(o: ComputerOptions = {}) {
     /** A message from the office, as its link hands it on. */
     take: (m: ServerExpertRecordMessage, server = SERVER) => links.get(server)!.take(m),
     /** The link drops and opens again. */
-    reconnect: (server = SERVER) => (links.get(server)!.onClose(), links.get(server)!.onOpen()),
+    reconnect: (server = SERVER) => (links.get(server)!.onClose(), learnedLinks.get(server)!.onClose(), links.get(server)!.onOpen(), learnedLinks.get(server)!.onOpen()),
     file: (...parts: string[]) => path.join(isoplanDir, ...parts),
     /** Ends it as the runner's worker ends, once what it keeps is written. */
+    /** What the key's instance learned waiting to be sent, and what this computer has of its records. */
+    learned: (key = "adr") => experts.whatWasLearned(key),
     close: async () => {
       for (const link of links.values()) link.stop();
+      for (const link of learnedLinks.values()) link.stop();
       asking.close();
       experts.close();
       await store.written();
@@ -260,12 +288,12 @@ export function writeExpertFile(c: Computer, o: Record<string, unknown> = {}) {
 
 export const readJsonFile = <T = Record<string, unknown>>(file: string): T => JSON.parse(fs.readFileSync(file, "utf8")) as T;
 
-/** An instance of `id` from `server`, someone else's record, as its set-up wrote it in an earlier run, with this computer's fields given: for `before`. */
+/** An instance of `id` from `server`, someone else's record (DEFINITION, unless given), as its set-up wrote it in an earlier run, with this computer's fields given: for `before`. */
 export const installedInstance =
-  (server: string, id: string, local: Record<string, unknown> = {}) =>
+  (server: string, id: string, local: Record<string, unknown> = {}, definition: ExpertDefinition = DEFINITION) =>
   (p: { file: (...parts: string[]) => string; checkout: string | null }) => {
     fs.mkdirSync(p.file("experts", "adr"), { recursive: true });
-    fs.writeFileSync(p.file("experts", "adr", "expert-records.json"), JSON.stringify({ version: 1, servers: { [server]: { record: { expertRecordId: id, revision: 1, owner: ADA, yours: false, definition: DEFINITION } } } }));
+    fs.writeFileSync(p.file("experts", "adr", "expert-records.json"), JSON.stringify({ version: 1, servers: { [server]: { record: { expertRecordId: id, revision: 1, owner: ADA, yours: false, definition } } } }));
     fs.mkdirSync(p.file("expert-instances"), { recursive: true });
     fs.writeFileSync(p.file("expert-instances", "adr.json"), JSON.stringify({ version: 1, key: "adr", server, repo: p.checkout, ...local }));
   };

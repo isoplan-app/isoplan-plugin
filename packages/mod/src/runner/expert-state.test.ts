@@ -6,11 +6,12 @@ import { parseExpertFile, type ExpertFile } from "./expert-file.js";
 import { fingerprint, indexPath, readIndex, readState, statePath, writeIndex, writeState, type SavedExpert } from "./expert-state.js";
 
 const STATE: SavedExpert = {
-  version: 1,
+  version: 3,
+  setUpFromExpertRecord: true,
   fingerprint: "f",
   repo: "/work/app",
   branch: "main",
-  generations: [{ n: 1, trunk: "0b6c3e0e-8f4e-4c39-9d1b-6f2a3f3e9c11", model: "claude-sonnet-5-5", commit: "a".repeat(40), groundedAt: 1, meter: 31000, notes: 2, state: "junior", proof: { passed: true, at: 2 } }],
+  generations: [{ n: 1, trunk: "0b6c3e0e-8f4e-4c39-9d1b-6f2a3f3e9c11", model: "claude-sonnet-5-5", commit: "a".repeat(40), groundedAt: 1, meter: 31000, addedToItsTrunk: [{ id: "9b2d7c1e-3f4a-4b5c-8d6e-7f8091a2b3c4", firstLine: "Rule or fact: a.", expertRecordId: "4f0c3a52-8a2b-4d6e-9f10-2b3c4d5e6f70", arrivalNumber: 3 }], pickedUpTo: { "4f0c3a52-8a2b-4d6e-9f10-2b3c4d5e6f70": 4 }, state: "junior", proof: { passed: true, at: 2 } }],
 };
 
 test("state: written and read back; missing or broken reads as none, and no temporary file is left", async () => {

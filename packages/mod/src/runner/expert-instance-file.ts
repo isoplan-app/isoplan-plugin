@@ -1,7 +1,8 @@
 // The instance file, ~/.claude/isoplan/expert-instances/<key>.json (isoplan-app#340): on a computer
 // other than its owner's, this computer's own fields of its instance of an expert, set up from the
 // expert's record on an office server (expert-instance.ts). What every instance shares, its
-// definition (D14: key, project, subject, model, promotion threshold, areas and proof question), is
+// definition (D14: key, project, subject, model, promotion threshold, areas and proof question, and,
+// since #366, how much of what other instances learned one question carries), is
 // the record's, kept in experts/<key>/expert-records.json; this file holds only what is this
 // computer's: the office server it was set up from (`server`), the folder its expert runs from
 // (`repo`: a checkout of the project, or Isoplan's own clone of it), its time limits, how often it
@@ -142,12 +143,13 @@ export const expertFileFromRecord = (d: ExpertDefinition, local: ExpertLocalFiel
   proof: { question: d.proof.question, answer: d.proof.answer },
   ...(local.window !== undefined && { window: local.window }),
   areas: [...d.areas],
+  ...(d.learnedElsewhereTokensPerQuestion !== undefined && { learnedElsewhereTokensPerQuestion: d.learnedElsewhereTokensPerQuestion }),
 });
 
 /** The owner's expert file, as written from a record on a computer of theirs that had none (D12), or rewritten from a newer revision. */
 export function ownerExpertFileText(d: ExpertDefinition, local: ExpertLocalFields): string {
   const f = expertFileFromRecord(d, local);
-  const body = { version: 1, name: f.name, repo: f.repo, subject: f.subject, model: f.model, promoteAtTokens: f.promoteAtTokens, forkTimeLimitMinutes: f.forkTimeLimitMinutes, groundingTimeLimitMinutes: f.groundingTimeLimitMinutes, fetchSeconds: f.fetchSeconds, maxForks: f.maxForks, caps: f.caps, proof: f.proof, ...(f.window !== undefined && { window: f.window }), areas: f.areas };
+  const body = { version: 1, name: f.name, repo: f.repo, subject: f.subject, model: f.model, promoteAtTokens: f.promoteAtTokens, forkTimeLimitMinutes: f.forkTimeLimitMinutes, groundingTimeLimitMinutes: f.groundingTimeLimitMinutes, fetchSeconds: f.fetchSeconds, maxForks: f.maxForks, caps: f.caps, proof: f.proof, ...(f.window !== undefined && { window: f.window }), areas: f.areas, ...(f.learnedElsewhereTokensPerQuestion !== undefined && { learnedElsewhereTokensPerQuestion: f.learnedElsewhereTokensPerQuestion }) };
   return JSON.stringify(body, null, 2) + "\n";
 }
 
@@ -160,6 +162,7 @@ export const definitionOf = (f: ExpertFile, project: Project): ExpertDefinition 
   promoteAtTokens: f.promoteAtTokens,
   areas: f.areas.filter((a) => AreaPathSchema.safeParse(a).success).slice(0, MAX_AREA_PATHS),
   proof: { question: f.proof.question, answer: f.proof.answer },
+  ...(f.learnedElsewhereTokensPerQuestion !== undefined && { learnedElsewhereTokensPerQuestion: f.learnedElsewhereTokensPerQuestion }),
 });
 
 /** Whether two definitions say the same, their projects compared by id alone, as git may name one repo two ways. */
@@ -168,4 +171,4 @@ export const sameDefinition = (a: ExpertDefinition, b: ExpertDefinition) => JSON
 /** Whether an expert file still says what a definition says, whatever its project: what an owner's computer compares a new revision with. */
 export const fileSaysDefinition = (f: ExpertFile, d: ExpertDefinition) => sameDefinition(definitionOf(f, d.project), d);
 
-const comparable = (d: ExpertDefinition) => [d.key, d.project.id.toLowerCase(), d.subject, d.model, d.promoteAtTokens, d.areas, d.proof.question, d.proof.answer];
+const comparable = (d: ExpertDefinition) => [d.key, d.project.id.toLowerCase(), d.subject, d.model, d.promoteAtTokens, d.areas, d.proof.question, d.proof.answer, d.learnedElsewhereTokensPerQuestion ?? null];

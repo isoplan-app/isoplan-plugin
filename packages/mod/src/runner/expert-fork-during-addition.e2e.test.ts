@@ -124,7 +124,7 @@ test("a fork resumed at the trunk's recorded uuid reads the trunk as it was, whi
   const during = bytes();
 
   // 3. Meanwhile a fork at the recorded uuid: it starts, it sends the trunk up to there and its question, nothing of the addition, and it answers.
-  const fork = await run([...expertForkArgs(trunk, "sonnet"), "--resume-session-at", at], QUESTION);
+  const fork = await run(expertForkArgs(trunk, "sonnet", at), QUESTION);
   expect(fork.failure).toBeUndefined();
   expect(fork.turns.at(-1)!.text).toBe("<answer>Forty-two.</answer>");
   const forked = api.asking("FORK-QUESTION").at(-1)!;
@@ -153,12 +153,12 @@ test("a fork resumed at the trunk's recorded uuid reads the trunk as it was, whi
   expect(JSON.stringify(last.message)).toContain("added");
   const after = lastTurn();
   expect(after).not.toBe(at);
-  expect((await run([...expertForkArgs(trunk, "sonnet"), "--resume-session-at", after], QUESTION)).failure).toBeUndefined();
+  expect((await run(expertForkArgs(trunk, "sonnet", after), QUESTION)).failure).toBeUndefined();
   expect(JSON.stringify(api.asking("FORK-QUESTION").at(-1)!.messages)).toContain("ADDITION-MARKER");
 
   // 6. With no addition running, a fork with the flag and one without send the same messages, so the prompt cache's prefix is the same.
   const before = bytes();
-  await run([...expertForkArgs(trunk, "sonnet"), "--resume-session-at", after], QUESTION);
+  await run(expertForkArgs(trunk, "sonnet", after), QUESTION);
   const withFlag = api.asking("FORK-QUESTION").at(-1)!;
   await run(expertForkArgs(trunk, "sonnet"), QUESTION);
   const without = api.asking("FORK-QUESTION").at(-1)!;
@@ -168,7 +168,7 @@ test("a fork resumed at the trunk's recorded uuid reads the trunk as it was, whi
   // 5. Half a JSON line at the transcript's end, as an addition writing it leaves for a moment: a fork at the first uuid still starts and sends what it sent in 3.
   fs.appendFileSync(transcript, '{"type":"user","uuid":"half');
   const half = bytes();
-  const again = await run([...expertForkArgs(trunk, "sonnet"), "--resume-session-at", at], QUESTION);
+  const again = await run(expertForkArgs(trunk, "sonnet", at), QUESTION);
   expect(again.failure).toBeUndefined();
   expect(api.asking("FORK-QUESTION").at(-1)!.messages).toEqual(forked.messages);
   expect(bytes().equals(half)).toBe(true);

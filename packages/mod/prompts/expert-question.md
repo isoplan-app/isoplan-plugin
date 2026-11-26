@@ -4,7 +4,7 @@ Question {{id}}, for you to answer as the expert.
 
 {{freshness}}
 
-The question:
+{{removed}}{{learnedElsewhere}}The question:
 
 {{question}}
 

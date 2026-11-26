@@ -4,6 +4,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { GitResult, RunGit } from "../handoff/git.js";
+import type { WhatWasLearnedBinding } from "./what-was-learned-for-one-expert.js";
+
+/** An expert's record of what was learned bound to no record, its link nowhere: what an expert with no office has. */
+export const NOTHING_TIED: WhatWasLearnedBinding = { tied: () => [], held: () => undefined, servers: [], catchUp: () => "cannot", waiting: () => {} };
 
 export const C0 = "0".repeat(40);
 export const C1 = "1".repeat(40);
@@ -21,7 +25,7 @@ export async function until(check: () => boolean, ms = 20000) {
 // A stand-in for `claude`: it logs its argv and each turn, and answers each turn by the first rule
 // in FAKE_RULES (read again every turn) whose kind, text and trunk match: a reply with the context
 // its call had, Read calls of files in its folder, other tool calls, a compaction, a delay, a wait
-// for a file to be there, an exit, or none.
+// for a file to be there, a copy of a file as its turn comes, an exit, or none. One that doesn't take --resume-session-at says so and exits, as an older Claude Code would.
 export const FAKE_CLAUDE = `
 const fs = require("node:fs");
 const path = require("node:path");
@@ -31,11 +35,16 @@ const trunk = kind === "judge" ? null : argv[argv.indexOf(kind === "trunk" ? "--
 const log = (x) => fs.appendFileSync(process.env.FAKE_LOG, JSON.stringify(x) + "\\n");
 const out = (x) => process.stdout.write(JSON.stringify(x) + "\\n");
 log({ kind, trunk, argv, background: process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS ? "off" : "on", memory: process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY ? "off" : "on" });
+if (argv.includes("--resume-session-at") && JSON.parse(fs.readFileSync(process.env.FAKE_RULES, "utf8")).some((r) => r.refuseResumeAt)) {
+  process.stderr.write("error: unknown option '--resume-session-at'\\n");
+  process.exit(1);
+}
 let turn = 0, buf = "";
 function respond(text) {
   const rules = JSON.parse(fs.readFileSync(process.env.FAKE_RULES, "utf8"));
-  const rule = rules.find((r) => (!r.kind || r.kind === kind) && (!r.text || text.includes(r.text)) && (!r.trunk || r.trunk === trunk)) || { reply: "no rule" };
+  const rule = rules.find((r) => !r.refuseResumeAt && (!r.kind || r.kind === kind) && (!r.text || text.includes(r.text)) && (!r.trunk || r.trunk === trunk)) || { reply: "no rule" };
   if (turn === 1) out({ type: "system", subtype: "init", model: rule.model || "claude-sonnet-5-5", tools: ["Read", "Grep", "Glob", "Agent"] });
+  if (rule.copy && fs.existsSync(rule.copy.from)) fs.copyFileSync(rule.copy.from, rule.copy.to);
   if (rule.exit) process.exit(1);
   if (rule.hang) return;
   if (rule.until && !fs.existsSync(rule.until)) {
@@ -87,6 +96,10 @@ export interface Rule {
   delayMs?: number;
   /** A file the reply waits for. */
   until?: string;
+  /** A file copied as the turn comes, before any reply: what was there as the process started. */
+  copy?: { from: string; to: string };
+  /** Any rule with it: claude refuses --resume-session-at. */
+  refuseResumeAt?: boolean;
 }
 
 export const ANSWER = "<answer>The relay holds it while it is in flight.</answer>\n<cited>\nsrc/relay.ts:1-2\n</cited>";
@@ -96,7 +109,7 @@ export const BASE: Rule[] = [
   { kind: "trunk", text: "Now read what your subject rests on", reply: "grounded", context: 50000, reads: ["CONTEXT.md", "src/relay.ts"] },
   { kind: "fork", text: "Question proof-", reply: "<answer>Forty-two.</answer>" },
   { kind: "judge", reply: "PASS: it says forty-two." },
-  { kind: "append", reply: "noted", context: 60000 },
+  { kind: "append", reply: "added", context: 60000 },
   { kind: "fork", text: "Question x-", reply: ANSWER },
 ];
 

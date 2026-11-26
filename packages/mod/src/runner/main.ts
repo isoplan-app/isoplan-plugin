@@ -61,6 +61,9 @@
 // The sessions' ask_expert questions are answered here, from this computer's own instance
 // (expert-questions-asked-here.ts): nothing of a question leaves the computer but a record with no
 // words. Their trunks are never reported; a question or a grounding running keeps the runner up.
+// What an instance's forks learn goes to its expert records, checked for secrets and personal data
+// first, and what other instances learned comes back from them (what-was-learned-link.ts,
+// isoplan-app#366); its hello says `sharesWhatExpertInstancesLearn`.
 //
 // It suggests creating experts where a session it reports would have been helped by one (expert-creation-suggestions.ts; its hello
 // says `canCreateExpertsFromSuggestions`): from each session's areas, drafted by a local model (expert-creation-suggestion-model-calls.ts), and it creates
@@ -116,6 +119,8 @@ import { createExpertRecordLink, type ExpertRecordLink } from "./expert-record-l
 import { createExpertRecordsPerOffice, expertRecordsPerOfficePath } from "./expert-records-per-office.js";
 import { createExpertRightsOnThisComputer, type ExpertRightsOnThisComputer } from "./expert-rights-on-this-computer.js";
 import { createExperts, expertIgnored, type Experts } from "./experts.js";
+import { createCheckBeforeItLeaves } from "./what-was-learned-before-it-leaves.js";
+import { createWhatWasLearnedLink, type WhatWasLearnedLink } from "./what-was-learned-link.js";
 import { createPipeServer, type Hooked } from "../pipe/server.js";
 import { createPairLinks } from "./pair-links.js";
 import { createSharedOffices } from "./shared-offices.js";
@@ -644,6 +649,36 @@ async function worker(): Promise<number> {
     link.onDirectory(() => offers.afterDirectory(office.server));
     recordLinks.set(office.server, link);
   });
+  // What instances learn, over each office's link: checked for secrets and personal data before it leaves, the patterns read again each time.
+  const checkBeforeItLeaves = createCheckBeforeItLeaves({
+    secretPatterns: () => loadPatterns(path.join(appDir, "secret-patterns.json"), path.join(isoplanDir, "secret-patterns.json"), log),
+    personalDataPatterns: () => loadPatterns(path.join(appDir, "personal-data-patterns.json"), path.join(isoplanDir, "personal-data-patterns.json"), log),
+  });
+  const learnedLinks = new Map<string, WhatWasLearnedLink>();
+  answering.forEach((office, index) => {
+    const recordLink = recordLinks.get(office.server)!;
+    const link = createWhatWasLearnedLink({
+      server: office.server,
+      recordLink,
+      instances,
+      whatWasLearned: (key) => hosted.whatWasLearned(key),
+      health: (key) => hosted.health(key),
+      check: checkBeforeItLeaves,
+      send: (m) => live(index)(m),
+      log,
+      checkMs: first.approvedRefreshMinutes * 60000,
+    });
+    recordLink.onWhatWasLearned((m) => link.take(m));
+    learnedLinks.set(office.server, link);
+  });
+  hosted.bindWhatWasLearned((key) => ({
+    tied: () => instances.tiedRecordsOf(key),
+    held: (server) => instances.heldOn(server, key)?.record?.expertRecordId,
+    servers: answering.map((office) => office.server),
+    catchUp: (server, expertRecordId) => learnedLinks.get(server)?.catchUp(expertRecordId) ?? "cannot",
+    waiting: () => learnedLinks.forEach((l) => l.sendWaiting()),
+  }));
+  instances.onChange(() => hosted.tiesMayHaveChanged());
   const expertRights = createExpertRightsOnThisComputer({
     instances,
     store: expertRecordsPerOffice,
@@ -772,6 +807,7 @@ async function worker(): Promise<number> {
     open: (office, said) => {
       const { pairing, runner } = answerers[answering.indexOf(office)]!;
       const records = recordLinks.get(office.server)!;
+      const learned = learnedLinks.get(office.server)!;
       log(`the runner's worker ${process.pid} is answering for this machine through ${office.server}`);
       status.opening(office.server);
       return createLink({
@@ -792,11 +828,12 @@ async function worker(): Promise<number> {
           status.opened(office.server);
           drive.linked(office.server);
           records.onOpen();
+          learned.onOpen();
           expertCreationSuggestions.linked(answering.indexOf(office));
           // The renewal before this hello kept the email the office named, if it did.
           void readPairing(pairingPath(claudeDir)).then((all) => status.email(office.server, pairingEntry(all, office.server, account.id)?.email));
         },
-        onClose: () => (status.closed(office.server), drive.unlinked(office.server), records.onClose(), expertCreationSuggestions.linked(answering.indexOf(office))),
+        onClose: () => (status.closed(office.server), drive.unlinked(office.server), records.onClose(), learned.onClose(), expertCreationSuggestions.linked(answering.indexOf(office))),
         onNotWanted: () => (status.stopped(office.server, "not-wanted"), said.notWanted()),
         // A revoked or lapsed pairing closes this link: the sessions' links pair the machine again.
         onPairingEnded: () => (status.stopped(office.server, "unpaired"), said.unpaired()),
@@ -813,6 +850,7 @@ async function worker(): Promise<number> {
           hiddenStarts: true,
           canCreateExpertsFromSuggestions: true,
           expertInstances: true,
+          sharesWhatExpertInstancesLearn: true,
         },
       });
     },
@@ -830,6 +868,7 @@ async function worker(): Promise<number> {
   live = links.live;
   const ended = await links.ended;
   for (const link of recordLinks.values()) link.stop();
+  for (const link of learnedLinks.values()) link.stop();
   expertQuestions.close();
   await expertRecordsPerOffice.written();
   // Each session's link closes, and its log says so, before the worker exits; one stuck in a pass is left after STOP_WAIT_MS (reporting.ts).

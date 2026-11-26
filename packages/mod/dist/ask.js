@@ -6041,6 +6041,9 @@ const HelloMessageSchema = object({
 * up from their expert records and answers its own sessions' questions from them; it sends and
 * takes the messages of "Expert records and instances" (see `expert-directory`). The server sends
 * none of them to a runner that didn't say it.
+* `sharesWhatExpertInstancesLearn` (protocol 0.18.0, isoplan-app#366): this runner sends what its
+* instances' forks learn to their expert records, and takes what other instances learned, in the
+* messages of "What instances learn". The server sends none of them to a runner that didn't say it.
 */
 const RunnerHelloMessageSchema = object({
 	type: literal("runner"),
@@ -6055,7 +6058,8 @@ const RunnerHelloMessageSchema = object({
 	starts: array(StartModeSchema).max(4).optional(),
 	hiddenStarts: literal(true).optional(),
 	canCreateExpertsFromSuggestions: literal(true).optional(),
-	expertInstances: literal(true).optional()
+	expertInstances: literal(true).optional(),
+	sharesWhatExpertInstancesLearn: literal(true).optional()
 });
 /** All of the session's facts. Sent on connect and on repair. */
 const FullMessageSchema = object({
@@ -6431,6 +6435,12 @@ const BasedOn = object({
 * its project, one with a remote, never a folder on one computer (`local:`); its subject; the model
 * it grounds with; the context, in tokens, at which its junior is promoted (`promoteAtTokens`); the
 * folders and globs of its repo it covers (`areas`); and its proof question with the answer expected.
+* `learnedElsewhereTokensPerQuestion` (protocol 0.18.0, isoplan-app#366): the most tokens of what
+* other instances learned that one fork's question carries, and that a new generation's grounding
+* carries; absent is DEFAULT_LEARNED_ELSEWHERE_TOKENS_PER_QUESTION. A runner sends it only when the
+* expert file sets it, so a definition that never set it is the same as before. An owner's computer
+* from before 0.18.0 publishes the definition without it, which the server takes as a change, so
+* every computer of a person is updated.
 * The rest of an expert file is that computer's own, and never leaves it.
 */
 const ExpertDefinitionSchema = object({
@@ -6440,7 +6450,8 @@ const ExpertDefinitionSchema = object({
 	model: Model,
 	promoteAtTokens: number().int().positive(),
 	areas: array(AreaPathSchema).max(20),
-	proof: Proof
+	proof: Proof,
+	learnedElsewhereTokensPerQuestion: number().int().positive().max(1e6).optional()
 });
 /**
 * Where this computer's instance of the expert `key` stands, set up from (or, on its owner's
@@ -6605,6 +6616,86 @@ const ExpertProofFailedMessageSchema = object({
 		path: ["answer"],
 		message: "the fork's answer, or answerHeld: one of the two"
 	});
+});
+/** The longest thing learned a runner sends: a fork's <learned> block is cut to this. */
+const MAX_WHAT_WAS_LEARNED_LENGTH = 3e3;
+/** Made by the runner that wrote it: the server keeps one of each per expert record. */
+const WhatWasLearnedIdSchema = uuid();
+/** Numbered by the server as each entry reaches an expert record: 1, 2, 3, … per record. */
+const ArrivalNumber = number().int().positive();
+/** An arrival number, or 0 for none yet. */
+const ArrivalNumberOrNone = number().int().nonnegative();
+/** The chain at an arrival number: sha256, in lowercase hex, of the chain before, "\n" and the entry's `arrivalEntryId`; "" before the first entry. */
+const ArrivalChain = union([literal(""), string().regex(/^[0-9a-f]{64}$/, "a sha256 in lowercase hex")]);
+/** A file a thing learned rests on, and the commit it was read at; absent when unknown. */
+const FileWhatWasLearnedRestsOnSchema = object({
+	path: AreaPathSchema,
+	commit: Commit.optional()
+});
+/** Why the server can't take a thing learned or an ask: `record-gone`, the office holds no record of that id under the key; `not-an-instance-here`, this computer lists no instance of it. */
+const WhatWasLearnedRefusal = _enum(["record-gone", "not-an-instance-here"]);
+/** Only `kept` carries an arrival number. */
+const NoArrivalNumber = never().optional();
+const whatWasLearned = {
+	id: WhatWasLearnedIdSchema,
+	text: string().min(1).max(MAX_WHAT_WAS_LEARNED_LENGTH),
+	files: array(FileWhatWasLearnedRestsOnSchema).min(1).max(50),
+	learnedAt: datetime({ offset: true })
+};
+/**
+* One entry of an expert record's sequence, in arrival order: `learned`, a thing an instance learned;
+* `learned-then-removed`, one removed on the card since (its text and files gone); `removed`, the
+* removal itself, of the thing `id`, at `at`. Who removed it stays on the server.
+*/
+const WhatWasLearnedEntrySchema = discriminatedUnion("kind", [
+	object({
+		kind: literal("learned"),
+		arrivalNumber: ArrivalNumber,
+		...whatWasLearned
+	}),
+	object({
+		kind: literal("learned-then-removed"),
+		arrivalNumber: ArrivalNumber,
+		id: WhatWasLearnedIdSchema
+	}),
+	object({
+		kind: literal("removed"),
+		arrivalNumber: ArrivalNumber,
+		id: WhatWasLearnedIdSchema,
+		at: datetime({ offset: true })
+	})
+]);
+/**
+* A fork of this computer's instance of the expert `key`, tied to the record `expertRecordId`, learned
+* this (protocol 0.18.0): its `text`, cut to MAX_WHAT_WAS_LEARNED_LENGTH; the `files` it rests on,
+* each with the commit it was read at where the runner knows it; `learnedAt`; and `id`, which the
+* runner made. Never the question's or the answer's words. Sent once it passed both checks on this
+* computer, after each listing this connection sends and again while unanswered or refused
+* `not-an-instance-here`, until `expert-instance-learned-received` for its id comes `kept`,
+* `removed` or refused `record-gone`. The same id again is the same thing learned.
+*/
+const ExpertInstanceLearnedMessageSchema = object({
+	type: literal("expert-instance-learned"),
+	v: Version,
+	key: ExpertNameSchema,
+	expertRecordId: ExpertRecordIdSchema,
+	...whatWasLearned
+});
+/**
+* Send this computer every entry of the record `expertRecordId` after `afterArrivalNumber`, and push
+* it the new ones on this connection (protocol 0.18.0), answered `expert-learned-since` or
+* `expert-learned-wanted-after-refused`. Always this computer's own last arrival number for the
+* record and its `chain` there: 0 and "" when it has none. Sent after a listing on this connection
+* for each record an instance here is tied to that hasn't been asked for on it, again after a
+* refusal `not-an-instance-here`, and to start again; one unanswered at a time per record.
+*/
+const ExpertLearnedWantedAfterMessageSchema = object({
+	type: literal("expert-learned-wanted-after"),
+	v: Version,
+	key: ExpertNameSchema,
+	expertRecordId: ExpertRecordIdSchema,
+	afterArrivalNumber: ArrivalNumberOrNone,
+	chain: ArrivalChain
 });
 const driven = {
 	type: literal("driven"),
@@ -6843,7 +6934,9 @@ discriminatedUnion("type", [
 	ExpertInstanceStatesMessageSchema,
 	ExpertQuestionMessageSchema,
 	ExpertSetUpOfferedMessageSchema,
-	ExpertProofFailedMessageSchema
+	ExpertProofFailedMessageSchema,
+	ExpertInstanceLearnedMessageSchema,
+	ExpertLearnedWantedAfterMessageSchema
 ]);
 /** Asks the data layer to send its facts in full. */
 const RepairMessageSchema = object({
@@ -7313,7 +7406,9 @@ const ServerExpertCreationSuggestionEndedMessageSchema = discriminatedUnion("why
 * questions per person per expert, questions per person in the last day, and the hours after which
 * a question still unanswered ends. Sent to a runner that said `expertInstances` once its hello is
 * let in, even an empty one, and whenever it changes; the first on a connection opens the family on
-* it (see "Expert records and instances"). Each key once.
+* it (see "Expert records and instances"). Each key once. `sharesWhatExpertInstancesLearn` (protocol
+* 0.18.0): this server takes and sends the messages of "What instances learn", said only to a runner
+* whose hello said it; the first directory on a connection decides it for that connection.
 */
 const ExpertDirectoryMessageSchema = object({
 	type: literal("expert-directory"),
@@ -7323,7 +7418,8 @@ const ExpertDirectoryMessageSchema = object({
 		openPerPersonPerExpert: number().int().positive(),
 		perPersonPerDay: number().int().positive(),
 		maxAgeHours: number().positive()
-	})
+	}),
+	sharesWhatExpertInstancesLearn: literal(true).optional()
 }).superRefine((message, context) => checkEachKeyOnce("experts", message.experts, context));
 /**
 * The expert record `expertRecordId` at `revision`, with its definition (protocol 0.17.0): in answer
@@ -7350,6 +7446,106 @@ const expertDefinitionRefused = {
 	...expertDefinitionResult,
 	outcome: literal("refused")
 };
+/**
+* The answer to `expert-definition` for the expert `key` (protocol 0.17.0): `published`, as the record
+* `expertRecordId` at `revision` (a definition unchanged keeps its revision); or `refused`, for its
+* `reason`: `edited-elsewhere`, the record changed since the revision `basedOn` named, so the runner
+* writes the record's `definition`, at `revision`, into the expert file; `key-taken`, another
+* person's expert has the key; `not-owner`, the record `basedOn` named is now another person's, its
+* owner changed; `project-not-in-an-office`, no office on this server holds its project; `deleted`,
+* the record `basedOn` named was deleted on the floor.
+*/
+const ExpertDefinitionResultMessageSchema = discriminatedUnion("outcome", [object({
+	...expertDefinitionResult,
+	outcome: literal("published"),
+	expertRecordId: ExpertRecordIdSchema,
+	revision: Revision
+}), discriminatedUnion("reason", [object({
+	...expertDefinitionRefused,
+	reason: literal("edited-elsewhere"),
+	expertRecordId: ExpertRecordIdSchema,
+	revision: Revision,
+	definition: ExpertDefinitionSchema
+}), object({
+	...expertDefinitionRefused,
+	reason: _enum([
+		"key-taken",
+		"not-owner",
+		"project-not-in-an-office",
+		"deleted"
+	])
+})])]);
+/**
+* The expert record `expertRecordId` of the expert `key` was deleted on the floor, by `by` (protocol
+* 0.17.0): sent to every linked runner then, and to each runner that links within the 30 days after.
+* A runner acts on it only where its files are tied to that record, never another record of the key.
+*/
+const ExpertDeletedMessageSchema = object({
+	type: literal("expert-deleted"),
+	v: Version,
+	key: ExpertNameSchema,
+	expertRecordId: ExpertRecordIdSchema,
+	by: Account
+});
+/**
+* Set up this computer's instance of the expert `key` from the record `expertRecordId` (protocol
+* 0.17.0): its person's one click on the floor, or Try again after a failure (`again`, which grounds
+* it again now). Sent to that person's own runner on the computer they chose; `by` is the account
+* that runner said hello as, which the runner checks is its own, starting nothing otherwise. Nothing
+* is queued: the server refuses at once when that runner isn't linked. How the set-up goes, the
+* runner says in `expert-instance-states`.
+*/
+const SetUpExpertInstanceMessageSchema = object({
+	type: literal("set-up-expert-instance"),
+	v: Version,
+	request: RequestId,
+	key: ExpertNameSchema,
+	expertRecordId: ExpertRecordIdSchema,
+	by: Account,
+	again: literal(true).optional()
+});
+/**
+* The offer to set up the expert `key` on this computer, from the record `expertRecordId`, ended
+* (protocol 0.17.0): `dismissed` on the floor; `expired`; `set-up`, an instance of it is listed; or
+* `gone`, the record was deleted or its project left every office. Sent to that person's runner on
+* that computer when it ends, and on each link for every offer of that computer that ended in the 30
+* days after it was offered.
+*/
+const ExpertSetUpOfferEndedMessageSchema = object({
+	type: literal("expert-set-up-offer-ended"),
+	v: Version,
+	key: ExpertNameSchema,
+	expertRecordId: ExpertRecordIdSchema,
+	why: _enum([
+		"dismissed",
+		"expired",
+		"set-up",
+		"gone"
+	])
+});
+/**
+* This runner's person's questions to experts on their other computers (protocol 0.17.0), from the
+* records those computers' runners sent (`expert-question`): `open`, how many are open per expert,
+* and `askedAtInTheLastDay`, when each of the last day's was asked. The runner adds its own and
+* checks the directory's `asking` caps against the total. Sent after the directory on each link, and
+* whenever those records change.
+*/
+const ExpertQuestionsAskedOnYourOtherComputersMessageSchema = object({
+	type: literal("expert-questions-asked-on-your-other-computers"),
+	v: Version,
+	open: array(object({
+		key: ExpertNameSchema,
+		count: number().int().positive()
+	})).max(MAX_EXPERT_RECORDS),
+	askedAtInTheLastDay: array(datetime({ offset: true })).max(MAX_EXPERT_QUESTION_TIMES_IN_THE_LAST_DAY)
+});
+const expertInstanceLearnedReceived = {
+	type: literal("expert-instance-learned-received"),
+	v: Version,
+	key: ExpertNameSchema,
+	expertRecordId: ExpertRecordIdSchema,
+	id: WhatWasLearnedIdSchema
+};
 discriminatedUnion("type", [
 	RepairMessageSchema,
 	WelcomeMessageSchema,
@@ -7372,62 +7568,75 @@ discriminatedUnion("type", [
 	ServerExpertCreationSuggestionEndedMessageSchema,
 	ExpertDirectoryMessageSchema,
 	ExpertRecordMessageSchema,
-	discriminatedUnion("outcome", [object({
-		...expertDefinitionResult,
-		outcome: literal("published"),
-		expertRecordId: ExpertRecordIdSchema,
-		revision: Revision
-	}), discriminatedUnion("reason", [object({
-		...expertDefinitionRefused,
-		reason: literal("edited-elsewhere"),
-		expertRecordId: ExpertRecordIdSchema,
-		revision: Revision,
-		definition: ExpertDefinitionSchema
-	}), object({
-		...expertDefinitionRefused,
-		reason: _enum([
-			"key-taken",
-			"not-owner",
-			"project-not-in-an-office",
-			"deleted"
-		])
-	})])]),
+	ExpertDefinitionResultMessageSchema,
+	ExpertDeletedMessageSchema,
+	SetUpExpertInstanceMessageSchema,
+	ExpertSetUpOfferEndedMessageSchema,
+	ExpertQuestionsAskedOnYourOtherComputersMessageSchema,
+	discriminatedUnion("outcome", [
+		object({
+			...expertInstanceLearnedReceived,
+			outcome: literal("kept"),
+			arrivalNumber: ArrivalNumber
+		}),
+		object({
+			...expertInstanceLearnedReceived,
+			outcome: literal("removed"),
+			arrivalNumber: NoArrivalNumber
+		}),
+		object({
+			...expertInstanceLearnedReceived,
+			outcome: literal("refused"),
+			reason: WhatWasLearnedRefusal,
+			arrivalNumber: NoArrivalNumber
+		})
+	]),
 	object({
-		type: literal("expert-deleted"),
+		type: literal("expert-learned-since"),
 		v: Version,
 		key: ExpertNameSchema,
 		expertRecordId: ExpertRecordIdSchema,
-		by: Account
+		afterArrivalNumber: ArrivalNumberOrNone,
+		entries: array(WhatWasLearnedEntrySchema).max(100),
+		chain: ArrivalChain,
+		lastArrivalNumber: ArrivalNumberOrNone,
+		startedAgain: literal(true).optional(),
+		more: literal(true).optional()
+	}).superRefine((message, context) => {
+		let before = message.afterArrivalNumber;
+		message.entries.forEach((entry, i) => {
+			if (entry.arrivalNumber <= before) context.addIssue({
+				code: "custom",
+				path: [
+					"entries",
+					i,
+					"arrivalNumber"
+				],
+				message: `above ${before}: each entry's arrival number is above the one before it, the first above afterArrivalNumber`
+			});
+			if (entry.arrivalNumber > message.lastArrivalNumber) context.addIssue({
+				code: "custom",
+				path: [
+					"entries",
+					i,
+					"arrivalNumber"
+				],
+				message: `at most lastArrivalNumber, ${message.lastArrivalNumber}`
+			});
+			before = Math.max(before, entry.arrivalNumber);
+		});
+		if (message.startedAgain && message.afterArrivalNumber !== 0) context.addIssue({
+			code: "custom",
+			path: ["startedAgain"],
+			message: "only on an answer from 0: afterArrivalNumber 0"
+		});
 	}),
 	object({
-		type: literal("set-up-expert-instance"),
+		type: literal("expert-learned-wanted-after-refused"),
 		v: Version,
-		request: RequestId,
 		key: ExpertNameSchema,
 		expertRecordId: ExpertRecordIdSchema,
-		by: Account,
-		again: literal(true).optional()
-	}),
-	object({
-		type: literal("expert-set-up-offer-ended"),
-		v: Version,
-		key: ExpertNameSchema,
-		expertRecordId: ExpertRecordIdSchema,
-		why: _enum([
-			"dismissed",
-			"expired",
-			"set-up",
-			"gone"
-		])
-	}),
-	object({
-		type: literal("expert-questions-asked-on-your-other-computers"),
-		v: Version,
-		open: array(object({
-			key: ExpertNameSchema,
-			count: number().int().positive()
-		})).max(MAX_EXPERT_RECORDS),
-		askedAtInTheLastDay: array(datetime({ offset: true })).max(MAX_EXPERT_QUESTION_TIMES_IN_THE_LAST_DAY)
+		reason: WhatWasLearnedRefusal
 	})
 ]);
 //#endregion

@@ -31,7 +31,8 @@
 // desktop app, src/install/app.ts, when it is the runner, and its folder), the
 // plugin's files under <claude dir>/isoplan, and last the hooks, so a stop part way never leaves
 // settings.json naming a wake.mjs that has gone. The files a person writes there are kept:
-// config.json, runner.json, secret-patterns.json, and a claude-binary.json set by hand. The install
+// config.json, runner.json, secret-patterns.json, personal-data-patterns.json, and a
+// claude-binary.json set by hand. The install
 // script's uninstall leaves wake.json as `{ "disabled": true }`, so the plugin, if it is still
 // installed, doesn't put the hook back when its data layer next starts; only the install script
 // takes that away.
@@ -74,7 +75,7 @@ export const runnerAppDir = (claudeDir: string) => path.join(claudeDir, "isoplan
 
 // The runner's files, by their path in the plugin's folder, and the link handler's, which reads the
 // same defaults. runner.js goes last, so a runner started on new code finds the new defaults beside it.
-export const RUNNER_FILES = ["config.json", "runner.json", "secret-patterns.json", "prompts/instructions.md", "prompts/question.md", "prompts/brief.md", "prompts/spin-off.md", "prompts/naming.md", "prompts/expert-grounding.md", "prompts/expert-read.md", "prompts/expert-question.md", "prompts/expert-role-junior.md", "prompts/expert-role-first.md", "prompts/expert-role-senior.md", "prompts/expert-senior-answer.md", "prompts/expert-note.md", "prompts/expert-judge.md", "prompts/correction.md", "prompts/expert-draft.md", "dist/connect.js", "dist/runner.js"];
+export const RUNNER_FILES = ["config.json", "runner.json", "secret-patterns.json", "personal-data-patterns.json", "prompts/instructions.md", "prompts/question.md", "prompts/brief.md", "prompts/spin-off.md", "prompts/naming.md", "prompts/expert-grounding.md", "prompts/expert-read.md", "prompts/expert-question.md", "prompts/expert-role-junior.md", "prompts/expert-role-first.md", "prompts/expert-role-senior.md", "prompts/expert-senior-answer.md", "prompts/expert-what-was-learned.md", "prompts/expert-learned-elsewhere.md", "prompts/expert-removed.md", "prompts/expert-grounding-what-was-learned.md", "prompts/expert-judge.md", "prompts/correction.md", "prompts/expert-draft.md", "dist/connect.js", "dist/runner.js"];
 
 /** The link handler's copy, which the operating system runs for an isoplan:// link. */
 export const connectScriptPath = (claudeDir: string) => path.join(runnerAppDir(claudeDir), copiedAs("dist/connect.js"));

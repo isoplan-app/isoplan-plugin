@@ -6,8 +6,9 @@
 // shared holds wait behind it, so a move isn't held back for ever by a stream of questions; when it
 // lets go, every shared hold waiting then goes first, then the next exclusive one.
 //
-// The gate is closed while a learned note is appended to the junior's trunk: a fork waits for it to
-// open, so it starts from the trunk with the note in it. Forks already running carry on.
+// The gate is closed while something is added to the junior's trunk. A fork that can't read the trunk
+// as it was before the addition (expert-claude.ts, `--resume-session-at`) waits for it to open, so it
+// starts from the trunk with the addition in it. Forks already running carry on.
 
 export interface CheckoutLock {
   shared<T>(run: () => Promise<T>): Promise<T>;

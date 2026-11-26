@@ -435,7 +435,7 @@ function members(proto, table) {
 	}
 }
 /** Shadows a prototype member with an own value, so a getter that builds from the instance runs once. */
-function own(inst, key, value, enumerable = true) {
+function own$1(inst, key, value, enumerable = true) {
 	Object.defineProperty(inst, key, {
 		configurable: true,
 		writable: true,
@@ -446,7 +446,7 @@ function own(inst, key, value, enumerable = true) {
 }
 /** Like {@link own}, for a member that was never an own data property and has to stay out of `Object.keys`. */
 function hide(inst, key, value) {
-	return own(inst, key, value, false);
+	return own$1(inst, key, value, false);
 }
 /** Adds members a table derives from the instance: each builds on first read and shadows as own data, and assignment shadows the same way, as when these were own properties. */
 /* @__NO_SIDE_EFFECTS__ */
@@ -457,10 +457,10 @@ function derived(computes, table) {
 			configurable: true,
 			enumerable: true,
 			get() {
-				return own(this, key, compute(this));
+				return own$1(this, key, compute(this));
 			},
 			set(value) {
-				own(this, key, value);
+				own$1(this, key, value);
 			}
 		});
 	}
@@ -470,10 +470,10 @@ function defineBound(proto, key, fn) {
 	Object.defineProperty(proto, key, {
 		configurable: true,
 		get() {
-			return this == null ? fn : own(this, key, fn.bind(this));
+			return this == null ? fn : own$1(this, key, fn.bind(this));
 		},
 		set(value) {
-			own(this, key, value);
+			own$1(this, key, value);
 		}
 	});
 }
@@ -1546,7 +1546,7 @@ const $ZodType = /*@__PURE__*/ $constructor("$ZodType", (inst, def) => {
 		return hide(this, "~standard", standardProps(this));
 	},
 	set "~standard"(value) {
-		own(this, "~standard", value);
+		own$1(this, "~standard", value);
 	}
 });
 /** The Standard Schema surface for `inst`. Shared so wrappers can extend it without forcing it. */
@@ -4905,7 +4905,7 @@ const ZodType = /*@__PURE__*/ $constructor("ZodType", (inst, def) => {
 		});
 	},
 	set "~standard"(value) {
-		own(this, "~standard", value);
+		own$1(this, "~standard", value);
 	},
 	parse: function _parse(data, params) {
 		return parse$4(this, data, params, { callee: _parse });
@@ -4923,7 +4923,7 @@ const ZodType = /*@__PURE__*/ $constructor("ZodType", (inst, def) => {
 		return this?.safeParseAsync;
 	},
 	set spa(value) {
-		own(this, "spa", value);
+		own$1(this, "spa", value);
 	},
 	validate(data, params) {
 		return validate(this, data, params);
@@ -6130,6 +6130,9 @@ const HelloMessageSchema = object({
 * up from their expert records and answers its own sessions' questions from them; it sends and
 * takes the messages of "Expert records and instances" (see `expert-directory`). The server sends
 * none of them to a runner that didn't say it.
+* `sharesWhatExpertInstancesLearn` (protocol 0.18.0, isoplan-app#366): this runner sends what its
+* instances' forks learn to their expert records, and takes what other instances learned, in the
+* messages of "What instances learn". The server sends none of them to a runner that didn't say it.
 */
 const RunnerHelloMessageSchema = object({
 	type: literal$1("runner"),
@@ -6144,7 +6147,8 @@ const RunnerHelloMessageSchema = object({
 	starts: array(StartModeSchema).max(4).optional(),
 	hiddenStarts: literal$1(true).optional(),
 	canCreateExpertsFromSuggestions: literal$1(true).optional(),
-	expertInstances: literal$1(true).optional()
+	expertInstances: literal$1(true).optional(),
+	sharesWhatExpertInstancesLearn: literal$1(true).optional()
 });
 /** All of the session's facts. Sent on connect and on repair. */
 const FullMessageSchema = object({
@@ -6525,6 +6529,12 @@ const BasedOn = object({
 * its project, one with a remote, never a folder on one computer (`local:`); its subject; the model
 * it grounds with; the context, in tokens, at which its junior is promoted (`promoteAtTokens`); the
 * folders and globs of its repo it covers (`areas`); and its proof question with the answer expected.
+* `learnedElsewhereTokensPerQuestion` (protocol 0.18.0, isoplan-app#366): the most tokens of what
+* other instances learned that one fork's question carries, and that a new generation's grounding
+* carries; absent is DEFAULT_LEARNED_ELSEWHERE_TOKENS_PER_QUESTION. A runner sends it only when the
+* expert file sets it, so a definition that never set it is the same as before. An owner's computer
+* from before 0.18.0 publishes the definition without it, which the server takes as a change, so
+* every computer of a person is updated.
 * The rest of an expert file is that computer's own, and never leaves it.
 */
 const ExpertDefinitionSchema = object({
@@ -6534,7 +6544,8 @@ const ExpertDefinitionSchema = object({
 	model: Model,
 	promoteAtTokens: number().int().positive(),
 	areas: array(AreaPathSchema).max(20),
-	proof: Proof
+	proof: Proof,
+	learnedElsewhereTokensPerQuestion: number().int().positive().max(1e6).optional()
 });
 /**
 * Where this computer's instance of the expert `key` stands, set up from (or, on its owner's
@@ -6699,6 +6710,88 @@ const ExpertProofFailedMessageSchema = object({
 		path: ["answer"],
 		message: "the fork's answer, or answerHeld: one of the two"
 	});
+});
+/** The longest thing learned a runner sends: a fork's <learned> block is cut to this. */
+const MAX_WHAT_WAS_LEARNED_LENGTH = 3e3;
+/** Made by the runner that wrote it: the server keeps one of each per expert record. */
+const WhatWasLearnedIdSchema = uuid();
+/** Numbered by the server as each entry reaches an expert record: 1, 2, 3, … per record. */
+const ArrivalNumber = number().int().positive();
+/** An arrival number, or 0 for none yet. */
+const ArrivalNumberOrNone = number().int().nonnegative();
+/** The chain at an arrival number: sha256, in lowercase hex, of the chain before, "\n" and the entry's `arrivalEntryId`; "" before the first entry. */
+const ArrivalChain = union([literal$1(""), string().regex(/^[0-9a-f]{64}$/, "a sha256 in lowercase hex")]);
+/** A file a thing learned rests on, and the commit it was read at; absent when unknown. */
+const FileWhatWasLearnedRestsOnSchema = object({
+	path: AreaPathSchema,
+	commit: Commit.optional()
+});
+/** Why the server can't take a thing learned or an ask: `record-gone`, the office holds no record of that id under the key; `not-an-instance-here`, this computer lists no instance of it. */
+const WhatWasLearnedRefusal = _enum(["record-gone", "not-an-instance-here"]);
+/** Only `kept` carries an arrival number. */
+const NoArrivalNumber = never().optional();
+const whatWasLearned = {
+	id: WhatWasLearnedIdSchema,
+	text: string().min(1).max(MAX_WHAT_WAS_LEARNED_LENGTH),
+	files: array(FileWhatWasLearnedRestsOnSchema).min(1).max(50),
+	learnedAt: datetime({ offset: true })
+};
+/**
+* One entry of an expert record's sequence, in arrival order: `learned`, a thing an instance learned;
+* `learned-then-removed`, one removed on the card since (its text and files gone); `removed`, the
+* removal itself, of the thing `id`, at `at`. Who removed it stays on the server.
+*/
+const WhatWasLearnedEntrySchema = discriminatedUnion("kind", [
+	object({
+		kind: literal$1("learned"),
+		arrivalNumber: ArrivalNumber,
+		...whatWasLearned
+	}),
+	object({
+		kind: literal$1("learned-then-removed"),
+		arrivalNumber: ArrivalNumber,
+		id: WhatWasLearnedIdSchema
+	}),
+	object({
+		kind: literal$1("removed"),
+		arrivalNumber: ArrivalNumber,
+		id: WhatWasLearnedIdSchema,
+		at: datetime({ offset: true })
+	})
+]);
+/** The id an entry adds to the chain: a thing learned's own id, or `removal:<id>` for its removal. */
+const arrivalEntryId = (entry) => entry.kind === "removed" ? `removal:${entry.id}` : entry.id;
+/**
+* A fork of this computer's instance of the expert `key`, tied to the record `expertRecordId`, learned
+* this (protocol 0.18.0): its `text`, cut to MAX_WHAT_WAS_LEARNED_LENGTH; the `files` it rests on,
+* each with the commit it was read at where the runner knows it; `learnedAt`; and `id`, which the
+* runner made. Never the question's or the answer's words. Sent once it passed both checks on this
+* computer, after each listing this connection sends and again while unanswered or refused
+* `not-an-instance-here`, until `expert-instance-learned-received` for its id comes `kept`,
+* `removed` or refused `record-gone`. The same id again is the same thing learned.
+*/
+const ExpertInstanceLearnedMessageSchema = object({
+	type: literal$1("expert-instance-learned"),
+	v: Version,
+	key: ExpertNameSchema,
+	expertRecordId: ExpertRecordIdSchema,
+	...whatWasLearned
+});
+/**
+* Send this computer every entry of the record `expertRecordId` after `afterArrivalNumber`, and push
+* it the new ones on this connection (protocol 0.18.0), answered `expert-learned-since` or
+* `expert-learned-wanted-after-refused`. Always this computer's own last arrival number for the
+* record and its `chain` there: 0 and "" when it has none. Sent after a listing on this connection
+* for each record an instance here is tied to that hasn't been asked for on it, again after a
+* refusal `not-an-instance-here`, and to start again; one unanswered at a time per record.
+*/
+const ExpertLearnedWantedAfterMessageSchema = object({
+	type: literal$1("expert-learned-wanted-after"),
+	v: Version,
+	key: ExpertNameSchema,
+	expertRecordId: ExpertRecordIdSchema,
+	afterArrivalNumber: ArrivalNumberOrNone,
+	chain: ArrivalChain
 });
 const driven$2 = {
 	type: literal$1("driven"),
@@ -6966,7 +7059,9 @@ discriminatedUnion("type", [
 	ExpertInstanceStatesMessageSchema,
 	ExpertQuestionMessageSchema,
 	ExpertSetUpOfferedMessageSchema,
-	ExpertProofFailedMessageSchema
+	ExpertProofFailedMessageSchema,
+	ExpertInstanceLearnedMessageSchema,
+	ExpertLearnedWantedAfterMessageSchema
 ]);
 /** Asks the data layer to send its facts in full. */
 const RepairMessageSchema = object({
@@ -7436,7 +7531,9 @@ const ServerExpertCreationSuggestionEndedMessageSchema = discriminatedUnion("why
 * questions per person per expert, questions per person in the last day, and the hours after which
 * a question still unanswered ends. Sent to a runner that said `expertInstances` once its hello is
 * let in, even an empty one, and whenever it changes; the first on a connection opens the family on
-* it (see "Expert records and instances"). Each key once.
+* it (see "Expert records and instances"). Each key once. `sharesWhatExpertInstancesLearn` (protocol
+* 0.18.0): this server takes and sends the messages of "What instances learn", said only to a runner
+* whose hello said it; the first directory on a connection decides it for that connection.
 */
 const ExpertDirectoryMessageSchema = object({
 	type: literal$1("expert-directory"),
@@ -7446,7 +7543,8 @@ const ExpertDirectoryMessageSchema = object({
 		openPerPersonPerExpert: number().int().positive(),
 		perPersonPerDay: number().int().positive(),
 		maxAgeHours: number().positive()
-	})
+	}),
+	sharesWhatExpertInstancesLearn: literal$1(true).optional()
 }).superRefine((message, context) => checkEachKeyOnce("experts", message.experts, context));
 /**
 * The expert record `expertRecordId` at `revision`, with its definition (protocol 0.17.0): in answer
@@ -7473,6 +7571,106 @@ const expertDefinitionRefused = {
 	...expertDefinitionResult,
 	outcome: literal$1("refused")
 };
+/**
+* The answer to `expert-definition` for the expert `key` (protocol 0.17.0): `published`, as the record
+* `expertRecordId` at `revision` (a definition unchanged keeps its revision); or `refused`, for its
+* `reason`: `edited-elsewhere`, the record changed since the revision `basedOn` named, so the runner
+* writes the record's `definition`, at `revision`, into the expert file; `key-taken`, another
+* person's expert has the key; `not-owner`, the record `basedOn` named is now another person's, its
+* owner changed; `project-not-in-an-office`, no office on this server holds its project; `deleted`,
+* the record `basedOn` named was deleted on the floor.
+*/
+const ExpertDefinitionResultMessageSchema = discriminatedUnion("outcome", [object({
+	...expertDefinitionResult,
+	outcome: literal$1("published"),
+	expertRecordId: ExpertRecordIdSchema,
+	revision: Revision
+}), discriminatedUnion("reason", [object({
+	...expertDefinitionRefused,
+	reason: literal$1("edited-elsewhere"),
+	expertRecordId: ExpertRecordIdSchema,
+	revision: Revision,
+	definition: ExpertDefinitionSchema
+}), object({
+	...expertDefinitionRefused,
+	reason: _enum([
+		"key-taken",
+		"not-owner",
+		"project-not-in-an-office",
+		"deleted"
+	])
+})])]);
+/**
+* The expert record `expertRecordId` of the expert `key` was deleted on the floor, by `by` (protocol
+* 0.17.0): sent to every linked runner then, and to each runner that links within the 30 days after.
+* A runner acts on it only where its files are tied to that record, never another record of the key.
+*/
+const ExpertDeletedMessageSchema = object({
+	type: literal$1("expert-deleted"),
+	v: Version,
+	key: ExpertNameSchema,
+	expertRecordId: ExpertRecordIdSchema,
+	by: Account
+});
+/**
+* Set up this computer's instance of the expert `key` from the record `expertRecordId` (protocol
+* 0.17.0): its person's one click on the floor, or Try again after a failure (`again`, which grounds
+* it again now). Sent to that person's own runner on the computer they chose; `by` is the account
+* that runner said hello as, which the runner checks is its own, starting nothing otherwise. Nothing
+* is queued: the server refuses at once when that runner isn't linked. How the set-up goes, the
+* runner says in `expert-instance-states`.
+*/
+const SetUpExpertInstanceMessageSchema = object({
+	type: literal$1("set-up-expert-instance"),
+	v: Version,
+	request: RequestId,
+	key: ExpertNameSchema,
+	expertRecordId: ExpertRecordIdSchema,
+	by: Account,
+	again: literal$1(true).optional()
+});
+/**
+* The offer to set up the expert `key` on this computer, from the record `expertRecordId`, ended
+* (protocol 0.17.0): `dismissed` on the floor; `expired`; `set-up`, an instance of it is listed; or
+* `gone`, the record was deleted or its project left every office. Sent to that person's runner on
+* that computer when it ends, and on each link for every offer of that computer that ended in the 30
+* days after it was offered.
+*/
+const ExpertSetUpOfferEndedMessageSchema = object({
+	type: literal$1("expert-set-up-offer-ended"),
+	v: Version,
+	key: ExpertNameSchema,
+	expertRecordId: ExpertRecordIdSchema,
+	why: _enum([
+		"dismissed",
+		"expired",
+		"set-up",
+		"gone"
+	])
+});
+/**
+* This runner's person's questions to experts on their other computers (protocol 0.17.0), from the
+* records those computers' runners sent (`expert-question`): `open`, how many are open per expert,
+* and `askedAtInTheLastDay`, when each of the last day's was asked. The runner adds its own and
+* checks the directory's `asking` caps against the total. Sent after the directory on each link, and
+* whenever those records change.
+*/
+const ExpertQuestionsAskedOnYourOtherComputersMessageSchema = object({
+	type: literal$1("expert-questions-asked-on-your-other-computers"),
+	v: Version,
+	open: array(object({
+		key: ExpertNameSchema,
+		count: number().int().positive()
+	})).max(MAX_EXPERT_RECORDS),
+	askedAtInTheLastDay: array(datetime({ offset: true })).max(MAX_EXPERT_QUESTION_TIMES_IN_THE_LAST_DAY)
+});
+const expertInstanceLearnedReceived = {
+	type: literal$1("expert-instance-learned-received"),
+	v: Version,
+	key: ExpertNameSchema,
+	expertRecordId: ExpertRecordIdSchema,
+	id: WhatWasLearnedIdSchema
+};
 const OfficeServerMessageSchema = discriminatedUnion("type", [
 	RepairMessageSchema,
 	WelcomeMessageSchema,
@@ -7495,62 +7693,75 @@ const OfficeServerMessageSchema = discriminatedUnion("type", [
 	ServerExpertCreationSuggestionEndedMessageSchema,
 	ExpertDirectoryMessageSchema,
 	ExpertRecordMessageSchema,
-	discriminatedUnion("outcome", [object({
-		...expertDefinitionResult,
-		outcome: literal$1("published"),
-		expertRecordId: ExpertRecordIdSchema,
-		revision: Revision
-	}), discriminatedUnion("reason", [object({
-		...expertDefinitionRefused,
-		reason: literal$1("edited-elsewhere"),
-		expertRecordId: ExpertRecordIdSchema,
-		revision: Revision,
-		definition: ExpertDefinitionSchema
-	}), object({
-		...expertDefinitionRefused,
-		reason: _enum([
-			"key-taken",
-			"not-owner",
-			"project-not-in-an-office",
-			"deleted"
-		])
-	})])]),
+	ExpertDefinitionResultMessageSchema,
+	ExpertDeletedMessageSchema,
+	SetUpExpertInstanceMessageSchema,
+	ExpertSetUpOfferEndedMessageSchema,
+	ExpertQuestionsAskedOnYourOtherComputersMessageSchema,
+	discriminatedUnion("outcome", [
+		object({
+			...expertInstanceLearnedReceived,
+			outcome: literal$1("kept"),
+			arrivalNumber: ArrivalNumber
+		}),
+		object({
+			...expertInstanceLearnedReceived,
+			outcome: literal$1("removed"),
+			arrivalNumber: NoArrivalNumber
+		}),
+		object({
+			...expertInstanceLearnedReceived,
+			outcome: literal$1("refused"),
+			reason: WhatWasLearnedRefusal,
+			arrivalNumber: NoArrivalNumber
+		})
+	]),
 	object({
-		type: literal$1("expert-deleted"),
+		type: literal$1("expert-learned-since"),
 		v: Version,
 		key: ExpertNameSchema,
 		expertRecordId: ExpertRecordIdSchema,
-		by: Account
+		afterArrivalNumber: ArrivalNumberOrNone,
+		entries: array(WhatWasLearnedEntrySchema).max(100),
+		chain: ArrivalChain,
+		lastArrivalNumber: ArrivalNumberOrNone,
+		startedAgain: literal$1(true).optional(),
+		more: literal$1(true).optional()
+	}).superRefine((message, context) => {
+		let before = message.afterArrivalNumber;
+		message.entries.forEach((entry, i) => {
+			if (entry.arrivalNumber <= before) context.addIssue({
+				code: "custom",
+				path: [
+					"entries",
+					i,
+					"arrivalNumber"
+				],
+				message: `above ${before}: each entry's arrival number is above the one before it, the first above afterArrivalNumber`
+			});
+			if (entry.arrivalNumber > message.lastArrivalNumber) context.addIssue({
+				code: "custom",
+				path: [
+					"entries",
+					i,
+					"arrivalNumber"
+				],
+				message: `at most lastArrivalNumber, ${message.lastArrivalNumber}`
+			});
+			before = Math.max(before, entry.arrivalNumber);
+		});
+		if (message.startedAgain && message.afterArrivalNumber !== 0) context.addIssue({
+			code: "custom",
+			path: ["startedAgain"],
+			message: "only on an answer from 0: afterArrivalNumber 0"
+		});
 	}),
 	object({
-		type: literal$1("set-up-expert-instance"),
+		type: literal$1("expert-learned-wanted-after-refused"),
 		v: Version,
-		request: RequestId,
 		key: ExpertNameSchema,
 		expertRecordId: ExpertRecordIdSchema,
-		by: Account,
-		again: literal$1(true).optional()
-	}),
-	object({
-		type: literal$1("expert-set-up-offer-ended"),
-		v: Version,
-		key: ExpertNameSchema,
-		expertRecordId: ExpertRecordIdSchema,
-		why: _enum([
-			"dismissed",
-			"expired",
-			"set-up",
-			"gone"
-		])
-	}),
-	object({
-		type: literal$1("expert-questions-asked-on-your-other-computers"),
-		v: Version,
-		open: array(object({
-			key: ExpertNameSchema,
-			count: number().int().positive()
-		})).max(MAX_EXPERT_RECORDS),
-		askedAtInTheLastDay: array(datetime({ offset: true })).max(MAX_EXPERT_QUESTION_TIMES_IN_THE_LAST_DAY)
+		reason: WhatWasLearnedRefusal
 	})
 ]);
 /** Validates a message a data layer received from an office server. */
@@ -9205,7 +9416,10 @@ const SERVER_EXPERT_RECORD_TYPES = /* @__PURE__ */ new Set([
 	"expert-deleted",
 	"set-up-expert-instance",
 	"expert-set-up-offer-ended",
-	"expert-questions-asked-on-your-other-computers"
+	"expert-questions-asked-on-your-other-computers",
+	"expert-instance-learned-received",
+	"expert-learned-since",
+	"expert-learned-wanted-after-refused"
 ]);
 function createLink({ url, hello, emit, minIntervalMs = 1e3, retryBaseMs = 1e3, retryCapMs = 3e4, notWantedRetryMs = 36e5, takenRetryMs = 36e5, onNotWanted, onPairingEnded, onMessage, onDrive, onExpertRecordMessages, onExpertCreationSuggestionMessages, onOpen, onClose, filter = (facts) => facts, answered, pairing, pairPollMs = 5e3, admit, random = Math.random, onError }) {
 	const outbox = [];
@@ -11217,7 +11431,7 @@ function createClaudeCode(io) {
 					},
 					firstAt: a.t.firstAt,
 					lastAt: a.t.lastAt,
-					tokens: tokensOf(a.t),
+					tokens: tokensOf$1(a.t),
 					meta: a.meta
 				})),
 				more,
@@ -11742,7 +11956,7 @@ function foldUsage(st, line) {
 	if (ev && ev.type === "assistant" && ev.message && typeof ev.message === "object") readUsage(st, ev.message, Date.parse(ev.timestamp));
 }
 const isCompaction = (ev) => !!ev && typeof ev === "object" && (ev.type === "system" && ev.subtype === "compact_boundary" || ev.isCompactSummary === true);
-const tokensOf = (st) => (st.usage?.context ?? 0) + (st.reply?.counts.output ?? 0);
+const tokensOf$1 = (st) => (st.usage?.context ?? 0) + (st.reply?.counts.output ?? 0);
 function usageOf$1(st, fallbackMs) {
 	return st.usage && {
 		model: st.usage.model,
@@ -16352,7 +16566,7 @@ const trunkArgs = (trunk, model) => [
 	...READ_ONLY,
 	...STREAM
 ];
-/** One turn appended to a trunk: a learned note. */
+/** One turn added to a trunk: what forks learned. */
 const appendArgs = (trunk, model) => [
 	"-p",
 	"--resume",
@@ -16362,18 +16576,21 @@ const appendArgs = (trunk, model) => [
 	...READ_ONLY,
 	...STREAM
 ];
-/** A fork of a trunk for one question, never saved. */
-const expertForkArgs = (trunk, model) => [
+/** A fork of a trunk for one question, never saved: the trunk up to `at`, its entry's uuid, when it is given. */
+const expertForkArgs = (trunk, model, at) => [
 	"-p",
 	"--resume",
 	trunk,
 	"--fork-session",
 	"--no-session-persistence",
+	...at ? ["--resume-session-at", at] : [],
 	"--model",
 	model,
 	...READ_ONLY,
 	...STREAM
 ];
+/** Whether a failed fork's words say this Claude Code doesn't take `--resume-session-at`. */
+const refusedResumeAt = (detail) => detail.includes("resume-session-at");
 /** The proof's judge: no tools, never saved. */
 const judgeArgs = (model) => [
 	"-p",
@@ -17294,6 +17511,8 @@ function createExpertCreationSuggestionModelCalls(o) {
 }
 //#endregion
 //#region src/runner/expert-file.ts
+/** The most `learnedElsewhereTokensPerQuestion` may be, as the protocol takes it. */
+const MAX_LEARNED_ELSEWHERE_TOKENS = 1e6;
 /** What an expert file leaves out. */
 const EXPERT_DEFAULTS = {
 	forkTimeLimitMinutes: 5,
@@ -17320,7 +17539,8 @@ const KNOWN$1 = [
 	"caps",
 	"proof",
 	"window",
-	"areas"
+	"areas",
+	"learnedElsewhereTokensPerQuestion"
 ];
 const KNOWN_CAPS$1 = [
 	"perAskerPerDay",
@@ -17392,31 +17612,34 @@ function parse$2(value, base) {
 	if (o.proof === void 0) throw new Bad$1("proof", "is required");
 	if (!isObject$3(o.proof)) throw new Bad$1("proof", "must be an object with a question and its answer");
 	if (o.areas !== void 0 && !(Array.isArray(o.areas) && o.areas.every((a) => typeof a === "string"))) throw new Bad$1("areas", "must be a list of globs");
+	const expert = {
+		version: 1,
+		name: o.name,
+		repo,
+		subject,
+		model,
+		promoteAtTokens: whole("promoteAtTokens", o.promoteAtTokens, 1),
+		forkTimeLimitMinutes: whole("forkTimeLimitMinutes", o.forkTimeLimitMinutes, 1, EXPERT_DEFAULTS.forkTimeLimitMinutes),
+		groundingTimeLimitMinutes: whole("groundingTimeLimitMinutes", o.groundingTimeLimitMinutes, 1, EXPERT_DEFAULTS.groundingTimeLimitMinutes),
+		fetchSeconds: whole("fetchSeconds", o.fetchSeconds, 0, EXPERT_DEFAULTS.fetchSeconds),
+		maxForks: whole("maxForks", o.maxForks, 1, EXPERT_DEFAULTS.maxForks),
+		caps: {
+			perAskerPerDay: whole("caps.perAskerPerDay", caps.perAskerPerDay, 1, EXPERT_DEFAULTS.caps.perAskerPerDay),
+			openPerAsker: whole("caps.openPerAsker", caps.openPerAsker, 1, EXPERT_DEFAULTS.caps.openPerAsker),
+			tokenBudgetPerDay: whole("caps.tokenBudgetPerDay", caps.tokenBudgetPerDay, 1, EXPERT_DEFAULTS.caps.tokenBudgetPerDay)
+		},
+		proof: {
+			question: words("proof.question", o.proof.question),
+			answer: words("proof.answer", o.proof.answer)
+		},
+		...o.window !== void 0 && { window: whole("window", o.window, 1e5) },
+		areas: o.areas ?? [],
+		...o.learnedElsewhereTokensPerQuestion !== void 0 && { learnedElsewhereTokensPerQuestion: whole("learnedElsewhereTokensPerQuestion", o.learnedElsewhereTokensPerQuestion, 1) }
+	};
+	if ((expert.learnedElsewhereTokensPerQuestion ?? 0) > MAX_LEARNED_ELSEWHERE_TOKENS) throw new Bad$1("learnedElsewhereTokensPerQuestion", `must be at most ${MAX_LEARNED_ELSEWHERE_TOKENS.toLocaleString("en")}`);
 	return {
 		ok: true,
-		expert: {
-			version: 1,
-			name: o.name,
-			repo,
-			subject,
-			model,
-			promoteAtTokens: whole("promoteAtTokens", o.promoteAtTokens, 1),
-			forkTimeLimitMinutes: whole("forkTimeLimitMinutes", o.forkTimeLimitMinutes, 1, EXPERT_DEFAULTS.forkTimeLimitMinutes),
-			groundingTimeLimitMinutes: whole("groundingTimeLimitMinutes", o.groundingTimeLimitMinutes, 1, EXPERT_DEFAULTS.groundingTimeLimitMinutes),
-			fetchSeconds: whole("fetchSeconds", o.fetchSeconds, 0, EXPERT_DEFAULTS.fetchSeconds),
-			maxForks: whole("maxForks", o.maxForks, 1, EXPERT_DEFAULTS.maxForks),
-			caps: {
-				perAskerPerDay: whole("caps.perAskerPerDay", caps.perAskerPerDay, 1, EXPERT_DEFAULTS.caps.perAskerPerDay),
-				openPerAsker: whole("caps.openPerAsker", caps.openPerAsker, 1, EXPERT_DEFAULTS.caps.openPerAsker),
-				tokenBudgetPerDay: whole("caps.tokenBudgetPerDay", caps.tokenBudgetPerDay, 1, EXPERT_DEFAULTS.caps.tokenBudgetPerDay)
-			},
-			proof: {
-				question: words("proof.question", o.proof.question),
-				answer: words("proof.answer", o.proof.answer)
-			},
-			...o.window !== void 0 && { window: whole("window", o.window, 1e5) },
-			areas: o.areas ?? []
-		},
+		expert,
 		unknown: [
 			...Object.keys(o).filter((k) => !KNOWN$1.includes(k)),
 			...Object.keys(caps).filter((k) => !KNOWN_CAPS$1.includes(k)).map((k) => `caps.${k}`),
@@ -17510,10 +17733,10 @@ function thresholdProblem(promoteAt, compactAt) {
 	if (promoteAt <= compactAt - 1e5) return null;
 	return `promoteAtTokens ${promoteAt} is within ${THRESHOLD_MARGIN.toLocaleString("en")} tokens of the compaction point at ${compactAt}; set it lower in the expert file`;
 }
-/** Why a junior grounded at `grounded` tokens leaves too little room below `promoteAt` for learned notes, or null. */
-function notesRoomProblem(promoteAt, grounded) {
+/** Why a junior grounded at `grounded` tokens leaves too little room below `promoteAt` for things learned, or null. */
+function roomForWhatWasLearnedProblem(promoteAt, grounded) {
 	if (promoteAt - grounded >= 1e4) return null;
-	return `room for fewer than 20 learned notes: grounded at ${grounded} tokens, promoteAtTokens ${promoteAt}; raise promoteAtTokens in the expert file`;
+	return `room for fewer than 20 things learned: grounded at ${grounded} tokens, promoteAtTokens ${promoteAt}; raise promoteAtTokens in the expert file`;
 }
 //#endregion
 //#region src/runner/expert-state.ts
@@ -17526,10 +17749,24 @@ const STATES = [
 	"retired",
 	"failed"
 ];
+/** The name a state before version 3 gave its generation's count of what was added to its trunk: read, never written. */
+const COUNT_BEFORE_VERSION_3 = "notes";
 const isGeneration = (g) => {
 	const o = g;
-	return !!o && Number.isInteger(o.n) && typeof o.trunk === "string" && typeof o.model === "string" && typeof o.commit === "string" && Number.isFinite(o.groundedAt) && Number.isFinite(o.meter) && Number.isInteger(o.notes) && STATES.includes(o.state) && (o.last === void 0 || o.last === null || typeof o.last === "string");
+	const holds = Number.isInteger(o?.["notes"]) || Array.isArray(o?.addedToItsTrunk) && o.addedToItsTrunk.every((x) => typeof x?.id === "string") && !!o.pickedUpTo && typeof o.pickedUpTo === "object";
+	return !!o && Number.isInteger(o.n) && typeof o.trunk === "string" && typeof o.model === "string" && typeof o.commit === "string" && Number.isFinite(o.groundedAt) && Number.isFinite(o.meter) && holds && STATES.includes(o.state) && (o.last === void 0 || o.last === null || typeof o.last === "string");
 };
+function asVersion3(g) {
+	const count = g[COUNT_BEFORE_VERSION_3];
+	if (count === void 0) return g;
+	const { [COUNT_BEFORE_VERSION_3]: _, ...rest } = g;
+	return {
+		...rest,
+		addedToItsTrunk: [],
+		pickedUpTo: {},
+		...count > 0 && { addedBeforeEachHadAnId: count }
+	};
+}
 async function readJson$1(file) {
 	try {
 		return JSON.parse(await fs.readFile(file, "utf8"));
@@ -17553,11 +17790,15 @@ async function writeJson(file, value) {
 		await new Promise((r) => setTimeout(r, 50 * (tries + 1)));
 	}
 }
-/** The expert's state.json, or null when there is none it can use. */
+/** The expert's state.json, or null when there is none it can use; a version 2 reads as version 3. */
 async function readState(dir) {
 	const o = await readJson$1(statePath(dir));
-	if (!o || o.version !== 1 && o.version !== 2 || typeof o.fingerprint !== "string" || typeof o.repo !== "string" || typeof o.branch !== "string" || !Array.isArray(o.generations) || !o.generations.every(isGeneration)) return null;
-	return o;
+	if (!o || o.version !== 1 && o.version !== 2 && o.version !== 3 || typeof o.fingerprint !== "string" || typeof o.repo !== "string" || typeof o.branch !== "string" || !Array.isArray(o.generations) || !o.generations.every(isGeneration)) return null;
+	return {
+		...o,
+		version: o.version === 2 ? 3 : o.version,
+		generations: o.generations.map(asVersion3)
+	};
 }
 const writeState = (dir, s) => writeJson(statePath(dir), s);
 /** Generation n's file → commit index; empty when it has none. */
@@ -22471,7 +22712,8 @@ const expertFileFromRecord = (d, local) => ({
 		answer: d.proof.answer
 	},
 	...local.window !== void 0 && { window: local.window },
-	areas: [...d.areas]
+	areas: [...d.areas],
+	...d.learnedElsewhereTokensPerQuestion !== void 0 && { learnedElsewhereTokensPerQuestion: d.learnedElsewhereTokensPerQuestion }
 });
 /** The owner's expert file, as written from a record on a computer of theirs that had none (D12), or rewritten from a newer revision. */
 function ownerExpertFileText(d, local) {
@@ -22490,7 +22732,8 @@ function ownerExpertFileText(d, local) {
 		caps: f.caps,
 		proof: f.proof,
 		...f.window !== void 0 && { window: f.window },
-		areas: f.areas
+		areas: f.areas,
+		...f.learnedElsewhereTokensPerQuestion !== void 0 && { learnedElsewhereTokensPerQuestion: f.learnedElsewhereTokensPerQuestion }
 	};
 	return JSON.stringify(body, null, 2) + "\n";
 }
@@ -22508,7 +22751,8 @@ const definitionOf = (f, project) => ({
 	proof: {
 		question: f.proof.question,
 		answer: f.proof.answer
-	}
+	},
+	...f.learnedElsewhereTokensPerQuestion !== void 0 && { learnedElsewhereTokensPerQuestion: f.learnedElsewhereTokensPerQuestion }
 });
 /** Whether two definitions say the same, their projects compared by id alone, as git may name one repo two ways. */
 const sameDefinition = (a, b) => JSON.stringify(comparable(a)) === JSON.stringify(comparable(b));
@@ -22522,7 +22766,8 @@ const comparable = (d) => [
 	d.promoteAtTokens,
 	d.areas,
 	d.proof.question,
-	d.proof.answer
+	d.proof.answer,
+	d.learnedElsewhereTokensPerQuestion ?? null
 ];
 //#endregion
 //#region src/runner/expert-records-file.ts
@@ -22759,6 +23004,13 @@ function createExpertInstances(o) {
 		if (heldOn(server, key)?.record?.expertRecordId === id && running && (running.from === "expert-file" || running.instance?.server === server)) return running;
 		return null;
 	};
+	function tiedOn(server, key) {
+		const running = o.experts.running(key);
+		const r = heldOn(server, key);
+		if (!running || !r?.record) return null;
+		if (running.from === "instance-file") return running.instance?.server === server ? r.record.expertRecordId : null;
+		return r.lastResult === "published" ? r.record.expertRecordId : null;
+	}
 	async function sendProofFailed(server, key) {
 		const r = heldOn(server, key);
 		const p = r?.proofFailed;
@@ -23100,6 +23352,20 @@ function createExpertInstances(o) {
 			log(key, `revision ${newer.revision} of its record applies now, before its next question`);
 			await o.experts.refresh(key);
 		},
+		tiedRecords: (server) => [...records.keys()].sort().flatMap((key) => {
+			const expertRecordId = tiedOn(server, key);
+			return expertRecordId ? [{
+				key,
+				expertRecordId
+			}] : [];
+		}),
+		tiedRecordsOf: (key) => Object.keys(recordsOf(key).servers).flatMap((server) => {
+			const expertRecordId = tiedOn(server, key);
+			return expertRecordId ? [{
+				server,
+				expertRecordId
+			}] : [];
+		}),
 		afterDirectory(server) {
 			for (const key of records.keys()) {
 				sendProofFailed(server, key);
@@ -23335,6 +23601,7 @@ function createExpertQuestionsAskedHere(o) {
 		given.add(k(q));
 		await o.instances.beforeQuestion(q.server, q.key).catch((err) => o.log(`expert ${q.key}: couldn't apply its newer revision: ${err.message}`));
 		if (q.state !== "asking") return;
+		found.running.expert.beforeQuestion();
 		found.running.expert.answer({
 			id: q.id,
 			question: q.text ?? "",
@@ -23535,7 +23802,8 @@ function createExpertQuestionsAskedHere(o) {
 				failed: true,
 				code: "EXPERT_CAP"
 			};
-			const starting = instance.kind === "setting-up" || instance.kind === "running" && instance.running.expert.hosted().state === "starting";
+			if (instance.kind === "running") instance.running.expert.beforeQuestion();
+			const starting = instance.kind === "setting-up" || instance.kind === "running" && (instance.running.expert.hosted().state === "starting" || instance.running.expert.catchingUp());
 			const q = {
 				id: r.key,
 				session: r.session,
@@ -23604,6 +23872,8 @@ function createExpertRecordLink(o) {
 	const wanted = /* @__PURE__ */ new Map();
 	const directoryListeners = [];
 	const othersListeners = [];
+	const listingListeners = [];
+	const learnedListeners = [];
 	let stopped = false;
 	let chain = Promise.resolve();
 	let saidNoList = false;
@@ -23651,7 +23921,10 @@ function createExpertRecordLink(o) {
 		const text = JSON.stringify(instances);
 		if (text !== lastListing) {
 			if (!ExpertInstanceStatesMessageSchema.safeParse(listing).success) o.log(`the expert instance states for ${server} don't fit the protocol, so they aren't sent`);
-			else if (o.send(listing)) lastListing = text;
+			else if (o.send(listing)) {
+				lastListing = text;
+				for (const l of listingListeners) l();
+			}
 		}
 		await publish(repos, mine);
 	}
@@ -23822,6 +24095,9 @@ function createExpertRecordLink(o) {
 				o.store.setOtherComputers(server, m);
 				for (const l of othersListeners) l();
 				return;
+			case "expert-instance-learned-received":
+			case "expert-learned-since":
+			case "expert-learned-wanted-after-refused": return queue(async () => void learnedListeners.forEach((l) => l(m)));
 		}
 	}
 	return {
@@ -23846,7 +24122,9 @@ function createExpertRecordLink(o) {
 		otherComputers: () => others ?? o.store.otherComputers(server),
 		sendNow,
 		onDirectory: (listener) => void directoryListeners.push(listener),
-		onOtherComputers: (listener) => void othersListeners.push(listener)
+		onOtherComputers: (listener) => void othersListeners.push(listener),
+		onListingSent: (listener) => void listingListeners.push(listener),
+		onWhatWasLearned: (listener) => void learnedListeners.push(listener)
 	};
 }
 //#endregion
@@ -24185,16 +24463,14 @@ function createGate() {
 }
 //#endregion
 //#region src/runner/expert-reply.ts
-/** The longest learned note appended to a trunk; one longer is cut. */
-const LEARNED_MAX = 3e3;
 const block = (text, tag) => new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(text)?.[1]?.trim() ?? null;
 /** A citation's file: its line range taken off. */
 const fileOf = (cited) => cited.replace(/:\d+(-\d+)?$/, "");
-/** The files a learned note names after its last "Files:", as repo-relative paths with their line ranges taken off. */
-function noteFiles(note) {
-	const at = [...note.matchAll(/files:/gi)].at(-1);
+/** The files a <learned> block names after its last "Files:", as repo-relative paths with their line ranges taken off. */
+function filesNamedIn(learned) {
+	const at = [...learned.matchAll(/files:/gi)].at(-1);
 	if (!at) return [];
-	return note.slice(at.index + at[0].length).split(/[\s,;`]+/).map((f) => fileOf(f.replace(/\\/g, "/").replace(/^[-*(]+|[).]+$/g, "").replace(/^\.\//, ""))).filter(Boolean);
+	return learned.slice(at.index + at[0].length).split(/[\s,;`]+/).map((f) => fileOf(f.replace(/\\/g, "/").replace(/^[-*(]+|[).]+$/g, "").replace(/^\.\//, ""))).filter(Boolean);
 }
 /** Whether a cited path names a file in the repo: relative, with no `..`. */
 const repoRelative = (file) => file !== "" && !/^([a-zA-Z]:|[\\/~])/.test(file) && !file.split(/[\\/]/).includes("..");
@@ -24212,12 +24488,12 @@ function parseReply(text) {
 		answer: block(text, "answer"),
 		cited,
 		dropped,
-		learned: learned ? learned.slice(0, LEARNED_MAX) : null,
+		learned: learned ? learned.slice(0, MAX_WHAT_WAS_LEARNED_LENGTH) : null,
 		askSenior: asked ? asked[1].trim() || null : null
 	};
 }
-/** Each citation's commit: read in this fork, else the senior's stamp, else the index, else unknown. */
-function stamp(cited, reads, senior, index, commit) {
+/** Each citation's commit: read in this fork, else the senior's, else the index, else what a thing the fork was told of gives it (`told`), else unknown. */
+function withCommitsRead(cited, reads, senior, index, commit, told = {}) {
 	return cited.map((c) => {
 		const file = fileOf(c);
 		if (reads.has(file)) return {
@@ -24238,6 +24514,12 @@ function stamp(cited, reads, senior, index, commit) {
 			commit: index[file],
 			from: "index"
 		};
+		if (Object.hasOwn(told, file)) return {
+			cited: c,
+			file,
+			commit: told[file],
+			from: "told"
+		};
 		return {
 			cited: c,
 			file,
@@ -24246,16 +24528,16 @@ function stamp(cited, reads, senior, index, commit) {
 		};
 	});
 }
-const short$1 = (commit) => commit.slice(0, 7);
+const short$2 = (commit) => commit.slice(0, 7);
 /**
 * The block under the answer: "Cited, on <branch> at <commit>:" and a line per citation, those read
 * at an older commit whose file `changed` since marked so. Empty with no citations. A block too long
 * to fit an answer drops its last citations, saying how many.
 */
-function citationBlock(stamped, branch, commit, changed) {
-	if (!stamped.length) return "";
-	const head = `Cited, on ${branch} at ${short$1(commit)}:`;
-	const lines = stamped.map((s) => `- ${s.cited} (${s.commit === null ? "commit unknown" : `read at ${short$1(s.commit)}${s.commit !== commit && changed.has(s.file) ? ", changed since" : ""}`})`);
+function citationBlock(cited, branch, commit, changed) {
+	if (!cited.length) return "";
+	const head = `Cited, on ${branch} at ${short$2(commit)}:`;
+	const lines = cited.map((s) => `- ${s.cited} (${s.commit === null ? "commit unknown" : `read at ${short$2(s.commit)}${s.commit !== commit && changed.has(s.file) ? ", changed since" : ""}`})`);
 	const room = 7997;
 	const all = [head, ...lines].join("\n");
 	if (all.length <= room) return all;
@@ -24276,6 +24558,563 @@ function answerText(body, block) {
 	return block ? `${cut}\n\n${block}` : cut;
 }
 //#endregion
+//#region src/runner/expert-trunk-additions.ts
+function createTrunkAdditions(log) {
+	const last = /* @__PURE__ */ new Map();
+	const inFlight = /* @__PURE__ */ new Map();
+	return {
+		add(trunk, things, turn) {
+			const list = inFlight.get(trunk) ?? [];
+			list.push(things);
+			inFlight.set(trunk, list);
+			const run = (last.get(trunk) ?? Promise.resolve()).then(turn).finally(() => {
+				const left = (inFlight.get(trunk) ?? []).filter((x) => x !== things);
+				if (left.length) inFlight.set(trunk, left);
+				else inFlight.delete(trunk);
+			});
+			last.set(trunk, run.catch(() => false));
+			return run.catch((err) => (log(`couldn't add to its trunk: ${err.message}`), false));
+		},
+		beingAdded: (trunk) => (inFlight.get(trunk) ?? []).flat()
+	};
+}
+/** A record's part before anything of it came. */
+const nothingReceived = (server) => ({
+	server,
+	lastArrivalNumberReceived: 0,
+	chain: "",
+	serverLastArrivalNumber: 0,
+	entries: [],
+	removed: [],
+	keptNotYetReceived: []
+});
+/** The chain after `entry`. */
+const chainAfter = (chain, entry) => createHash("sha256").update(`${chain}\n${arrivalEntryId(entry)}`).digest("hex");
+/** The chain over `entries`, from `chain`. */
+const chainOver = (chain, entries) => entries.reduce(chainAfter, chain);
+/** A thing's first line, as lists and the health log show it: at most 120 characters. */
+const firstLineOf = (text) => text.split(/\r?\n/)[0].slice(0, 120);
+const own = (t, generation = 0) => ({
+	id: t.id,
+	text: t.text,
+	files: t.files,
+	learnedAt: t.learnedAt,
+	generation: "generation" in t ? t.generation : generation,
+	firstLine: "firstLine" in t ? t.firstLine : firstLineOf(t.text)
+});
+function apply(r, entries, serverLast) {
+	const back = [];
+	const removedIds = new Set(r.removed.map((x) => x.id));
+	for (const e of entries) {
+		for (const k of r.keptNotYetReceived.filter((k) => k.arrivalNumber === e.arrivalNumber && !(e.kind !== "removed" && e.id === k.id))) {
+			back.push(own(k));
+			r.keptNotYetReceived = r.keptNotYetReceived.filter((x) => x !== k);
+		}
+		if (e.kind === "learned") {
+			const kept = r.keptNotYetReceived.find((k) => k.id === e.id);
+			const before = r.entries.find((x) => x.id === e.id);
+			r.keptNotYetReceived = r.keptNotYetReceived.filter((k) => k.id !== e.id);
+			r.entries = r.entries.filter((x) => x.id !== e.id);
+			if (!removedIds.has(e.id)) r.entries.push({
+				arrivalNumber: e.arrivalNumber,
+				id: e.id,
+				text: e.text,
+				files: e.files,
+				learnedAt: e.learnedAt,
+				...(kept || before?.learnedHere) && { learnedHere: true }
+			});
+		} else {
+			const had = r.entries.find((x) => x.id === e.id) ?? r.keptNotYetReceived.find((x) => x.id === e.id);
+			if (!removedIds.has(e.id)) {
+				removedIds.add(e.id);
+				r.removed.push({
+					id: e.id,
+					arrivalNumber: e.arrivalNumber,
+					...e.kind === "removed" && { at: e.at },
+					...had && { firstLine: firstLineOf(had.text) }
+				});
+			} else if (e.kind === "removed") {
+				const x = r.removed.find((x) => x.id === e.id);
+				x.at ??= e.at;
+			}
+			r.entries = r.entries.filter((x) => x.id !== e.id);
+			r.keptNotYetReceived = r.keptNotYetReceived.filter((x) => x.id !== e.id);
+		}
+		r.lastArrivalNumberReceived = e.arrivalNumber;
+	}
+	r.serverLastArrivalNumber = serverLast;
+	for (const k of r.keptNotYetReceived.filter((k) => k.arrivalNumber > serverLast)) back.push(own(k));
+	r.keptNotYetReceived = r.keptNotYetReceived.filter((k) => k.arrivalNumber <= serverLast);
+	r.entries.sort((a, b) => a.arrivalNumber - b.arrivalNumber);
+	if (r.entries.length > 1e3) r.entries = r.entries.slice(-1e3);
+	return back;
+}
+/** Takes `m` into `before` (this computer's part of its record, untouched), given a rebuild under way. */
+function takeLearnedSince(before, rebuilding, m) {
+	const pages = rebuilding ?? (m.startedAgain ? {
+		last: 0,
+		chain: "",
+		entries: []
+	} : null);
+	if (pages) {
+		if (rebuilding && (m.startedAgain || m.afterArrivalNumber !== rebuilding.last)) return {
+			kind: "ask-again",
+			why: `a page after ${m.afterArrivalNumber} doesn't continue the sequence being rebuilt, at ${rebuilding.last}`
+		};
+		if (chainOver(pages.chain, m.entries) !== m.chain) return {
+			kind: "ask-again",
+			why: "its chain isn't the one its entries make"
+		};
+		const next = {
+			last: m.entries.at(-1)?.arrivalNumber ?? pages.last,
+			chain: m.chain,
+			entries: [...pages.entries, ...m.entries]
+		};
+		if (m.more) return {
+			kind: "page-of-a-rebuild",
+			rebuilding: next
+		};
+		return rebuild(before, next.entries, m.lastArrivalNumber);
+	}
+	if (m.afterArrivalNumber !== before.lastArrivalNumberReceived) return {
+		kind: "ask-again",
+		why: `it continues from ${m.afterArrivalNumber}, not from this computer's last, ${before.lastArrivalNumberReceived}`
+	};
+	if (m.lastArrivalNumber < before.lastArrivalNumberReceived) return {
+		kind: "ask-again",
+		why: `the server's last is ${m.lastArrivalNumber}, below this computer's ${before.lastArrivalNumberReceived}`
+	};
+	if (chainOver(before.chain, m.entries) !== m.chain) return {
+		kind: "ask-again",
+		why: "its chain isn't the one this computer's sequence and its entries make"
+	};
+	const r = structuredClone(before);
+	const back = apply(r, m.entries, m.lastArrivalNumber);
+	r.chain = m.chain;
+	return {
+		kind: "taken",
+		record: r,
+		backToWaiting: back
+	};
+}
+function rebuild(before, sequence, serverLast) {
+	const named = new Set(sequence.map((e) => e.id));
+	const oldNumbers = new Map([...before.entries, ...before.keptNotYetReceived].map((t) => [t.id, t.arrivalNumber]));
+	const removed = new Set(before.removed.map((x) => x.id));
+	const r = {
+		...nothingReceived(before.server),
+		removed: structuredClone(before.removed),
+		keptNotYetReceived: before.keptNotYetReceived.filter((k) => named.has(k.id))
+	};
+	const back = [...before.entries.filter((t) => t.learnedHere && !named.has(t.id) && !removed.has(t.id)).map((t) => own(t)), ...before.keptNotYetReceived.filter((k) => !named.has(k.id) && !removed.has(k.id)).map((k) => own(k))];
+	const mine = new Set(before.entries.filter((t) => t.learnedHere).map((t) => t.id));
+	back.push(...apply(r, sequence, serverLast));
+	for (const t of r.entries) if (mine.has(t.id)) t.learnedHere = true;
+	r.chain = chainOver("", sequence);
+	return {
+		kind: "taken",
+		record: r,
+		backToWaiting: back,
+		rebuilt: {
+			sequence,
+			oldNumbers
+		}
+	};
+}
+/**
+* A generation's `pickedUpTo` for a record after a rebuild: the highest new arrival number N such that
+* every `learned` entry numbered up to N in the rebuilt sequence was, before it, at or below the old
+* `pickedUpTo` or is in its trunk. So what is new to it is carried, and only what it had taken into
+* account past the restore's point counts as not picked up again.
+*/
+function pickedUpToAfterARebuild(sequence, oldNumbers, oldPickedUpTo, inItsTrunk) {
+	for (const e of sequence) {
+		if (e.kind !== "learned") continue;
+		const old = oldNumbers.get(e.id);
+		if (!(old !== void 0 && old <= oldPickedUpTo || inItsTrunk.has(e.id))) return e.arrivalNumber - 1;
+	}
+	return sequence.at(-1)?.arrivalNumber ?? 0;
+}
+const waitingPath = (expertDir) => path.join(expertDir, "what-was-learned-waiting-to-be-sent.json");
+async function readWaiting(expertDir) {
+	const o = await readJson$1(waitingPath(expertDir));
+	if (!o || o.version !== 1 || !Array.isArray(o.things)) return {
+		version: 1,
+		things: []
+	};
+	return o;
+}
+const writeWaiting = (expertDir, file) => writeJson(waitingPath(expertDir), file);
+/** Whether a thing has nothing left to wait for. */
+const done = (t) => !!t.added && !t.waitingForARecord && !Object.keys(t.parts).length;
+/** The things past MAX_WAITING_PER_RECORD for a record, or waiting for a record, oldest first: each loses that part, or its wait. */
+function overTheCap(things) {
+	const over = [];
+	const records = new Set(things.flatMap((t) => Object.keys(t.parts)));
+	for (const record of records) {
+		const waiting = things.filter((t) => Object.hasOwn(t.parts, record));
+		for (const thing of waiting.slice(0, Math.max(0, waiting.length - 500))) over.push({
+			thing,
+			record
+		});
+	}
+	const unplaced = things.filter((t) => t.waitingForARecord);
+	for (const thing of unplaced.slice(0, Math.max(0, unplaced.length - 500))) over.push({
+		thing,
+		record: null
+	});
+	return over;
+}
+//#endregion
+//#region src/runner/what-was-learned-for-one-expert.ts
+const receivedPath = (expertDir) => path.join(expertDir, "what-was-learned-in-the-expert-record.json");
+async function readReceived(expertDir) {
+	const o = await readJson$1(receivedPath(expertDir));
+	if (!o || o.version !== 1 || !o.records || typeof o.records !== "object" || Array.isArray(o.records)) return {
+		version: 1,
+		records: {}
+	};
+	return o;
+}
+function createWhatWasLearnedForOneExpert(o) {
+	let waiting = {
+		version: 1,
+		things: []
+	};
+	let received = {
+		version: 1,
+		records: {}
+	};
+	let binding = null;
+	let forgotten = false;
+	let reading = null;
+	let isLoaded = false;
+	let writing = Promise.resolve();
+	const rebuilding = /* @__PURE__ */ new Map();
+	const rebuiltListeners = [];
+	const save = () => {
+		if (forgotten || !isLoaded) return writing;
+		const w = structuredClone(waiting);
+		const r = structuredClone(received);
+		writing = writing.then(async () => {
+			if (forgotten) return;
+			await writeWaiting(o.dir, w);
+			await writeJson(receivedPath(o.dir), r);
+		}).catch((err) => o.log(`couldn't write what it learned: ${err.message}`));
+		return writing;
+	};
+	function prune() {
+		for (const { thing, record } of overTheCap(waiting.things)) if (record === null) {
+			delete thing.waitingForARecord;
+			o.log(`dropped the oldest thing it learned waiting for a record, past the most that wait: "${thing.firstLine}"`);
+		} else {
+			delete thing.parts[record];
+			o.log(`dropped the oldest thing it learned waiting to be sent to record ${record}, past the most that wait: "${thing.firstLine}"`);
+		}
+		waiting.things = waiting.things.filter((t) => !done(t));
+	}
+	const partsFor = (tied) => Object.fromEntries(tied.map((r) => [r.expertRecordId, { server: r.server }]));
+	const removedIds = () => new Set(Object.values(received.records).flatMap((r) => r.removed.map((x) => x.id)));
+	function backToWaiting(b, expertRecordId, server) {
+		const there = waiting.things.find((t) => t.id === b.id);
+		if (there) there.parts[expertRecordId] = { server };
+		else waiting.things.push({
+			...b,
+			parts: { [expertRecordId]: { server } },
+			added: true
+		});
+		o.log(`its record ${expertRecordId} on ${server} no longer has what it learned, "${b.firstLine}", so it is sent again`);
+	}
+	function dropRecord(expertRecordId) {
+		delete received.records[expertRecordId];
+		rebuilding.delete(expertRecordId);
+		for (const t of waiting.things) delete t.parts[expertRecordId];
+	}
+	const tiedNow = () => binding?.tied() ?? [];
+	function bound(b) {
+		for (const t of waiting.things) for (const [r, part] of Object.entries(t.parts)) if (!b.servers.includes(part.server)) delete t.parts[r];
+		checkTies();
+		prune();
+		save();
+		b.waiting();
+	}
+	function checkTies() {
+		if (!binding || forgotten || !isLoaded) return;
+		const tied = binding.tied();
+		let changed = false;
+		if (tied.length) for (const t of waiting.things.filter((t) => t.waitingForARecord)) {
+			delete t.waitingForARecord;
+			t.parts = partsFor(tied);
+			changed = true;
+			o.log(`its file is tied to a record now, so what it learned before goes to it: "${t.firstLine}"`);
+		}
+		const known = new Map(Object.entries(received.records).map(([r, x]) => [r, x.server]));
+		for (const t of waiting.things) for (const [r, part] of Object.entries(t.parts)) known.set(r, part.server);
+		for (const [r, server] of known) {
+			if (binding.held(server) === r) continue;
+			dropRecord(r);
+			changed = true;
+			o.log(`its record ${r} on ${server} is no longer this computer's, so what it has of it goes`);
+		}
+		if (!changed) return;
+		prune();
+		save();
+		binding.waiting();
+	}
+	return {
+		load() {
+			reading ??= (async () => {
+				waiting = await readWaiting(o.dir);
+				received = await readReceived(o.dir);
+				isLoaded = true;
+				if (binding) bound(binding);
+			})();
+			return reading;
+		},
+		loaded: () => isLoaded,
+		bind(b) {
+			binding = b;
+			if (isLoaded) bound(b);
+		},
+		checkTies,
+		async keepBeforeAdding(thing) {
+			const tied = tiedNow();
+			waiting.things.push({
+				...thing,
+				parts: partsFor(tied),
+				...!tied.length && { waitingForARecord: true }
+			});
+			if (!tied.length) o.log(`kept what it learned, "${thing.firstLine}", until its file is tied to a record`);
+			prune();
+			await save();
+			binding?.waiting();
+		},
+		additionEnded(ids) {
+			const ended = new Set(ids);
+			for (const t of waiting.things) if (ended.has(t.id)) t.added = true;
+			prune();
+			save();
+		},
+		toAddAtStart(junior, holds) {
+			const add = [];
+			for (const t of waiting.things) {
+				if (t.added) continue;
+				if (t.generation === junior && !holds.has(t.id)) add.push({
+					id: t.id,
+					text: t.text,
+					files: t.files,
+					learnedAt: t.learnedAt,
+					generation: t.generation,
+					firstLine: t.firstLine
+				});
+				else t.added = true;
+			}
+			prune();
+			save();
+			return add;
+		},
+		notPickedUp(g) {
+			const inItsTrunk = new Set(g.addedToItsTrunk.map((x) => x.id));
+			const removed = removedIds();
+			const seen = /* @__PURE__ */ new Set();
+			const things = [];
+			const upTo = {};
+			for (const [r, rec] of Object.entries(received.records)) {
+				upTo[r] = rec.lastArrivalNumberReceived;
+				const from = g.pickedUpTo[r] ?? 0;
+				for (const e of rec.entries) {
+					if (e.arrivalNumber <= from || inItsTrunk.has(e.id) || removed.has(e.id) || seen.has(e.id)) continue;
+					seen.add(e.id);
+					things.push({
+						id: e.id,
+						text: e.text,
+						files: e.files,
+						learnedAt: e.learnedAt,
+						expertRecordId: r,
+						arrivalNumber: e.arrivalNumber
+					});
+				}
+			}
+			return {
+				things,
+				upTo
+			};
+		},
+		removed() {
+			const out = /* @__PURE__ */ new Map();
+			for (const r of Object.values(received.records)) for (const x of r.removed) out.set(x.id, x.firstLine ?? out.get(x.id) ?? waiting.things.find((t) => t.id === x.id)?.firstLine ?? null);
+			return out;
+		},
+		newestFirst() {
+			const removed = removedIds();
+			const out = /* @__PURE__ */ new Map();
+			for (const [r, rec] of Object.entries(received.records)) {
+				for (const e of rec.entries) out.set(e.id, {
+					id: e.id,
+					text: e.text,
+					files: e.files,
+					learnedAt: e.learnedAt,
+					expertRecordId: r,
+					arrivalNumber: e.arrivalNumber
+				});
+				for (const k of rec.keptNotYetReceived) if (!out.has(k.id)) out.set(k.id, {
+					id: k.id,
+					text: k.text,
+					files: k.files,
+					learnedAt: k.learnedAt
+				});
+			}
+			for (const t of waiting.things) if (!out.has(t.id)) out.set(t.id, {
+				id: t.id,
+				text: t.text,
+				files: t.files,
+				learnedAt: t.learnedAt
+			});
+			return [...out.values()].filter((t) => !removed.has(t.id)).sort((a, b) => Date.parse(b.learnedAt) - Date.parse(a.learnedAt) || (b.arrivalNumber ?? 0) - (a.arrivalNumber ?? 0));
+		},
+		lastReceived: () => Object.fromEntries(Object.entries(received.records).map(([r, x]) => [r, x.lastArrivalNumberReceived])),
+		staying: (id) => !!waiting.things.find((t) => t.id === id)?.staysOnThisComputer,
+		catchingUpInPages: () => !!binding && tiedNow().some((r) => binding.catchUp(r.server, r.expertRecordId) === "in-pages"),
+		caughtUp(ms) {
+			const end = (o.now ?? Date.now)() + ms;
+			return new Promise((resolve) => {
+				const look = () => {
+					if (forgotten) return resolve();
+					if (binding && tiedNow().every((r) => ["answered", "cannot"].includes(binding.catchUp(r.server, r.expertRecordId)))) return resolve();
+					if ((o.now ?? Date.now)() >= end) return resolve();
+					setTimeout(look, 100).unref?.();
+				};
+				look();
+			});
+		},
+		onRebuilt: (listener) => void rebuiltListeners.push(listener),
+		askAfter(expertRecordId) {
+			rebuilding.delete(expertRecordId);
+			const r = received.records[expertRecordId];
+			return {
+				afterArrivalNumber: r?.lastArrivalNumberReceived ?? 0,
+				chain: r?.chain ?? ""
+			};
+		},
+		waitingFor: (expertRecordId) => waiting.things.filter((t) => Object.hasOwn(t.parts, expertRecordId) && !t.staysOnThisComputer),
+		take(expertRecordId, server, m) {
+			const t = takeLearnedSince(received.records[expertRecordId] ?? nothingReceived(server), rebuilding.get(expertRecordId) ?? null, m);
+			if (t.kind === "ask-again") {
+				rebuilding.delete(expertRecordId);
+				return { askAgain: t.why };
+			}
+			if (t.kind === "page-of-a-rebuild") {
+				rebuilding.set(expertRecordId, t.rebuilding);
+				return "in-pages";
+			}
+			rebuilding.delete(expertRecordId);
+			received.records[expertRecordId] = {
+				...t.record,
+				server
+			};
+			for (const b of t.backToWaiting) backToWaiting(b, expertRecordId, server);
+			if (t.rebuilt) {
+				const { sequence, oldNumbers } = t.rebuilt;
+				o.log(`its record ${expertRecordId} on ${server} started again from its first entry (a restored office server, say), so what it has of it was rebuilt, ${sequence.length} entries`);
+				for (const l of rebuiltListeners) l(expertRecordId, (old, inItsTrunk) => pickedUpToAfterARebuild(sequence, oldNumbers, old, inItsTrunk));
+			}
+			prune();
+			save();
+			if (t.backToWaiting.length) binding?.waiting();
+			return m.more ? "in-pages" : "taken";
+		},
+		answered(expertRecordId, id, outcome, arrivalNumber) {
+			const thing = waiting.things.find((t) => t.id === id && Object.hasOwn(t.parts, expertRecordId));
+			if (!thing || outcome === "not-an-instance-here") return;
+			if (outcome === "kept" && arrivalNumber !== void 0) {
+				const part = thing.parts[expertRecordId];
+				const r = received.records[expertRecordId] ??= nothingReceived(part.server);
+				const entry = r.entries.find((e) => e.id === id);
+				if (entry) entry.learnedHere = true;
+				else if (!r.keptNotYetReceived.some((k) => k.id === id) && !r.removed.some((x) => x.id === id)) r.keptNotYetReceived.push({
+					arrivalNumber,
+					id,
+					text: thing.text,
+					files: thing.files,
+					learnedAt: thing.learnedAt,
+					generation: thing.generation,
+					firstLine: thing.firstLine
+				});
+			}
+			delete thing.parts[expertRecordId];
+			prune();
+			save();
+		},
+		recordGone(expertRecordId) {
+			if (!received.records[expertRecordId] && !waiting.things.some((t) => Object.hasOwn(t.parts, expertRecordId))) return;
+			dropRecord(expertRecordId);
+			o.log(`its record ${expertRecordId} is gone, so what it has of it goes`);
+			prune();
+			save();
+		},
+		staysOnThisComputer(id, pattern) {
+			const thing = waiting.things.find((t) => t.id === id);
+			if (!thing) return;
+			thing.parts = {};
+			delete thing.waitingForARecord;
+			thing.staysOnThisComputer = { pattern };
+			prune();
+			save();
+		},
+		forget() {
+			forgotten = true;
+			waiting = {
+				version: 1,
+				things: []
+			};
+			received = {
+				version: 1,
+				records: {}
+			};
+		},
+		written: () => writing
+	};
+}
+//#endregion
+//#region src/runner/what-was-learned-in-a-question.ts
+const FILES_CHANGED = "its files changed since; re-read them before relying on it";
+/** A thing's tokens, estimated. */
+const tokensOf = (t) => Math.ceil((t.text.length + t.files.reduce((n, f) => n + f.path.length + 12, 0)) / 3);
+/** The tokens of all of them. */
+const tokensOfAll = (things) => things.reduce((n, t) => n + tokensOf(t), 0);
+/** The newest of `things` (in arrival order, the newest last) that fit `limit`, newest first until one doesn't: returned in arrival order. */
+function newestWithin(things, limit) {
+	const out = [];
+	let left = limit;
+	for (let i = things.length - 1; i >= 0; i--) {
+		const n = tokensOf(things[i]);
+		if (n > left) break;
+		left -= n;
+		out.unshift(things[i]);
+	}
+	return out;
+}
+/** The commits each thing's files were read at, grouped as git is asked: commit → files. */
+function filesByCommit(things) {
+	const out = /* @__PURE__ */ new Map();
+	for (const t of things) for (const f of t.files) if (f.commit) out.set(f.commit, (out.get(f.commit) ?? /* @__PURE__ */ new Set()).add(f.path));
+	return out;
+}
+/** Whether git said one of its files changed since its commit (`changed`, by commit), or a file has no commit. */
+const filesChangedSince = (t, changed) => t.files.some((f) => !f.commit || changed.get(f.commit)?.has(f.path) !== false);
+const short$1 = (commit) => commit.slice(0, 7);
+/** The things, each as a fork reads it. */
+function thingsText(things, changed) {
+	return things.map((t) => {
+		const files = t.files.map((f) => `${f.path} (${f.commit ? `read at ${short$1(f.commit)}` : "commit unknown"})`).join(", ");
+		return [
+			`- ${t.text.trim().replace(/\n/g, "\n  ")}`,
+			`  Files: ${files}`,
+			...changed(t) ? [`  ${FILES_CHANGED}`] : []
+		].join("\n");
+	}).join("\n\n");
+}
+//#endregion
 //#region src/runner/expert.ts
 const REMEMBER = 200;
 const JUDGE_MS = 12e4;
@@ -24293,6 +25132,8 @@ const ANSWER_NOW = "You have asked your senior twice for this question: answer n
 const KEPT_ASKING = "the expert kept asking its senior instead of answering";
 const NOT_PASSED = "it didn't pass its proof question";
 const SENIOR_FAILED = "Your senior couldn't answer. Answer from your own context, exploring if you need to, in the format from your grounding.";
+const CATCHING_UP = "the expert is catching up on what its other instances learned";
+const CAUGHT_UP_FOR_A_QUESTION_MS = 5e3;
 const zero = () => ({
 	input: 0,
 	output: 0,
@@ -24310,7 +25151,7 @@ const yesNo = (b) => b ? "yes" : "no";
 const names = (list) => list.length ? list.map((n) => `- ${n}`).join("\n") : "none";
 async function loadExpertPrompts(appDir) {
 	const read = async (name) => (await fs.readFile(path.join(appDir, "prompts", `expert-${name}.md`), "utf8")).trim();
-	const [grounding, readTurn, question, roleJunior, roleFirst, roleSenior, seniorAnswer, note, judge] = await Promise.all([
+	const [grounding, readTurn, question, roleJunior, roleFirst, roleSenior, seniorAnswer, whatWasLearned, learnedElsewhere, removed, groundingWhatWasLearned, judge] = await Promise.all([
 		"grounding",
 		"read",
 		"question",
@@ -24318,7 +25159,10 @@ async function loadExpertPrompts(appDir) {
 		"role-first",
 		"role-senior",
 		"senior-answer",
-		"note",
+		"what-was-learned",
+		"learned-elsewhere",
+		"removed",
+		"grounding-what-was-learned",
 		"judge"
 	].map(read));
 	return {
@@ -24329,15 +25173,20 @@ async function loadExpertPrompts(appDir) {
 		roleFirst,
 		roleSenior,
 		seniorAnswer,
-		note,
+		whatWasLearned,
+		learnedElsewhere,
+		removed,
+		groundingWhatWasLearned,
 		judge
 	};
 }
-/** What a fork is told about the files it read that have changed in the checkout since. */
+/** What a fork is told about the files it read, or that something it learned rests on, that have changed in the checkout since. */
 function freshnessText(changed) {
-	if (!changed.size) return "None of the files you read has changed in the checkout since you read them.";
-	return `These files you read have changed in the checkout since you read them, so re-read any you rely on:\n${[...changed].sort().map((f) => `- ${f}`).join("\n")}`;
+	if (!changed.size) return "None of the files you read, or that something you learned rests on, has changed in the checkout since.";
+	return `These files, which you read or which something you learned rests on, have changed in the checkout since, so re-read any you rely on:\n${[...changed].sort().map((f) => `- ${f}`).join("\n")}`;
 }
+/** The estimated tokens of what other instances learned that one fork's question may carry (D17). */
+const limitOf = (f) => f.learnedElsewhereTokensPerQuestion ?? 2e4;
 function createExpert(o) {
 	const now = o.now ?? Date.now;
 	const minute = o.minuteMs ?? 6e4;
@@ -24353,7 +25202,8 @@ function createExpert(o) {
 	const slots = createForkSlots();
 	const children = /* @__PURE__ */ new Set();
 	const indexes = /* @__PURE__ */ new Map();
-	const appends = /* @__PURE__ */ new Map();
+	const additions = createTrunkAdditions(log);
+	const whatWasLearned = o.whatWasLearned;
 	const questions = /* @__PURE__ */ new Map();
 	const inFlight = /* @__PURE__ */ new Set();
 	const finished = /* @__PURE__ */ new Map();
@@ -24362,7 +25212,7 @@ function createExpert(o) {
 	const live = /* @__PURE__ */ new Map();
 	const discarded = /* @__PURE__ */ new Set();
 	let saved = {
-		version: 2,
+		version: 3,
 		setUpFromExpertRecord: true,
 		fingerprint: "",
 		repo: file.repo,
@@ -24389,6 +25239,8 @@ function createExpert(o) {
 	let busy = 0;
 	let appending = 0;
 	let appendsStarted = 0;
+	let catchingUp = false;
+	let noResumeAt = false;
 	let saving = Promise.resolve();
 	let lastHosted = "";
 	function makeCheckout(repo) {
@@ -24587,10 +25439,11 @@ function createExpert(o) {
 		changed();
 		if (wasJunior && !stopped) ground();
 	}
-	/** Grounds a new generation and asks its proof question; one that passes becomes the junior. */
-	async function ground() {
+	/** Grounds a new generation and asks its proof question; one that passes becomes the junior. `because` goes to the log. */
+	async function ground(because) {
 		if (groundingRun || stopped) return;
 		clearRetry();
+		if (because) log(`a new generation grounds: ${because}`);
 		const mine = epoch;
 		const f = file;
 		const fp = fingerprint(f);
@@ -24612,7 +25465,8 @@ function createExpert(o) {
 				commit: "",
 				groundedAt: now(),
 				meter: 0,
-				notes: 0,
+				addedToItsTrunk: [],
+				pickedUpTo: {},
 				state: "grounding"
 			};
 			saved.generations.push(g);
@@ -24649,6 +25503,10 @@ function createExpert(o) {
 			}
 			if (mine === epoch && passed) await promote(passed, fp);
 			if (groundingRun === me) groundingRun = null;
+			if (catchingUp && !passed) {
+				catchingUp = false;
+				log("its new generation didn't pass, so it isn't caught up; its junior answers, carrying the newest of what was learned elsewhere within the limit");
+			}
 			changed();
 			if (mine === epoch && !stopped && fingerprint(file) !== fp && file.repo === f.repo) ground();
 			else if (mine === epoch && retry !== null) retryLater(retry);
@@ -24703,7 +25561,22 @@ function createExpert(o) {
 			if (why) failure.repeats = true;
 			return why;
 		};
-		const c = await run(trunkArgs(g.trunk, f.model), readDir, g.trunk, fill(p.grounding, values), trunkNext([p.read]), f.groundingTimeLimitMinutes * minute, { check });
+		const after = {
+			room: null,
+			carried: null
+		};
+		let refused = false;
+		let step = 0;
+		const next = async (turn) => {
+			if (!refused && parseReply(turn.text).askSenior !== null) return refused = true, NO_SENIOR;
+			step++;
+			if (step === 1) return p.read;
+			if (step !== 2) return null;
+			after.room = roomForWhatWasLearnedProblem(f.promoteAtTokens, meterOf(turn));
+			if (after.room) return failure.repeats = true, null;
+			return whatWasLearnedForGrounding(f, meterOf(turn), mine, p, after);
+		};
+		const c = await run(trunkArgs(g.trunk, f.model), readDir, g.trunk, fill(p.grounding, values), next, f.groundingTimeLimitMinutes * minute, { check });
 		overhead(c.usage);
 		if (mine !== epoch) return false;
 		if (!c.ok) {
@@ -24712,9 +25585,7 @@ function createExpert(o) {
 		}
 		g.model = c.model ?? f.model;
 		g.last = await lastTurn(g.trunk);
-		const room = c.turns.length < 2 ? null : notesRoomProblem(f.promoteAtTokens, meterOf(c.turns.at(-1)));
-		if (room) failure.repeats = true;
-		const problem = (windowed ? null : check(g.model)) ?? (c.turns.length < 2 ? "its grounding ended before its second turn" : room);
+		const problem = (windowed ? null : check(g.model)) ?? (c.turns.length < 2 ? "its grounding ended before its second turn" : after.room);
 		g.meter = c.turns.length ? meterOf(c.turns.at(-1)) : 0;
 		g.groundingTokens = g.meter;
 		if (problem) {
@@ -24722,6 +25593,12 @@ function createExpert(o) {
 			return false;
 		}
 		const index = Object.fromEntries([...c.reads].map((file) => [file, commit]));
+		g.pickedUpTo = { ...after.carried?.upTo ?? whatWasLearned.lastReceived() };
+		const carried = after.carried?.things ?? [];
+		if (carried.length) {
+			g.addedToItsTrunk = carried.map(addedOf);
+			for (const t of carried) for (const x of t.files) if (x.commit && !Object.hasOwn(index, x.path)) index[x.path] = commit;
+		}
 		indexes.set(g.n, index);
 		await saveIndex(g.n, index);
 		say("grounding", {
@@ -24731,10 +25608,174 @@ function createExpert(o) {
 			model: g.model,
 			meter: g.meter,
 			cost: Math.round(weighted(c.usage, s)),
-			ms: now() - started
+			ms: now() - started,
+			...carried.length && { carried: carried.length }
 		});
 		await save();
 		return prove(g, f, s, commit, mine);
+	}
+	async function whatWasLearnedForGrounding(f, meterAfterTwo, mine, p, after) {
+		await whatWasLearned.caughtUp(minute);
+		const upTo = whatWasLearned.lastReceived();
+		after.carried = {
+			things: [],
+			upTo
+		};
+		if (mine !== epoch || stopped) return null;
+		const headroom = f.promoteAtTokens - meterAfterTwo - 1e4;
+		let left = Math.min(limitOf(f), Math.floor(headroom / 2));
+		const candidates = whatWasLearned.newestFirst();
+		const changed = await changedSince(candidates);
+		const fits = [];
+		for (const t of candidates) {
+			if (filesChangedSince(t, changed)) continue;
+			const n = tokensOfAll([t]);
+			if (n > left) break;
+			left -= n;
+			fits.unshift(t);
+		}
+		after.carried = {
+			things: fits,
+			upTo
+		};
+		if (!fits.length) return null;
+		return fill(p.groundingWhatWasLearned, { items: thingsText(fits, () => false) });
+	}
+	async function changedSince(things) {
+		const out = /* @__PURE__ */ new Map();
+		for (const [commit, files] of filesByCommit(things)) out.set(commit, await checkout.changed(Object.fromEntries([...files].map((x) => [x, commit]))));
+		return out;
+	}
+	const addedOf = (t) => ({
+		id: t.id,
+		firstLine: firstLineOf(t.text),
+		...t.expertRecordId && t.arrivalNumber !== void 0 && {
+			expertRecordId: t.expertRecordId,
+			arrivalNumber: t.arrivalNumber
+		}
+	});
+	function carryNow(g, d18, changed) {
+		const { things, upTo } = whatWasLearned.notPickedUp(g);
+		const held = new Set(g.addedToItsTrunk.map((x) => x.id));
+		const removed = whatWasLearned.removed();
+		const all = /* @__PURE__ */ new Map();
+		for (const t of [...d18 ? additions.beingAdded(g.trunk) : [], ...things]) if (!held.has(t.id) && !removed.has(t.id) && !all.has(t.id)) all.set(t.id, t);
+		let list = [...all.values()];
+		if (tokensOfAll(list) > limitOf(file)) list = newestWithin(list, limitOf(file));
+		return {
+			things: list,
+			upTo,
+			changed
+		};
+	}
+	function removedText(g, p) {
+		const removed = whatWasLearned.removed();
+		const held = g.addedToItsTrunk.filter((x) => removed.has(x.id));
+		if (!held.length) return "";
+		return fill(p.removed, { items: held.map((x) => `- ${x.firstLine || removed.get(x.id) || x.id}`).join("\n") }) + "\n\n";
+	}
+	const toldCommits = (things) => Object.fromEntries(things.flatMap((t) => t.files.flatMap((x) => x.commit ? [[x.path, x.commit]] : [])));
+	function moveUpTo(g, upTo) {
+		for (const [r, n] of Object.entries(upTo)) g.pickedUpTo[r] = Math.max(g.pickedUpTo[r] ?? 0, n);
+	}
+	async function recordFilesOf(g, things, changed, commit) {
+		const index = await indexOf(g.n);
+		let more = false;
+		for (const t of things) for (const x of t.files) {
+			if (!x.commit || Object.hasOwn(index, x.path)) continue;
+			index[x.path] = changed.get(x.commit)?.has(x.path) !== false ? x.commit : commit;
+			more = true;
+		}
+		if (more) await saveIndex(g.n, index);
+	}
+	function addToTrunk(g, things, upTo, changed, commit) {
+		return additions.add(g.trunk, things, () => gate.closed(async () => {
+			if (stopped || g.state !== "junior" || !await trusted(g)) return false;
+			const held = new Set(g.addedToItsTrunk.map((x) => x.id));
+			const removed = whatWasLearned.removed();
+			const adding = things.filter((t) => !held.has(t.id) && !removed.has(t.id));
+			if (!adding.length) {
+				moveUpTo(g, upTo);
+				await save();
+				return true;
+			}
+			appending++;
+			appendsStarted++;
+			try {
+				const p = await loadExpertPrompts(o.appDir);
+				const before = g.last ?? null;
+				const text = fill(p.whatWasLearned, { items: thingsText(adding, (t) => filesChangedSince(t, changed)) });
+				const c = await run(appendArgs(g.trunk, g.model), readDir, g.trunk, text, trunkNext([]), file.forkTimeLimitMinutes * minute, {});
+				overhead(c.usage);
+				if (!await onlyOurs(g.trunk, before, [text, "ask-senior isn't available here; answer from your own context"])) {
+					retireChanged(g);
+					return false;
+				}
+				const last = await lastTurn(g.trunk);
+				if (!c.ok) {
+					g.last = last;
+					log(`couldn't add what was learned to generation ${g.n}'s trunk: ${c.failure.detail}`);
+					if (c.failure.kind === "compacted" || c.failure.kind === "disallowed") brokeGeneration(g, c.failure.kind === "compacted" ? "its trunk compacted" : c.failure.detail);
+					else await save();
+					return false;
+				}
+				g.last = last;
+				g.meter = meterOf(c.turns.at(-1));
+				g.addedToItsTrunk.push(...adding.map(addedOf));
+				moveUpTo(g, upTo);
+				await recordFilesOf(g, adding, changed, commit);
+				await save();
+				return true;
+			} finally {
+				appending--;
+			}
+		}));
+	}
+	async function keepWhatItLearned(q, learned, asked, index, commit, junior, line) {
+		const named = filesNamedIn(learned);
+		const firstLine = firstLineOf(learned);
+		if (!named.some((f) => asked.reads.has(f) || Object.hasOwn(asked.seniorCommits, f))) {
+			line.learned = "not added: no file it names was read for it";
+			log(`didn't add what ${q.id}'s fork learned: none of the files it names was read for it ("${firstLine}")`);
+			return null;
+		}
+		const files = [];
+		for (const rel of named) {
+			if (files.length >= 50 || files.some((x) => x.path === rel) || !AreaPathSchema.safeParse(rel).success) continue;
+			const at = asked.reads.has(rel) ? commit : asked.seniorCommits[rel] ?? index[rel];
+			files.push({
+				path: rel,
+				...at && { commit: at }
+			});
+		}
+		const thing = {
+			id: randomUUID(),
+			text: learned,
+			files,
+			learnedAt: new Date(now()).toISOString(),
+			generation: junior.n,
+			firstLine
+		};
+		if (!files.length) {
+			log(`what ${q.id}'s fork learned names no file the protocol takes, so it is added to its trunk only ("${firstLine}")`);
+			return {
+				thing,
+				kept: false
+			};
+		}
+		await whatWasLearned.keepBeforeAdding(thing);
+		return {
+			thing,
+			kept: true
+		};
+	}
+	async function addWhatWaitedAtStart(things) {
+		const j = gen("junior");
+		if (!j || !things.length || !await prepare()) return;
+		log(`adds to generation ${j.n}'s trunk what ${things.length} of its forks learned before the runner stopped`);
+		const commit = await checkout.head();
+		await addToTrunk(j, things, {}, await changedSince(things), commit);
+		whatWasLearned.additionEnded(things.map((t) => t.id));
 	}
 	async function prove(g, f, s, commit, mine) {
 		proving = true;
@@ -24808,6 +25849,7 @@ function createExpert(o) {
 			saved.fingerprint = fp;
 			retries = 0;
 			promotionBlocked = false;
+			catchingUp = false;
 			await save();
 			if (senior) discardIfDone(senior);
 			if (junior) say("promotion", {
@@ -24827,11 +25869,12 @@ function createExpert(o) {
 		}
 		g.state = "junior";
 		saved.fingerprint = fp;
-		saved.version = 2;
+		saved.version = 3;
 		saved.setUpFromExpertRecord = true;
 		migrating = false;
 		retries = 0;
 		promotionBlocked = false;
+		catchingUp = false;
 		await save();
 		for (const x of old) discardIfDone(x);
 		say("promotion", {
@@ -24845,24 +25888,31 @@ function createExpert(o) {
 	function checkPromotion() {
 		const j = gen("junior");
 		if (!j || groundingRun || promotionBlocked || stopped) return;
-		if (j.meter < file.promoteAtTokens || j.notes < 1) return;
-		log(`generation ${j.n} is at ${j.meter} tokens with ${j.notes} learned notes, so a new generation grounds`);
+		const added = j.addedToItsTrunk.length + (j.addedBeforeEachHadAnId ?? 0);
+		if (j.meter < file.promoteAtTokens || added < 1) return;
+		log(`generation ${j.n} is at ${j.meter} tokens with ${added} things learned added to its trunk, so a new generation grounds`);
 		ground();
 	}
-	/** One question on a fork of `junior`, asking `senior` when its reply asks: the junior's final reply. */
+	const forkAt = (g) => noResumeAt || typeof g.last !== "string" ? null : g.last;
+	function resumeAtRefused(c, at) {
+		if (c.ok || at === null || !refusedResumeAt(c.failure.detail)) return false;
+		noResumeAt = true;
+		log("this Claude Code doesn't take --resume-session-at, so from now on its forks wait for additions to the junior's trunk to end");
+		return true;
+	}
+	/**
+	* One question on a fork of `junior`, asking `senior` when its reply asks: the junior's final reply.
+	* With `carries`, its question carries what the junior hasn't picked up of what was learned
+	* elsewhere (D7): git is asked about their files first, at no token cost.
+	*/
 	async function askFork(a) {
 		const p = await loadExpertPrompts(o.appDir);
 		const changedFiles = await checkout.changed(await indexOf(a.junior.n));
-		const first = fill(p.question, {
-			id: a.id,
-			role: a.senior ? p.roleJunior : p.roleFirst,
-			freshness: freshnessText(changedFiles),
-			question: a.question
-		});
+		const changed = a.carries ? await changedSince([...whatWasLearned.notPickedUp(a.junior).things, ...forkAt(a.junior) !== null ? additions.beingAdded(a.junior.trunk) : []]) : /* @__PURE__ */ new Map();
 		let usage = zero();
 		let asks = 0;
 		let askedSenior = false;
-		const seniorStamps = {};
+		const seniorCommits = {};
 		const next = async (turn) => {
 			const asked = parseReply(turn.text).askSenior;
 			if (asked === null) return null;
@@ -24875,14 +25925,31 @@ function createExpert(o) {
 			const said = await askSenior(a.senior, asked, a.deadline, a.commit, a.kids, p);
 			usage = add(usage, said.usage);
 			if (!said.answer) return SENIOR_FAILED;
-			Object.assign(seniorStamps, said.stamps);
+			Object.assign(seniorCommits, said.commits);
 			return fill(p.seniorAnswer, {
 				answer: said.answer,
 				cited: said.cited
 			});
 		};
-		if (a.junior.state === "junior") await gate.opened();
-		const c = await run(expertForkArgs(a.junior.trunk, a.junior.model), readDir, a.junior.trunk, first, next, Math.max(1, a.deadline - now()), {}, a.kids);
+		if (a.junior.state === "junior" && forkAt(a.junior) === null) await gate.opened();
+		const at = forkAt(a.junior);
+		const carry = a.carries ? carryNow(a.junior, at !== null, changed) : {
+			things: [],
+			upTo: {},
+			changed
+		};
+		const learnedElsewhere = carry.things.length ? fill(p.learnedElsewhere, { items: thingsText(carry.things, (t) => filesChangedSince(t, changed)) }) + "\n\n" : "";
+		const first = fill(p.question, {
+			id: a.id,
+			role: a.senior ? p.roleJunior : p.roleFirst,
+			freshness: freshnessText(changedFiles),
+			removed: removedText(a.junior, p),
+			learnedElsewhere,
+			question: a.question
+		});
+		if (carry.things.length) log(`question ${a.id}: carried ${carry.things.length} thing${carry.things.length === 1 ? "" : "s"} learned elsewhere`);
+		const c = await run(expertForkArgs(a.junior.trunk, a.junior.model, at), readDir, a.junior.trunk, first, next, Math.max(1, a.deadline - now()), {}, a.kids);
+		if (resumeAtRefused(c, at)) return askFork(a);
 		usage = add(usage, c.usage);
 		const text = c.turns.at(-1)?.text ?? "";
 		const base = {
@@ -24890,7 +25957,8 @@ function createExpert(o) {
 			reads: c.reads,
 			explored: c.explored,
 			askedSenior,
-			seniorStamps,
+			seniorCommits,
+			carry,
 			text
 		};
 		if (!c.ok) return {
@@ -24916,7 +25984,7 @@ function createExpert(o) {
 		if (!await trusted(senior)) return {
 			answer: null,
 			cited: "",
-			stamps: {},
+			commits: {},
 			usage: zero()
 		};
 		const index = await indexOf(senior.n);
@@ -24924,30 +25992,34 @@ function createExpert(o) {
 			id: "for your junior",
 			role: p.roleSenior,
 			freshness: freshnessText(await checkout.changed(index)),
+			removed: removedText(senior, p),
+			learnedElsewhere: "",
 			question
 		});
 		let refused = false;
-		const c = await run(expertForkArgs(senior.trunk, senior.model), readDir, senior.trunk, first, (turn) => !refused && parseReply(turn.text).askSenior !== null ? (refused = true, NO_SENIOR) : null, Math.max(1, deadline - now()), {}, kids);
+		const at = forkAt(senior);
+		const c = await run(expertForkArgs(senior.trunk, senior.model, at), readDir, senior.trunk, first, (turn) => !refused && parseReply(turn.text).askSenior !== null ? (refused = true, NO_SENIOR) : null, Math.max(1, deadline - now()), {}, kids);
+		if (resumeAtRefused(c, at)) return askSenior(senior, question, deadline, commit, kids, p);
 		if (!c.ok) {
 			log(`its senior, generation ${senior.n}, couldn't answer: ${c.failure.detail}`);
 			if (c.failure.kind === "compacted" || c.failure.kind === "disallowed") brokeGeneration(senior, c.failure.detail);
 			return {
 				answer: null,
 				cited: "",
-				stamps: {},
+				commits: {},
 				usage: c.usage
 			};
 		}
 		const r = parseReply(c.turns.at(-1)?.text ?? "");
 		const answer = (r.answer ?? c.turns.at(-1)?.text ?? "").trim();
-		const stamped = stamp(await existing(r.cited, r.dropped), c.reads, {}, index, commit);
-		const stamps = Object.fromEntries(stamped.flatMap((x) => x.commit ? [[x.file, x.commit]] : []));
-		const since = await checkout.changed(Object.fromEntries(Object.entries(stamps).filter(([, c]) => c !== commit)));
-		const cited = stamped.map((x) => `- ${x.cited} (${x.commit === null ? "commit unknown" : `read at ${short(x.commit)}${since.has(x.file) ? ", changed since: re-read it before relying on it" : ""}`})`).join("\n");
+		const withCommits = withCommitsRead(await existing(r.cited, r.dropped), c.reads, {}, index, commit);
+		const commits = Object.fromEntries(withCommits.flatMap((x) => x.commit ? [[x.file, x.commit]] : []));
+		const since = await checkout.changed(Object.fromEntries(Object.entries(commits).filter(([, c]) => c !== commit)));
+		const cited = withCommits.map((x) => `- ${x.cited} (${x.commit === null ? "commit unknown" : `read at ${short(x.commit)}${since.has(x.file) ? ", changed since: re-read it before relying on it" : ""}`})`).join("\n");
 		return {
 			answer: answer || null,
 			cited: cited || "none",
-			stamps,
+			commits,
 			usage: c.usage
 		};
 	}
@@ -24996,7 +26068,7 @@ function createExpert(o) {
 				ground();
 				continue;
 			}
-			if (st !== "starting") return st;
+			if (st !== "starting" && !(st === "ready" && catchingUp)) return st;
 			const left = deadline - now();
 			if (left <= 0) return "timeout";
 			await new Promise((go) => {
@@ -25016,7 +26088,7 @@ function createExpert(o) {
 			outcome: "failed",
 			senior: "no",
 			explored: "no",
-			note: "none"
+			learned: "none"
 		};
 		const failed = (cause, refusal) => {
 			say("error", {
@@ -25028,6 +26100,11 @@ function createExpert(o) {
 		try {
 			let ready = await whenReady();
 			while (ready === "ready" && !await trusted(gen("junior"))) ready = await whenReady();
+			if (ready === "ready" && whatWasLearned.catchingUpInPages()) {
+				await whatWasLearned.caughtUp(CAUGHT_UP_FOR_A_QUESTION_MS);
+				beforeQuestion();
+				if (catchingUp) ready = await whenReady();
+			}
 			if (ready === "stopped") return deliver(q, unknown());
 			if (ready === "failed") {
 				const why = {
@@ -25040,9 +26117,9 @@ function createExpert(o) {
 			if (ready === "timeout") {
 				say("error", {
 					id: q.id,
-					cause: "it is still grounding"
+					cause: catchingUp ? "it is catching up on what its other instances learned" : "it is still grounding"
 				});
-				return deliver(q, notYet("the expert is still grounding its first junior"));
+				return deliver(q, notYet(catchingUp ? CATCHING_UP : "the expert is still grounding its first junior"));
 			}
 			const s = await o.settings();
 			const j = gen("junior");
@@ -25092,7 +26169,7 @@ function createExpert(o) {
 							await reservation.cancel();
 							return failed("its junior failed while the question waited", forkFailed("the expert's junior failed; a new one is grounding"));
 						}
-						const notNow = resetPending ? "the expert's checkout is being reset" : !await trusted(junior) ? "the expert's junior is being replaced" : null;
+						const notNow = resetPending ? "the expert's checkout is being reset" : catchingUp ? CATCHING_UP : !await trusted(junior) ? "the expert's junior is being replaced" : null;
 						if (notNow) {
 							await reservation.cancel();
 							say("error", {
@@ -25113,7 +26190,8 @@ function createExpert(o) {
 							deadline,
 							commit,
 							kids,
-							onSenior: () => q.onSenior?.()
+							onSenior: () => q.onSenior?.(),
+							carries: true
 						});
 						for (const kid of kids) killTree(kid);
 						freeSlot();
@@ -25140,14 +26218,14 @@ function createExpert(o) {
 						const body = (r.answer ?? asked.text).trim();
 						if (!body) return failed("the answer was empty", forkFailed("the expert's answer was empty"));
 						const index = await indexOf(junior.n);
-						const stamped = stamp(await existing(cited, r.dropped), asked.reads, asked.seniorStamps, index, commit);
-						const learnt = stamped.filter((x) => x.commit !== null && index[x.file] !== x.commit);
-						if (learnt.length) {
-							for (const x of learnt) index[x.file] = x.commit;
+						const withCommits = withCommitsRead(await existing(cited, r.dropped), asked.reads, asked.seniorCommits, index, commit, toldCommits(asked.carry.things));
+						const newer = withCommits.filter((x) => x.commit !== null && index[x.file] !== x.commit);
+						if (newer.length) {
+							for (const x of newer) index[x.file] = x.commit;
 							await saveIndex(junior.n, index);
 						}
-						const since = await checkout.changed(Object.fromEntries(stamped.flatMap((x) => x.commit && x.commit !== commit ? [[x.file, x.commit]] : [])));
-						const answer = answerText(body, citationBlock(stamped, saved.branch, commit, since));
+						const since = await checkout.changed(Object.fromEntries(withCommits.flatMap((x) => x.commit && x.commit !== commit ? [[x.file, x.commit]] : [])));
+						const answer = answerText(body, citationBlock(withCommits, saved.branch, commit, since));
 						const matched = await o.scan(answer);
 						if (matched) {
 							log(`refused its answer to ${q.id}: it matches the secret pattern "${matched}"`);
@@ -25162,13 +26240,19 @@ function createExpert(o) {
 								branch: saved.branch
 							});
 						}
-						if (r.learned && (asked.askedSenior || asked.explored)) {
-							const files = noteFiles(r.learned);
-							const first = r.learned.split(/\r?\n/)[0].slice(0, 200);
-							if (!files.some((f) => asked.reads.has(f) || Object.hasOwn(asked.seniorStamps, f))) log(`didn't append the learned note from ${q.id}: none of the files it names was read for it ("${first}")`);
-							else if (await append(junior, r.learned)) {
-								line.note = "appended";
-								log(`appended the learned note from ${q.id} to generation ${junior.n}: sha256 ${createHash("sha256").update(r.learned).digest("hex").slice(0, 12)}, "${first}"`);
+						const own = r.learned && (asked.askedSenior || asked.explored) ? await keepWhatItLearned(q, r.learned, asked, index, commit, junior, line) : null;
+						const adding = [...asked.carry.things, ...own ? [own.thing] : []];
+						if (!adding.length) {
+							moveUpTo(junior, asked.carry.upTo);
+							await save();
+						} else {
+							const changedNow = own ? new Map([...asked.carry.changed, ...await changedSince([own.thing])]) : asked.carry.changed;
+							const added = await addToTrunk(junior, adding, asked.carry.upTo, changedNow, commit);
+							const staying = !!own?.kept && whatWasLearned.staying(own.thing.id);
+							if (own?.kept) whatWasLearned.additionEnded([own.thing.id]);
+							if (own && added && junior.addedToItsTrunk.some((x) => x.id === own.thing.id)) {
+								line.learned = staying ? "kept here only" : "added";
+								log(`added what ${q.id}'s fork learned to generation ${junior.n}'s trunk: ${own.thing.id}, "${own.thing.firstLine}"`);
 							}
 						}
 					});
@@ -25186,39 +26270,6 @@ function createExpert(o) {
 			say("question", line);
 		}
 	}
-	function append(g, note) {
-		const done = (appends.get(g.trunk) ?? Promise.resolve()).then(() => gate.closed(async () => {
-			if (stopped || g.state !== "junior" || !await trusted(g)) return false;
-			appending++;
-			appendsStarted++;
-			try {
-				const p = await loadExpertPrompts(o.appDir);
-				const before = g.last ?? null;
-				const text = fill(p.note, { note });
-				const c = await run(appendArgs(g.trunk, g.model), readDir, g.trunk, text, trunkNext([]), file.forkTimeLimitMinutes * minute, {});
-				overhead(c.usage);
-				if (!await onlyOurs(g.trunk, before, [text, "ask-senior isn't available here; answer from your own context"])) {
-					retireChanged(g);
-					return false;
-				}
-				g.last = await lastTurn(g.trunk);
-				if (!c.ok) {
-					log(`couldn't append a learned note to generation ${g.n}: ${c.failure.detail}`);
-					if (c.failure.kind === "compacted" || c.failure.kind === "disallowed") brokeGeneration(g, c.failure.kind === "compacted" ? "its trunk compacted" : c.failure.detail);
-					else await save();
-					return false;
-				}
-				g.meter = meterOf(c.turns.at(-1));
-				g.notes++;
-				await save();
-				return true;
-			} finally {
-				appending--;
-			}
-		}));
-		appends.set(g.trunk, done.catch(() => false));
-		return done.catch((err) => (log(`couldn't append a learned note: ${err.message}`), false));
-	}
 	async function reset(oldRepo, generations) {
 		epoch++;
 		killAll();
@@ -25230,7 +26281,7 @@ function createExpert(o) {
 			for (const g of generations) if (!discarded.has(g.trunk)) discarded.add(g.trunk), await discard(g);
 		});
 		saved = {
-			version: 2,
+			version: 3,
 			setUpFromExpertRecord: true,
 			fingerprint: "",
 			repo: file.repo,
@@ -25238,6 +26289,7 @@ function createExpert(o) {
 			generations: []
 		};
 		migrating = false;
+		catchingUp = false;
 		indexes.clear();
 		await save();
 		checkout = makeCheckout(file.repo);
@@ -25323,10 +26375,34 @@ function createExpert(o) {
 		changed();
 		if (wasJunior && !stopped) ground();
 	}
+	function beforeQuestion() {
+		const j = gen("junior");
+		if (!j || stopped) return;
+		const mayStart = !promotionBlocked && !retryTimer;
+		const { things } = whatWasLearned.notPickedUp(j);
+		const tokens = tokensOfAll(things);
+		if (tokens > limitOf(file)) {
+			if (!mayStart) return;
+			if (!catchingUp) log(`${things.length} things learned on other computers, about ${tokens} tokens, are more than one question carries (${limitOf(file)}), so its questions wait for a new generation that carries them`);
+			catchingUp = true;
+			if (!groundingRun) ground("more was learned on other computers than one question can carry");
+			return;
+		}
+		const removed = whatWasLearned.removed();
+		if (mayStart && !groundingRun && j.addedToItsTrunk.some((x) => removed.has(x.id))) ground("something it holds was removed on the expert's card");
+	}
 	return {
 		hosted,
 		async start() {
 			ledger = await openLedger(path.join(o.dir, "ledger.json"));
+			await whatWasLearned.load();
+			whatWasLearned.onRebuilt((expertRecordId, pickedUpTo) => {
+				for (const g of saved.generations) {
+					if (g.state !== "junior" && g.state !== "senior" && g.state !== "grounding") continue;
+					g.pickedUpTo[expertRecordId] = pickedUpTo(g.pickedUpTo[expertRecordId] ?? 0, new Set(g.addedToItsTrunk.map((x) => x.id)));
+				}
+				save();
+			});
 			const was = await readState(o.dir);
 			if (was && was.repo !== file.repo) {
 				for (const g of was.generations) o.onTrunk?.(g.trunk);
@@ -25338,7 +26414,7 @@ function createExpert(o) {
 				saved = was;
 				migrating = was.version === 1 && was.generations.some((g) => g.state === "junior" || g.state === "senior");
 				if (was.version === 1 && !migrating) Object.assign(saved, {
-					version: 2,
+					version: 3,
 					setUpFromExpertRecord: true
 				});
 				for (const g of saved.generations) {
@@ -25351,8 +26427,11 @@ function createExpert(o) {
 			}
 			changed();
 			if (migrating) log("its state is from before each computer kept its own instance, so a new generation grounds to take over from its old ones");
+			const junior = gen("junior");
+			const waited = whatWasLearned.toAddAtStart(junior?.n ?? null, new Set(junior?.addedToItsTrunk.map((x) => x.id) ?? []));
 			if (!gen("junior") || saved.fingerprint !== fingerprint(file) || migrating) ground();
 			else prepare().then(checkPromotion);
+			if (waited.length) addWhatWaitedAtStart(waited).catch((err) => log(`couldn't add what its forks learned before the runner stopped: ${err.message}`));
 		},
 		update(f) {
 			const old = file;
@@ -25388,6 +26467,8 @@ function createExpert(o) {
 				if (!finished.has(q.id)) deliver(q, forkFailed("the runner failed"));
 			}).finally(() => questions.delete(q.id));
 		},
+		beforeQuestion,
+		catchingUp: () => catchingUp,
 		retryNow() {
 			if (stopped) return;
 			clearRetry();
@@ -25405,6 +26486,7 @@ function createExpert(o) {
 			for (const wake of [...waiters]) wake();
 		},
 		async remove() {
+			whatWasLearned.forget();
 			stopped = true;
 			epoch++;
 			clearRetry();
@@ -25450,6 +26532,20 @@ function createExperts(o) {
 	const healths = /* @__PURE__ */ new Map();
 	const loading = [];
 	const watchers = [];
+	const learned = /* @__PURE__ */ new Map();
+	let binding = null;
+	const whatWasLearned = (key) => {
+		let w = learned.get(key);
+		if (!w) {
+			learned.set(key, w = createWhatWasLearnedForOneExpert({
+				dir: dir(key),
+				log: (t) => o.log(`expert ${key}: ${t}`),
+				...o.now && { now: o.now }
+			}));
+			if (binding) w.bind(binding(key));
+		}
+		return w;
+	};
 	const changed = () => listeners.forEach((l) => l());
 	const health = (key) => {
 		let h = healths.get(key);
@@ -25563,7 +26659,8 @@ function createExperts(o) {
 			health: health(key),
 			onChange: changed,
 			onTrunk: (trunk) => trunks.add(trunk),
-			onTriesRanOut: (ran) => triesListeners.forEach((l) => l(key, ran))
+			onTriesRanOut: (ran) => triesListeners.forEach((l) => l(key, ran)),
+			whatWasLearned: whatWasLearned(key)
 		});
 		s.running = {
 			key,
@@ -25620,6 +26717,8 @@ function createExperts(o) {
 				s.stoppedExpert = null;
 				s.expertFile = null;
 				s.instanceFile = null;
+				learned.get(key)?.forget();
+				learned.delete(key);
 				if (expert) await expert.remove();
 				else await fs$1.promises.rm(dir(key), {
 					recursive: true,
@@ -25635,6 +26734,12 @@ function createExperts(o) {
 		instanceFilePath,
 		dir,
 		isExpertSession: (sessionId) => trunks.has(sessionId),
+		whatWasLearned,
+		bindWhatWasLearned(b) {
+			binding = b;
+			for (const [key, w] of learned) w.bind(b(key));
+		},
+		tiesMayHaveChanged: () => learned.forEach((w) => w.checkTies()),
 		idle: () => [...[...slots.values()].flatMap((s) => s.running ? [s.running.expert] : []), ...stopped].every((e) => e.idle()),
 		close() {
 			for (const w of watchers) w.stop();
@@ -25644,6 +26749,234 @@ function createExperts(o) {
 }
 /** Whether a session is an expert's, to keep it off the floor: in the experts' folder or experts/ of a folder `clonesFolder` has named, or a trunk of one (while `experts` is made). */
 const expertIgnored = (expertsDir, experts, clonesFolders = []) => (id, cwd) => cwd !== null && [expertsDir, ...clonesFolders.map((f) => path.join(f, "experts"))].some((dir) => inside(dir, cwd) !== null) || (experts()?.isExpertSession(id) ?? false);
+//#endregion
+//#region src/runner/what-was-learned-before-it-leaves.ts
+/** What is checked of a thing learned: its text, then each file it names. */
+const checkedText = (thing) => [thing.text, ...thing.files.map((f) => f.path)].join("\n");
+function createCheckBeforeItLeaves(o) {
+	return async (thing) => {
+		const text = checkedText(thing);
+		const secret = scan(text, await o.secretPatterns());
+		if (secret === "unreadable patterns: everything is held") return { unreadable: true };
+		if (secret) return {
+			matched: "secret",
+			pattern: secret
+		};
+		const personal = scan(text, await o.personalDataPatterns());
+		if (personal === "unreadable patterns: everything is held") return { unreadable: true };
+		if (personal) return {
+			matched: "personal-data",
+			pattern: personal
+		};
+		return { ok: true };
+	};
+}
+function createWhatWasLearnedLink(o) {
+	const { server } = o;
+	const now = o.now ?? Date.now;
+	let connection = 0;
+	let shares = null;
+	let listed = false;
+	let stopped = false;
+	const asks = /* @__PURE__ */ new Map();
+	const sentAt = /* @__PURE__ */ new Map();
+	const unanswered = /* @__PURE__ */ new Set();
+	const refusedHere = /* @__PURE__ */ new Set();
+	const saidUnreadable = /* @__PURE__ */ new Set();
+	let sending = Promise.resolve();
+	const sendFor = (key, m) => !stopped && shares === true && listed && o.send(m);
+	function ask(key, expertRecordId) {
+		const a = asks.get(expertRecordId);
+		if (a && (a.state === "asking" || a.state === "dropping")) return void (a.again = true);
+		if (a?.state === "stopped") return;
+		const after = o.whatWasLearned(key).askAfter(expertRecordId);
+		if (!sendFor(key, {
+			type: "expert-learned-wanted-after",
+			v: 1,
+			key,
+			expertRecordId,
+			...after
+		})) return;
+		asks.set(expertRecordId, {
+			key,
+			state: "asking",
+			inPages: false,
+			again: false,
+			asksAgain: a?.asksAgain ?? 0
+		});
+	}
+	const tied = () => o.instances.tiedRecords(server).filter((r) => o.whatWasLearned(r.key).loaded());
+	function askWhatIsDue() {
+		for (const { key, expertRecordId } of tied()) {
+			const a = asks.get(expertRecordId);
+			if (!a || a.state === "refused") ask(key, expertRecordId);
+		}
+	}
+	const sendable = (k, again) => {
+		const at = sentAt.get(k);
+		return at === void 0 || now() - at >= 12e4 || again && refusedHere.has(k);
+	};
+	async function sendNow(again) {
+		const mine = connection;
+		if (stopped || shares !== true || !listed) return;
+		for (const { key, expertRecordId } of tied()) {
+			const w = o.whatWasLearned(key);
+			for (const t of w.waitingFor(expertRecordId)) {
+				if (mine !== connection || stopped) return;
+				if (unanswered.size >= 50) return;
+				const k = `${expertRecordId}\n${t.id}`;
+				if (!sendable(k, again)) continue;
+				const checked = await o.check(t);
+				if (mine !== connection) return;
+				if ("unreadable" in checked) {
+					if (!saidUnreadable.has(key)) o.log(`expert ${key}: the secret or personal-data patterns can't be read, so nothing it learned goes to ${server} until they can`);
+					saidUnreadable.add(key);
+					break;
+				}
+				saidUnreadable.delete(key);
+				if ("matched" in checked) {
+					const why = `it matches the ${checked.matched} pattern "${checked.pattern}"`;
+					w.staysOnThisComputer(t.id, checked.pattern);
+					o.health(key).say("learned", {
+						id: t.id,
+						kept: "on this computer only",
+						why
+					});
+					o.log(`expert ${key}: what it learned, ${t.id}, stays on this computer: ${why}`);
+					continue;
+				}
+				if (!sendFor(key, {
+					type: "expert-instance-learned",
+					v: 1,
+					key,
+					expertRecordId,
+					id: t.id,
+					text: t.text,
+					files: t.files,
+					learnedAt: t.learnedAt
+				})) return;
+				sentAt.set(k, now());
+				unanswered.add(k);
+				refusedHere.delete(k);
+			}
+		}
+	}
+	const sendWaiting = (again = false) => {
+		sending = sending.then(() => sendNow(again)).catch((err) => o.log(`what experts learned, to ${server}: ${err.message}`));
+	};
+	o.recordLink.onDirectory(() => {
+		if (shares !== null) return;
+		shares = o.recordLink.directory()?.sharesWhatExpertInstancesLearn === true;
+		if (shares) return;
+		const words = `${server} doesn't share what instances of experts learn yet: update its Isoplan server`;
+		o.log(words);
+		for (const { key } of o.instances.tiedRecords(server)) o.health(key).say("learned", {
+			server,
+			shared: "no",
+			why: words
+		});
+	});
+	o.recordLink.onListingSent(() => {
+		if (shares !== true || stopped) return;
+		listed = true;
+		askWhatIsDue();
+		sendWaiting(true);
+	});
+	const timer = setInterval(() => {
+		if (shares !== true || !listed) return;
+		askWhatIsDue();
+		sendWaiting(true);
+	}, o.checkMs);
+	timer.unref?.();
+	function fresh() {
+		connection++;
+		shares = null;
+		listed = false;
+		asks.clear();
+		sentAt.clear();
+		unanswered.clear();
+		refusedHere.clear();
+	}
+	function since(m) {
+		const a = asks.get(m.expertRecordId);
+		if (!a || a.key !== m.key) return o.log(`${server} sent what was learned of record ${m.expertRecordId}, which this connection didn't ask for, so it is left`);
+		if (a.state === "stopped") return;
+		if (a.state === "dropping") {
+			if (m.more) return;
+			a.state = "answered";
+			return ask(a.key, m.expertRecordId);
+		}
+		const got = o.whatWasLearned(a.key).take(m.expertRecordId, server, m);
+		if (typeof got === "object") {
+			a.asksAgain++;
+			a.inPages = false;
+			if (a.asksAgain > 3) {
+				a.state = "stopped";
+				const words = `what ${server} sends of record ${m.expertRecordId} doesn't follow on from what this computer has (${got.askAgain}), after asking again 3 times, so it isn't asked for again until the next connection`;
+				o.log(`expert ${a.key}: ${words}`);
+				o.health(a.key).say("learned", {
+					server,
+					record: m.expertRecordId,
+					asked: "no more",
+					why: words
+				});
+				return;
+			}
+			o.log(`expert ${a.key}: what ${server} sent of record ${m.expertRecordId} doesn't follow on (${got.askAgain}), so it asks again after its own number and chain`);
+			if (m.more) return void (a.state = "dropping");
+			a.state = "answered";
+			return ask(a.key, m.expertRecordId);
+		}
+		a.inPages = got === "in-pages";
+		if (m.more || a.state !== "asking") return;
+		a.state = "answered";
+		if (a.again) {
+			a.again = false;
+			ask(a.key, m.expertRecordId);
+		}
+	}
+	return {
+		take(m) {
+			if (stopped) return;
+			if (m.type === "expert-learned-since") return since(m);
+			if (m.type === "expert-learned-wanted-after-refused") {
+				if (m.reason === "record-gone") {
+					asks.delete(m.expertRecordId);
+					o.log(`expert ${m.key}: ${server} holds no record ${m.expertRecordId} of it any more, so what this computer has of that record goes`);
+					return o.whatWasLearned(m.key).recordGone(m.expertRecordId);
+				}
+				const a = asks.get(m.expertRecordId);
+				if (a) a.state = "refused";
+				return;
+			}
+			const k = `${m.expertRecordId}\n${m.id}`;
+			const outcome = m.outcome === "refused" ? m.reason : m.outcome;
+			if (outcome === "not-an-instance-here") refusedHere.add(k);
+			else unanswered.delete(k);
+			o.whatWasLearned(m.key).answered(m.expertRecordId, m.id, outcome, m.outcome === "kept" ? m.arrivalNumber : void 0);
+			if (outcome !== "not-an-instance-here") sendWaiting();
+		},
+		onOpen: fresh,
+		onClose: fresh,
+		stop() {
+			stopped = true;
+			clearInterval(timer);
+		},
+		catchUp(expertRecordId) {
+			if (stopped || shares === false) return "cannot";
+			const a = asks.get(expertRecordId);
+			if (!a) return "waiting";
+			if (a.state === "answered") return "answered";
+			if (a.state === "stopped") return "cannot";
+			return a.inPages ? "in-pages" : "waiting";
+		},
+		sendWaiting() {
+			if (shares !== true || !listed || stopped) return;
+			askWhatIsDue();
+			sendWaiting();
+		}
+	};
+}
 //#endregion
 //#region src/pipe/server.ts
 const SESSION = /^[\w-]{1,200}$/;
@@ -26683,6 +28016,35 @@ async function worker() {
 		link.onDirectory(() => offers.afterDirectory(office.server));
 		recordLinks.set(office.server, link);
 	});
+	const checkBeforeItLeaves = createCheckBeforeItLeaves({
+		secretPatterns: () => loadPatterns(path.join(appDir, "secret-patterns.json"), path.join(isoplanDir, "secret-patterns.json"), log),
+		personalDataPatterns: () => loadPatterns(path.join(appDir, "personal-data-patterns.json"), path.join(isoplanDir, "personal-data-patterns.json"), log)
+	});
+	const learnedLinks = /* @__PURE__ */ new Map();
+	answering.forEach((office, index) => {
+		const recordLink = recordLinks.get(office.server);
+		const link = createWhatWasLearnedLink({
+			server: office.server,
+			recordLink,
+			instances,
+			whatWasLearned: (key) => hosted.whatWasLearned(key),
+			health: (key) => hosted.health(key),
+			check: checkBeforeItLeaves,
+			send: (m) => live(index)(m),
+			log,
+			checkMs: first.approvedRefreshMinutes * 6e4
+		});
+		recordLink.onWhatWasLearned((m) => link.take(m));
+		learnedLinks.set(office.server, link);
+	});
+	hosted.bindWhatWasLearned((key) => ({
+		tied: () => instances.tiedRecordsOf(key),
+		held: (server) => instances.heldOn(server, key)?.record?.expertRecordId,
+		servers: answering.map((office) => office.server),
+		catchUp: (server, expertRecordId) => learnedLinks.get(server)?.catchUp(expertRecordId) ?? "cannot",
+		waiting: () => learnedLinks.forEach((l) => l.sendWaiting())
+	}));
+	instances.onChange(() => hosted.tiesMayHaveChanged());
 	const expertRights = createExpertRightsOnThisComputer({
 		instances,
 		store: expertRecordsPerOffice,
@@ -26802,6 +28164,7 @@ async function worker() {
 		open: (office, said) => {
 			const { pairing, runner } = answerers[answering.indexOf(office)];
 			const records = recordLinks.get(office.server);
+			const learned = learnedLinks.get(office.server);
 			log(`the runner's worker ${process.pid} is answering for this machine through ${office.server}`);
 			status.opening(office.server);
 			return createLink({
@@ -26819,10 +28182,11 @@ async function worker() {
 					status.opened(office.server);
 					drive.linked(office.server);
 					records.onOpen();
+					learned.onOpen();
 					expertCreationSuggestions.linked(answering.indexOf(office));
 					readPairing(pairingPath(claudeDir)).then((all) => status.email(office.server, pairingEntry(all, office.server, account.id)?.email));
 				},
-				onClose: () => (status.closed(office.server), drive.unlinked(office.server), records.onClose(), expertCreationSuggestions.linked(answering.indexOf(office))),
+				onClose: () => (status.closed(office.server), drive.unlinked(office.server), records.onClose(), learned.onClose(), expertCreationSuggestions.linked(answering.indexOf(office))),
 				onNotWanted: () => (status.stopped(office.server, "not-wanted"), said.notWanted()),
 				onPairingEnded: () => (status.stopped(office.server, "unpaired"), said.unpaired()),
 				hello: {
@@ -26837,7 +28201,8 @@ async function worker() {
 					starts: startPlaces(process.platform, hasOrca, hasDesktop),
 					hiddenStarts: true,
 					canCreateExpertsFromSuggestions: true,
-					expertInstances: true
+					expertInstances: true,
+					sharesWhatExpertInstancesLearn: true
 				}
 			});
 		},
@@ -26854,6 +28219,7 @@ async function worker() {
 	live = links.live;
 	const ended = await links.ended;
 	for (const link of recordLinks.values()) link.stop();
+	for (const link of learnedLinks.values()) link.stop();
 	expertQuestions.close();
 	await expertRecordsPerOffice.written();
 	await reporting.stop();

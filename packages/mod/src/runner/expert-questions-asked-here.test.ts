@@ -9,7 +9,8 @@ import { answeredText, askedText, expertText, exploreMeanwhileText, lateExpertTe
 import { tempRoot } from "../data-layer/fixture.js";
 import type { FromOffice } from "../lines.js";
 import { ANSWER, BASE, C1, until, type Rule } from "./expert-fixture.js";
-import { ADA, ASKING, computer, DEFINITION, directoryOf, entryOf, installedInstance, OTHER_RECORD, readJsonFile, RECORD, SERVER, writeExpertFile, type Computer, type ComputerOptions } from "./expert-stack-fixture.js";
+import { ADA, ASKING, computer, DEFINITION, directoryOf, entryOf, installedInstance, OTHER_RECORD, readJsonFile, RECORD, SERVER, sharingDirectoryOf, writeExpertFile, type Computer, type ComputerOptions } from "./expert-stack-fixture.js";
+import { officeSequence, receivedOf } from "./what-was-learned-fixture.js";
 
 // The empty folder git runs with as its hooks (handoff/take.ts noHooks) is made in the Claude folder: a temp one, never this machine's.
 vi.stubEnv("CLAUDE_CONFIG_DIR", path.join(tempRoot(), "claude"));
@@ -353,6 +354,39 @@ test("this computer's own expert whose key another expert has: the rights of ses
     expect(c.of("expert-set-up-offered")).toEqual([]);
     expect(c.of("expert-record-wanted")).toEqual([]);
     expect(c.of("expert-question")).toEqual([]);
+  } finally {
+    await c.close();
+  }
+});
+
+test("past what one question carries of what other instances learned (the definition's own limit): EXPERT_STARTING at once, its listing stays ready, the old junior takes no fork, and a new generation grounded with the newest things whose files haven't changed answers it", async () => {
+  const third: Rule = { kind: "trunk", text: "Before you, this expert's instances learned", reply: "ready", context: 52000 };
+  const sized = (i: number, commit = C1, file = "src/relay.ts") => ({ text: `Rule or fact: thing ${i} ${"x".repeat(320)}. Files: ${file}`, files: [{ path: file, commit }] });
+  const c = await computer({ rules: [third, ...ANSWERS], before: installedInstance(SERVER, RECORD, {}, { ...DEFINITION, learnedElsewhereTokensPerQuestion: 300 }) });
+  try {
+    c.take(sharingDirectoryOf([entryOf()]));
+    await until(() => c.of("expert-instance-states").at(-1)?.instances[0]?.state === "ready", 30000);
+    await session(c);
+    const seq = officeSequence();
+    seq.serving(c)();
+    c.git.repo.changed = ["src/other.ts"];
+    for (const i of [1, 2, 3, 4]) seq.learned(sized(i));
+    seq.learned(sized(5, "0".repeat(40), "src/other.ts"));
+    c.take(seq.after(0));
+    await until(() => receivedOf(c)?.lastArrivalNumberReceived === 5);
+    const old = c.experts.running("adr")!;
+    expect(old.expert.hosted().state).toBe("ready");
+
+    const mark = c.of("expert-instance-states").length;
+    expect(await ask(c, "toolu_1")).toEqual({ text: expertText("EXPERT_STARTING", about("toolu_1")), code: "EXPERT_STARTING" });
+    expect(c.experts.running("adr")!.expert.hosted().state).toBe("ready");
+    await until(() => asked(c).some((l) => l.question === "toolu_1"), 30000);
+    expect(asked(c).find((l) => l.question === "toolu_1")).toMatchObject({ state: "answered", answer: ANSWERED });
+    const third3 = c.claude().find((l) => l.kind === "trunk" && l.text?.includes("Before you, this expert's instances learned"))!;
+    for (const [i, carried] of [[5, false], [4, true], [3, true], [2, false]] as const) expect(third3.text!.includes(`thing ${i} `)).toBe(carried);
+    const forks = c.claude().filter((l) => l.kind === "fork" && l.turn === 1 && l.text?.includes("Question toolu_1"));
+    expect(forks.map((l) => l.trunk)).toEqual([third3.trunk]);
+    expect(c.of("expert-instance-states").slice(mark).map((m) => m.instances[0]!.state)).toEqual(c.of("expert-instance-states").slice(mark).map(() => "ready"));
   } finally {
     await c.close();
   }

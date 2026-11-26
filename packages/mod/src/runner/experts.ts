@@ -21,6 +21,10 @@
 // - `start()` settles once every file and every state.json is read: from then every recorded trunk
 //   is known to `isExpertSession`, and an expert that can resume its junior is ready. Git and
 //   groundings run in the background.
+// - Each key's record of what its instance learned and was told of (what-was-learned-for-one-expert.ts,
+//   isoplan-app#366) is made here and given to its expert, and bound, once the instances and each
+//   office's link exist, to which records the key's file is tied to (`bindWhatWasLearned`). A key
+//   removed here forgets it, so a new expert of the key starts with nothing of the old one.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -33,6 +37,7 @@ import { expertFileFromRecord, parseExpertInstanceFile, type ExpertInstanceFile 
 import { readExpertRecords } from "./expert-records-file.js";
 import { createExpert, type Expert, type ExpertFailure, type ExpertSettings, type HostedExpert } from "./expert.js";
 import type { RunGit } from "../handoff/git.js";
+import { createWhatWasLearnedForOneExpert, type WhatWasLearnedBinding, type WhatWasLearnedForOneExpert } from "./what-was-learned-for-one-expert.js";
 
 export type { HostedExpert } from "./expert.js";
 
@@ -96,7 +101,13 @@ export interface Experts {
   dir(key: string): string;
   /** A bare uuid of a trunk, any generation. */
   isExpertSession(sessionId: string): boolean;
-  /** No grounding, fork, append or judge running. */
+  /** The key's record of what its instance learned and was told of. */
+  whatWasLearned(key: string): WhatWasLearnedForOneExpert;
+  /** Binds every key's record of what was learned, now and for keys to come. */
+  bindWhatWasLearned(binding: (key: string) => WhatWasLearnedBinding): void;
+  /** The files' ties to records may have changed: each key's record of what was learned looks again. */
+  tiesMayHaveChanged(): void;
+  /** No grounding, fork, addition or judge running. */
   idle(): boolean;
   /** Ends every process tree, the judge's included. */
   close(): void;
@@ -128,6 +139,17 @@ export function createExperts(o: ExpertsOptions): Experts {
   const healths = new Map<string, HealthLog>();
   const loading: Promise<void>[] = [];
   const watchers: ExpertFiles[] = [];
+  const learned = new Map<string, WhatWasLearnedForOneExpert>();
+  let binding: ((key: string) => WhatWasLearnedBinding) | null = null;
+
+  const whatWasLearned = (key: string) => {
+    let w = learned.get(key);
+    if (!w) {
+      learned.set(key, (w = createWhatWasLearnedForOneExpert({ dir: dir(key), log: (t) => o.log(`expert ${key}: ${t}`), ...(o.now && { now: o.now }) })));
+      if (binding) w.bind(binding(key));
+    }
+    return w;
+  };
 
   const changed = () => listeners.forEach((l) => l());
   const health = (key: string) => {
@@ -232,6 +254,7 @@ export function createExperts(o: ExpertsOptions): Experts {
       onChange: changed,
       onTrunk: (trunk) => trunks.add(trunk),
       onTriesRanOut: (ran) => triesListeners.forEach((l) => l(key, ran)),
+      whatWasLearned: whatWasLearned(key),
     });
     s.running = { key, from, file, instance, expert };
     s.stoppedExpert = null;
@@ -289,6 +312,8 @@ export function createExperts(o: ExpertsOptions): Experts {
         s.stoppedExpert = null;
         s.expertFile = null;
         s.instanceFile = null;
+        learned.get(key)?.forget();
+        learned.delete(key);
         if (expert) await expert.remove();
         else await fs.promises.rm(dir(key), { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => {});
         changed();
@@ -299,6 +324,12 @@ export function createExperts(o: ExpertsOptions): Experts {
     instanceFilePath,
     dir,
     isExpertSession: (sessionId) => trunks.has(sessionId),
+    whatWasLearned,
+    bindWhatWasLearned(b) {
+      binding = b;
+      for (const [key, w] of learned) w.bind(b(key));
+    },
+    tiesMayHaveChanged: () => learned.forEach((w) => w.checkTies()),
     idle: () => [...[...slots.values()].flatMap((s) => (s.running ? [s.running.expert] : [])), ...stopped].every((e) => e.idle()),
     close() {
       for (const w of watchers) w.stop();

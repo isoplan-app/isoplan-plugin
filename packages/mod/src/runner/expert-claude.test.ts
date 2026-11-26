@@ -12,6 +12,7 @@ test("argv: the four kinds are pinned, flag by flag", () => {
   expect(trunkArgs("t-1", "sonnet")).toEqual(["-p", "--session-id", "t-1", "--model", "sonnet", ...READ_ONLY, ...STREAM]);
   expect(appendArgs("t-1", "claude-sonnet-5-5")).toEqual(["-p", "--resume", "t-1", "--model", "claude-sonnet-5-5", ...READ_ONLY, ...STREAM]);
   expect(expertForkArgs("t-1", "claude-sonnet-5-5")).toEqual(["-p", "--resume", "t-1", "--fork-session", "--no-session-persistence", "--model", "claude-sonnet-5-5", ...READ_ONLY, ...STREAM]);
+  expect(expertForkArgs("t-1", "claude-sonnet-5-5", "u-2")).toEqual(["-p", "--resume", "t-1", "--fork-session", "--no-session-persistence", "--resume-session-at", "u-2", "--model", "claude-sonnet-5-5", ...READ_ONLY, ...STREAM]);
   expect(judgeArgs("haiku")).toEqual(["-p", "--no-session-persistence", "--tools", "", "--setting-sources", "", "--settings", '{"disableAllHooks":true}', "--strict-mcp-config", "--permission-mode", "dontAsk", "--model", "haiku", ...STREAM]);
 });
 

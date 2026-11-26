@@ -1,0 +1,11 @@
+{
+  "about": "Personal-data patterns (isoplan-app#366). What an instance of an expert learned is checked against these, and against the secret patterns, on this computer before it goes to its expert record; a match is never sent and stays in this computer's trunk only. JavaScript regexes, each written so ordinary code facts (package versions, git remotes, times in milliseconds, line ranges, dates, commits, ids, IP addresses) pass. Add your own in ~/.claude/isoplan/personal-data-patterns.json, in this format: that file only adds to these.",
+  "patterns": [
+    { "name": "email address", "regex": "(?<![\\w.+-])(?!git@)[\\w.+-]+@[A-Za-z][\\w-]*(?:\\.[\\w-]+)*\\.[A-Za-z]{2,}\\b" },
+    { "name": "phone number", "regex": "(?<![\\w+])\\+\\d{1,3}(?:[ -]?\\(?\\d{2,4}\\)?){2,4}(?!\\w)" },
+    { "name": "phone number", "regex": "(?<!\\d)0\\d{2,4}[ -]\\d{3,4}[ -]?\\d{3,4}(?!\\d)" },
+    { "name": "phone number", "regex": "(?<!\\d)(?:\\(\\d{3}\\) ?|\\d{3}[.-])\\d{3}[.-]\\d{4}(?!\\d)" },
+    { "name": "payment card number", "regex": "(?<!\\d)(?:\\d{4}[ -]){3}\\d{4}(?!\\d)|(?<!\\d)\\d{4}[ -]\\d{6}[ -]\\d{5}(?!\\d)" },
+    { "name": "US Social Security number", "regex": "(?<!\\d)\\d{3}-\\d{2}-\\d{4}(?!\\d)" }
+  ]
+}

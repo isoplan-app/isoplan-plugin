@@ -1,19 +1,25 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { PROTOCOL_VERSION, type FileWhatWasLearnedRestsOn, type WhatWasLearnedEntry } from "@isoplan/protocol";
 import { expect, test, vi } from "vitest";
 import { modDir, tempRoot } from "../data-layer/fixture.js";
-import { ANSWER, BASE, C0, C1, C2, FAKE_CLAUDE, fakeGit, makeRead, until, type Rule } from "./expert-fixture.js";
+import { ANSWER, BASE, C0, C1, C2, FAKE_CLAUDE, fakeGit, makeRead, NOTHING_TIED, until, type Rule } from "./expert-fixture.js";
 import { parseExpertFile, type ExpertFile } from "./expert-file.js";
 import { createHealthLog } from "./expert-health.js";
-import { fingerprint, type SavedExpert, type SavedGeneration } from "./expert-state.js";
+import { COUNT_BEFORE_VERSION_3, fingerprint, type SavedExpert, type SavedGeneration } from "./expert-state.js";
 import { createExpert, NO_SENIOR, type ExpertQuestionForInstance, type ExpertSettings, type InstanceOutcome } from "./expert.js";
+import { createWhatWasLearnedForOneExpert, type CatchUp } from "./what-was-learned-for-one-expert.js";
+import { chainOver } from "./what-was-learned-in-the-expert-record.js";
 
 // The empty folder git runs with as its hooks (handoff/take.ts noHooks) is made in the Claude folder: a temp one, never this machine's.
 vi.stubEnv("CLAUDE_CONFIG_DIR", path.join(tempRoot(), "claude"));
 
 const T1 = "11111111-1111-4111-8111-111111111111";
 const T2 = "22222222-2222-4222-8222-222222222222";
+const RECORD = "4f0c3a52-8a2b-4d6e-9f10-2b3c4d5e6f70";
+const SERVER = "ws://127.0.0.1:4799/data-layer";
 const settings = { ...JSON.parse(fs.readFileSync(path.join(modDir, "runner.json"), "utf8")), expertJudgeModel: "haiku" } as ExpertSettings;
 
 const expertFile = (o: Record<string, unknown> = {}): ExpertFile => {
@@ -22,7 +28,7 @@ const expertFile = (o: Record<string, unknown> = {}): ExpertFile => {
   return parsed.expert;
 };
 
-const gen = (n: number, trunk: string, state: SavedGeneration["state"], o: Partial<SavedGeneration> = {}): SavedGeneration => ({ n, trunk, model: "claude-sonnet-5-5", commit: C1, groundedAt: 0, meter: 50000, notes: 0, state, proof: { passed: true, at: 0 }, ...o });
+const gen = (n: number, trunk: string, state: SavedGeneration["state"], o: Partial<SavedGeneration> = {}): SavedGeneration => ({ n, trunk, model: "claude-sonnet-5-5", commit: C1, groundedAt: 0, meter: 50000, addedToItsTrunk: [], pickedUpTo: {}, state, proof: { passed: true, at: 0 }, ...o });
 
 interface SetUp {
   file?: ExpertFile;
@@ -32,10 +38,17 @@ interface SetUp {
   restored?: { generations: SavedGeneration[]; indexes?: Record<number, Record<string, string>>; repo?: string; transcripts?: Record<string, object[]>; version?: 1 | 2 };
   /** Origin is out of reach as it starts. */
   offline?: boolean;
+  /** Its file is tied to RECORD on SERVER, whose link's ask is `catchUp` (answered unless set). */
+  tied?: boolean;
+  /** The files git says changed since any commit but HEAD, as it starts. */
+  changed?: string[];
+  /** Files of what it learned, in its folder before it starts, as an earlier run left them: by name. */
+  learnedFiles?: Record<string, object>;
 }
 
 async function setUp(o: SetUp = {}) {
   const root = tempRoot();
+  const logs: string[] = [];
   const dir = path.join(root, "experts", "adr");
   const readDir = path.join(dir, "read");
   const projectsDir = path.join(root, "projects");
@@ -57,10 +70,14 @@ async function setUp(o: SetUp = {}) {
     fs.mkdirSync(path.join(projectsDir, "c--work-app"), { recursive: true });
     for (const g of o.restored.generations) fs.writeFileSync(transcript(g.trunk), (o.restored.transcripts?.[g.trunk] ?? []).map((e) => JSON.stringify(e) + "\n").join(""));
   }
+  for (const [name, value] of Object.entries(o.learnedFiles ?? {})) (fs.mkdirSync(dir, { recursive: true }), fs.writeFileSync(path.join(dir, name), JSON.stringify(value)));
   const g = fakeGit(readDir);
   g.repo.offline = o.offline ?? false;
+  g.repo.changed = o.changed ?? [];
+  const catching = { state: "answered" as CatchUp };
+  const whatWasLearned = createWhatWasLearnedForOneExpert({ dir, log: (t) => void logs.push(`expert adr: ${t}`) });
+  whatWasLearned.bind(o.tied ? { tied: () => [{ server: SERVER, expertRecordId: RECORD }], held: (server) => (server === SERVER ? RECORD : undefined), servers: [SERVER], catchUp: () => catching.state, waiting: () => {} } : NOTHING_TIED);
   const sent: { id: string; outcome: InstanceOutcome }[] = [];
-  const logs: string[] = [];
   const trunks: string[] = [];
   const expert = createExpert({
     file,
@@ -77,6 +94,7 @@ async function setUp(o: SetUp = {}) {
     log: (t) => void logs.push(t),
     onChange: () => {},
     onTrunk: (t) => void trunks.push(t),
+    whatWasLearned,
     minuteMs: o.minuteMs ?? 4000,
   });
   const claude = () => fs.readFileSync(claudeLog, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as { kind: string; trunk: string | null; argv?: string[]; background?: string; memory?: string; turn?: number; text?: string });
@@ -86,8 +104,22 @@ async function setUp(o: SetUp = {}) {
   const reply = async (id: string) => (await until(() => sent.some((m) => m.id === id)), sent.find((m) => m.id === id)!.outcome);
   const state = () => JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8")) as SavedExpert;
   const update = (f: ExpertFile) => ((file = f), expert.update(f));
+  // What its record's office sends: the next entries after what this computer has, with their chain.
+  const since = (made: (n: number) => WhatWasLearnedEntry[], more = false) => {
+    const { afterArrivalNumber, chain } = whatWasLearned.askAfter(RECORD);
+    const entries = made(afterArrivalNumber);
+    return whatWasLearned.take(RECORD, SERVER, { type: "expert-learned-since", v: PROTOCOL_VERSION, key: "adr", expertRecordId: RECORD, afterArrivalNumber, entries, chain: chainOver(chain, entries), lastArrivalNumber: entries.at(-1)?.arrivalNumber ?? afterArrivalNumber, ...(more && { more: true as const }) });
+  };
+  /** Things other instances learned, numbered next: their ids. */
+  const elsewhere = (things: { text: string; files: FileWhatWasLearnedRestsOn[] }[], more = false) => {
+    const ids = things.map(() => randomUUID());
+    since((n) => things.map((x, i) => ({ kind: "learned", arrivalNumber: n + i + 1, id: ids[i]!, text: x.text, files: x.files, learnedAt: new Date(Date.now() - 60000 + i).toISOString() })), more);
+    return ids;
+  };
+  /** Removed on the card. */
+  const removed = (id: string) => since((n) => [{ kind: "removed", arrivalNumber: n + 1, id, at: new Date().toISOString() }]);
   await expert.start();
-  return { expert, ...g, sent, logs, trunks, claude, health, ask, reply, state, rules, update, dir, readDir, transcript, file: () => file };
+  return { expert, ...g, sent, logs, trunks, claude, health, ask, reply, state, rules, update, dir, readDir, transcript, file: () => file, whatWasLearned, catching, elsewhere, removed };
 }
 
 const turns = (t: Awaited<ReturnType<typeof setUp>>, kind: string, trunk?: string) => t.claude().filter((l) => l.kind === kind && l.turn && (!trunk || l.trunk === trunk));
@@ -140,7 +172,7 @@ test("proof: a failing first generation takes no questions; a failing later one 
   ]);
 });
 
-test("a question: answered on a fork of the junior at the moved checkout, its citations stamped and marked changed since", async () => {
+test("a question: answered on a fork of the junior at the moved checkout, its citations given their commits and marked changed since", async () => {
   const t = await setUp({
     restored: { generations: [gen(1, T1, "junior")], indexes: { 1: { "src/relay.ts": C1, "CONTEXT.md": C1 } } },
     rules: [{ kind: "fork", text: "Question x-1", reads: ["docs/adr/0004-x.md"], reply: "<answer>It stays on the server.</answer>\n<cited>\nsrc/relay.ts:1-2\ndocs/adr/0004-x.md\nsrc/other.ts\nsrc/gone.ts\n/etc/passwd\n</cited>" }],
@@ -156,7 +188,7 @@ test("a question: answered on a fork of the junior at the moved checkout, its ci
   expect(r.answer).toBe(`It stays on the server.\n\nCited, on main at ${short(C2)}:\n- src/relay.ts:1-2 (read at ${short(C1)}, changed since)\n- docs/adr/0004-x.md (read at ${short(C2)})\n- src/other.ts (commit unknown)`);
   await until(() => /question id=x-1/.test(t.health()));
   expect(JSON.parse(fs.readFileSync(path.join(t.dir, "index-1.json"), "utf8")).files["docs/adr/0004-x.md"]).toBe(C2);
-  expect(t.health()).toMatch(/question id=x-1 blocking=true ms=\d+ cost=\d+ outcome=answered senior=no explored=yes note=none/);
+  expect(t.health()).toMatch(/question id=x-1 blocking=true ms=\d+ cost=\d+ outcome=answered senior=no explored=yes learned=none/);
 });
 
 // Generation 1 is the senior, at commit C0 for src/relay.ts; generation 2 the junior.
@@ -168,7 +200,7 @@ const JUNIOR_ASKS: Rule[] = [
   ...BASE,
 ];
 
-test("the junior asks its senior: a fork of the senior's trunk, whose answer is the junior's next turn, and the learned note is appended", async () => {
+test("the junior asks its senior: a fork of the senior's trunk, whose answer is the junior's next turn, and what it learned is added to its trunk", async () => {
   const t = await setUp(withSenior(JUNIOR_ASKS));
   t.ask("x-1");
   const r = (await t.reply("x-1")) as Answered;
@@ -178,10 +210,10 @@ test("the junior asks its senior: a fork of the senior's trunk, whose answer is 
   expect(senior).toContain("Where does a question wait?");
   expect(turns(t, "fork", T2)[1]!.text).toContain("Your senior answered:\n\nIn the relay.");
   expect(r.answer).toContain(`- src/relay.ts (read at ${short(C0)})`);
-  await until(() => /note=appended/.test(t.health()));
+  await until(() => /learned=added/.test(t.health()));
   expect(turns(t, "append", T2)[0]!.text).toContain("Rule or fact: questions wait on the server.");
-  expect(t.health()).toMatch(/question id=x-1 .* senior=yes explored=no note=appended/);
-  expect(t.state().generations.find((g) => g.n === 2)).toMatchObject({ notes: 1, meter: 60000 });
+  expect(t.health()).toMatch(/question id=x-1 .* senior=yes explored=no learned=added/);
+  expect(t.state().generations.find((g) => g.n === 2)).toMatchObject({ addedToItsTrunk: [expect.objectContaining({ firstLine: "Rule or fact: questions wait on the server. Why: ADR 0004. Files: src/relay.ts" })], meter: 60000 });
 });
 
 test("a junior that asks its senior twice for a question tells of it once", async () => {
@@ -215,7 +247,7 @@ test("an <ask-senior> isn't honoured in a senior's fork, nor in a first generati
   expect(starts(first, "fork")).toHaveLength(1);
 });
 
-test("a learned note is appended only when the fork explored or asked its senior, and it names a file read for it", async () => {
+test("what a fork learned is added to its trunk only when the fork explored or asked its senior, and it names a file read for it", async () => {
   const learned = (file: string) => `<answer>Yes.</answer>\n<learned>Rule or fact: a. Why: b. Files: ${file}:1-2.</learned>`;
   const t = await setUp({
     restored: { generations: [gen(1, T1, "junior")] },
@@ -227,23 +259,23 @@ test("a learned note is appended only when the fork explored or asked its senior
   t.ask("x-2");
   await until(() => /question id=x-2/.test(t.health()));
   expect(starts(t, "append")).toHaveLength(1);
-  expect(t.logs).toContainEqual(expect.stringMatching(/^expert adr: appended the learned note from x-2 to generation 1: sha256 [0-9a-f]{12}, "Rule or fact: a\./));
-  // Explored, but the file it names wasn't read for it: the note isn't kept.
+  expect(t.logs).toContainEqual(expect.stringMatching(/^expert adr: added what x-2's fork learned to generation 1's trunk: [0-9a-f-]{36}, "Rule or fact: a\./));
+  // Explored, but the file it names wasn't read for it: what it learned isn't kept.
   t.ask("x-3");
   await until(() => /question id=x-3/.test(t.health()));
   expect(starts(t, "append")).toHaveLength(1);
-  expect(t.logs).toContainEqual(expect.stringMatching(/^expert adr: didn't append the learned note from x-3: none of the files it names was read for it/));
-  expect(t.health()).toMatch(/question id=x-1 .* note=none/);
-  expect(t.health()).toMatch(/question id=x-2 .* explored=yes note=appended/);
-  expect(t.health()).toMatch(/question id=x-3 .* explored=yes note=none/);
+  expect(t.logs).toContainEqual(expect.stringMatching(/^expert adr: didn't add what x-3's fork learned: none of the files it names was read for it/));
+  expect(t.health()).toMatch(/question id=x-1 .* learned=none/);
+  expect(t.health()).toMatch(/question id=x-2 .* explored=yes learned=added/);
+  expect(t.health()).toMatch(/question id=x-3 .* explored=yes learned="not added: no file it names was read for it"/);
 });
 
-test("promotion: not with no learned notes; at the threshold a new generation grounds, and the switch waits for a fork in flight", async () => {
+test("promotion: not with nothing learned added; at the threshold a new generation grounds, and the switch waits for a fork in flight", async () => {
   const release = path.join(tempRoot(), "release-x-2");
   const t = await setUp({
     file: expertFile({ promoteAtTokens: 150000 }),
     restored: { generations: [gen(1, T1, "junior", { meter: 160000 })] },
-    rules: [{ kind: "fork", text: "(x-1)", reply: "<answer>Yes.</answer>\n<learned>Rule or fact: a. Files: src/relay.ts</learned>", reads: ["src/relay.ts"] }, { kind: "fork", text: "(x-2)", reply: ANSWER, until: release }, { kind: "append", reply: "noted", context: 165000 }, ...BASE],
+    rules: [{ kind: "fork", text: "(x-1)", reply: "<answer>Yes.</answer>\n<learned>Rule or fact: a. Files: src/relay.ts</learned>", reads: ["src/relay.ts"] }, { kind: "fork", text: "(x-2)", reply: ANSWER, until: release }, { kind: "append", reply: "added", context: 165000 }, ...BASE],
   });
   await new Promise((r) => setTimeout(r, 300));
   expect(starts(t, "trunk")).toHaveLength(0);
@@ -268,7 +300,7 @@ test("promotion: not with no learned notes; at the threshold a new generation gr
 test("promotion deletes the retired generation's transcript, the folder beside it and its index, keeping its record", async () => {
   const t = await setUp({
     file: expertFile({ promoteAtTokens: 150000 }),
-    restored: { generations: [gen(1, T1, "senior"), gen(2, T2, "junior", { meter: 160000, notes: 1 })], indexes: { 1: { "src/relay.ts": C0 }, 2: { "src/relay.ts": C1 } } },
+    restored: { generations: [gen(1, T1, "senior"), gen(2, T2, "junior", { meter: 160000, addedToItsTrunk: [{ id: "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", firstLine: "Rule or fact: a." }] })], indexes: { 1: { "src/relay.ts": C0 }, 2: { "src/relay.ts": C1 } } },
   });
   const beside = path.join(path.dirname(t.transcript(T1)), T1);
   fs.mkdirSync(path.join(beside, "subagents"), { recursive: true });
@@ -289,7 +321,7 @@ test("promotion deletes the retired generation's transcript, the folder beside i
 test("a retired generation's folder held a moment by another process, as Windows does, is still deleted", async () => {
   const t = await setUp({
     file: expertFile({ promoteAtTokens: 150000 }),
-    restored: { generations: [gen(1, T1, "senior"), gen(2, T2, "junior", { meter: 160000, notes: 1 })], indexes: { 1: { "src/relay.ts": C0 }, 2: { "src/relay.ts": C1 } } },
+    restored: { generations: [gen(1, T1, "senior"), gen(2, T2, "junior", { meter: 160000, addedToItsTrunk: [{ id: "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", firstLine: "Rule or fact: a." }] })], indexes: { 1: { "src/relay.ts": C0 }, 2: { "src/relay.ts": C1 } } },
   });
   const beside = path.join(path.dirname(t.transcript(T1)), T1);
   const held = path.join(beside, "subagents");
@@ -307,7 +339,7 @@ test("a retired generation's folder held a moment by another process, as Windows
 }, 20000);
 
 test("the expert says it has a senior once a promotion makes one, and not before", async () => {
-  const t = await setUp({ file: expertFile({ promoteAtTokens: 150000 }), restored: { generations: [gen(1, T1, "junior", { meter: 160000, notes: 1 })] } });
+  const t = await setUp({ file: expertFile({ promoteAtTokens: 150000 }), restored: { generations: [gen(1, T1, "junior", { meter: 160000, addedToItsTrunk: [{ id: "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", firstLine: "Rule or fact: a." }] })] } });
   expect(t.expert.hosted()).toMatchObject({ state: "ready", senior: false });
   await until(() => /ready generation=2/.test(t.health()));
   expect(t.expert.hosted()).toMatchObject({ state: "ready", senior: true });
@@ -331,10 +363,10 @@ test("a promoteAtTokens within 100,000 of the compaction point fails the generat
   expect(starts(t, "trunk")).toHaveLength(1);
 });
 
-test("a grounding that leaves room for fewer than 20 learned notes fails, and isn't tried again", async () => {
+test("a grounding that leaves room for fewer than 20 things learned fails, and isn't tried again", async () => {
   const t = await setUp({ minuteMs: 50, file: expertFile({ promoteAtTokens: 55000 }) });
   await until(() => t.expert.hosted().state === "failed" && /generation generation=1/.test(t.health()));
-  expect(t.health()).toMatch(/generation generation=1 state=failed why="room for fewer than 20 learned notes/);
+  expect(t.health()).toMatch(/generation generation=1 state=failed why="room for fewer than 20 things learned/);
   await new Promise((r) => setTimeout(r, 800));
   expect(starts(t, "trunk")).toHaveLength(1);
 });
@@ -443,14 +475,14 @@ test("after a restart a recorded junior answers at once, with no grounding; one 
   expect(t.state().generations[1]).toMatchObject({ state: "failed", why: "the runner stopped during its grounding" });
 });
 
-test("a state from before each computer kept its own instance: a new generation grounds at once while the old junior answers, then every older generation retires and the state is version 2", async () => {
+test("a state from before each computer kept its own instance: a new generation grounds at once while the old junior answers, then every older generation retires and the state is version 3", async () => {
   const t = await setUp({ restored: { version: 1, generations: [gen(1, T1, "senior"), gen(2, T2, "junior")] }, rules: [{ kind: "trunk", text: "Reply with only the word: ready", reply: "ready", context: 20000, delayMs: 1500 }, ...BASE] });
   t.ask("x-1");
   expect(await t.reply("x-1")).toMatchObject({ kind: "answered" });
   expect(t.state().version).toBe(1);
   expect(starts(t, "fork")[0]!.trunk).toBe(T2);
-  await until(() => t.state().version === 2);
-  expect(t.state()).toMatchObject({ version: 2, setUpFromExpertRecord: true });
+  await until(() => t.state().version === 3);
+  expect(t.state()).toMatchObject({ version: 3, setUpFromExpertRecord: true });
   expect(t.state().generations.map((g) => [g.n, g.state])).toEqual([
     [1, "retired"],
     [2, "retired"],
@@ -624,23 +656,23 @@ test("a senior whose trunk was resumed by hand is dropped, so the junior explore
   await until(() => /ready generation=2/.test(restarted.health()));
 }, 30000);
 
-test("a learned note's append keeps its own turns; a turn added by hand while one runs retires the junior", async () => {
+test("an addition to the trunk keeps its own turns; a turn added by hand while one runs retires the junior", async () => {
   const root = tempRoot();
   const release = (n: number) => path.join(root, `release-${n}`);
-  // Notes told apart by their text, so each append waits for its own release.
-  const note = (n: number) => `<answer>Yes.</answer>\n<learned>Rule or fact: a (${n}). Why: b. Files: src/relay.ts:1-2.</learned>`;
+  // Things learned told apart by their text, so each addition waits for its own release.
+  const learned = (n: number) => `<answer>Yes.</answer>\n<learned>Rule or fact: a (${n}). Why: b. Files: src/relay.ts:1-2.</learned>`;
   const t = await setUp({
     restored: { generations: [gen(1, T1, "junior", { last: "u-2" })], transcripts: { [T1]: [turn("user", "u-1"), turn("assistant", "u-2")] } },
-    rules: [{ kind: "fork", text: "(x-1)", reply: note(1), reads: ["src/relay.ts"] }, { kind: "fork", text: "(x-2)", reply: note(2), reads: ["src/relay.ts"] }, { kind: "append", text: "(1)", reply: "noted", context: 60000, until: release(1) }, { kind: "append", reply: "noted", context: 61000, until: release(2) }, ...BASE],
+    rules: [{ kind: "fork", text: "(x-1)", reply: learned(1), reads: ["src/relay.ts"] }, { kind: "fork", text: "(x-2)", reply: learned(2), reads: ["src/relay.ts"] }, { kind: "append", text: "(1)", reply: "added", context: 60000, until: release(1) }, { kind: "append", reply: "added", context: 61000, until: release(2) }, ...BASE],
   });
 
-  // Its own turns as Claude Code writes them: the note, a tool's result, an entry of its own, a reply.
+  // Its own turns as Claude Code writes them: what was learned, a tool's result, an entry of its own, a reply.
   t.ask("x-1");
   await until(() => turns(t, "append").length === 1);
   addLines(t.transcript(T1), { type: "user", uuid: "n-1", message: { role: "user", content: [{ type: "text", text: turns(t, "append")[0]!.text }] } }, { type: "user", uuid: "n-2", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "r0", content: "x" }] } }, { type: "user", uuid: "n-3", isMeta: true, message: { role: "user", content: "caveat" } }, turn("assistant", "n-4"));
   fs.writeFileSync(release(1), "");
-  await until(() => /question id=x-1 .* note=appended/.test(t.health()));
-  expect(t.state().generations[0]).toMatchObject({ state: "junior", notes: 1, last: "n-4" });
+  await until(() => /question id=x-1 .* learned=added/.test(t.health()));
+  expect(t.state().generations[0]).toMatchObject({ state: "junior", addedToItsTrunk: [expect.objectContaining({ firstLine: "Rule or fact: a (1). Why: b. Files: src/relay.ts:1-2." })], last: "n-4" });
 
   // A person's turn while the next one runs.
   t.ask("x-2");
@@ -649,7 +681,7 @@ test("a learned note's append keeps its own turns; a turn added by hand while on
   fs.writeFileSync(release(2), "");
   await until(() => /ready generation=2/.test(t.health()));
   expect(t.health()).toMatch(/generation generation=1 state=retired why="its trunk was changed outside Isoplan"/);
-  expect(t.health()).toMatch(/question id=x-2 .* note=none/);
+  expect(t.health()).toMatch(/question id=x-2 .* learned=none/);
   t.ask("x-3");
   await t.reply("x-3");
   expect(starts(t, "fork").at(-1)!.trunk).toBe(t.state().generations.find((g) => g.n === 2)!.trunk);
@@ -683,4 +715,188 @@ test("a checkout that couldn't be prepared is tried again for the next question,
   t.ask("x-2");
   expect(await t.reply("x-2")).toMatchObject({ kind: "answered" });
   expect(t.health()).toMatch(/ready generation=1/);
+}, 30000);
+
+// What other instances of the expert learned, carried in questions and grounding (isoplan-app#366).
+const relay = (text: string, commit = C1, file = "src/relay.ts") => ({ text: `Rule or fact: ${text}. Files: ${file}`, files: [{ path: file, commit }] });
+const block = (question: string, words: string) => question.split("\n\n").find((b) => b.includes(words)) ?? "";
+const forkOf = (t: Awaited<ReturnType<typeof setUp>>, id: string) => turns(t, "fork").find((l) => l.text?.includes(`(${id})`))?.text ?? "";
+const indexOf = (t: Awaited<ReturnType<typeof setUp>>, n: number) => (JSON.parse(fs.readFileSync(path.join(t.dir, `index-${n}.json`), "utf8")) as { files: Record<string, string> }).files;
+const THIRD_TURN: Rule = { kind: "trunk", text: "Before you, this expert's instances learned", reply: "ready", context: 52000 };
+// A thing learned of about 120 estimated tokens.
+const sized = (i: number, commit = C1, file = "src/relay.ts") => ({ text: `Rule or fact: thing ${i} ${"x".repeat(320)}. Files: ${file}`, files: [{ path: file, commit }] });
+const FILES_CHANGED_SINCE = "its files changed since; re-read them before relying on it";
+const HELD = "aaaaaaaa-1111-4111-8111-111111111111";
+const holding = { addedToItsTrunk: [{ id: HELD, firstLine: "Rule or fact: the relay holds it for a day." }] };
+
+test("D7: what other instances learned that the junior hasn't picked up is in its next fork's question with each file's commit, marked where git says a file changed; one addition after the answer adds it, and the next question carries none of it", async () => {
+  const t = await setUp({ tied: true, restored: { generations: [gen(1, T1, "junior")] }, changed: ["src/other.ts"] });
+  t.elsewhere([relay("the relay holds a question", C0), relay("other is one", C0, "src/other.ts")]);
+  t.ask("x-1");
+  expect(await t.reply("x-1")).toMatchObject({ kind: "answered" });
+  const question = forkOf(t, "x-1");
+  expect(block(question, "the relay holds")).toContain(`Files: src/relay.ts (read at ${short(C0)})`);
+  expect(block(question, "the relay holds")).not.toContain(FILES_CHANGED_SINCE);
+  expect(block(question, "other is one")).toContain(FILES_CHANGED_SINCE);
+  await until(() => t.state().generations[0]!.addedToItsTrunk.length === 2);
+  expect(turns(t, "append")).toHaveLength(1);
+  expect(turns(t, "append")[0]!.text).toContain("the relay holds a question");
+  expect(t.state().generations[0]!.pickedUpTo).toEqual({ [RECORD]: 2 });
+  t.ask("x-2");
+  await t.reply("x-2");
+  expect(forkOf(t, "x-2")).not.toContain("learned this since you were grounded");
+});
+
+test("U10: a carried thing's files go in the generation's index, an unchanged one at the fork's commit, a changed one at the thing's, one already there kept; its answer citing one it didn't read cites the commit the thing gave", async () => {
+  const t = await setUp({ tied: true, restored: { generations: [gen(1, T1, "junior")], indexes: { 1: { "CONTEXT.md": C2 } } }, changed: ["docs/adr/0004-x.md"], rules: [{ kind: "fork", text: "(x-1)", reply: "<answer>It is in other.</answer>\n<cited>\nsrc/other.ts\n</cited>" }, ...BASE] });
+  t.elsewhere([relay("a", C0), relay("b", C0, "docs/adr/0004-x.md"), relay("c", C0, "CONTEXT.md"), relay("d", C0, "src/other.ts")]);
+  t.ask("x-1");
+  const r = (await t.reply("x-1")) as Answered;
+  expect(r.answer).toContain(`- src/other.ts (read at ${short(C0)})`);
+  await until(() => t.state().generations[0]!.addedToItsTrunk.length === 4 && Object.hasOwn(indexOf(t, 1), "src/relay.ts"));
+  expect(indexOf(t, 1)).toEqual({ "CONTEXT.md": C2, "src/relay.ts": C1, "docs/adr/0004-x.md": C0, "src/other.ts": C0 });
+});
+
+test("D17, offline a week within the limit: 30 things learned elsewhere, under 20,000 tokens, all go in one question, and no new generation grounds", async () => {
+  const t = await setUp({ tied: true, restored: { generations: [gen(1, T1, "junior")] } });
+  t.elsewhere(Array.from({ length: 30 }, (_, i) => relay(`thing ${i} of the relay holds`)));
+  t.expert.beforeQuestion();
+  expect(t.expert.catchingUp()).toBe(false);
+  t.ask("x-1");
+  await t.reply("x-1");
+  for (const i of [0, 29]) expect(forkOf(t, "x-1")).toContain(`thing ${i} of the relay holds`);
+  await until(() => t.state().generations[0]!.addedToItsTrunk.length === 30);
+  expect(starts(t, "trunk")).toHaveLength(0);
+});
+
+test("D17: a catch-up still coming in pages is waited for before the limit is judged, and past it the question waits for the new generation, not the old junior", async () => {
+  const t = await setUp({ tied: true, file: expertFile({ learnedElsewhereTokensPerQuestion: 300 }), restored: { generations: [gen(1, T1, "junior")] }, rules: [THIRD_TURN, ...BASE] });
+  t.catching.state = "in-pages";
+  t.elsewhere([sized(1)], true);
+  t.ask("x-1");
+  await new Promise((r) => setTimeout(r, 500));
+  expect(turns(t, "fork")).toHaveLength(0);
+  t.elsewhere([sized(2), sized(3), sized(4)]);
+  t.catching.state = "answered";
+  expect(await t.reply("x-1")).toMatchObject({ kind: "answered" });
+  const g2 = t.state().generations.find((g) => g.n === 2)!;
+  expect(starts(t, "fork").filter((s) => s.trunk === T1 && turns(t, "fork", T1).some((l) => l.text?.includes("(x-1)")))).toHaveLength(0);
+  expect(starts(t, "fork").at(-1)!.trunk).toBe(g2.trunk);
+  expect(t.logs).toContainEqual(expect.stringContaining("are more than one question carries (300)"));
+});
+
+test("a first instance's grounding carries its record's newest things whose files haven't changed, within the limit, in its trunk list and index; a third turn that leaves less room than estimated doesn't fail it", async () => {
+  const entries = [relay("oldest"), relay("older"), relay("changed", C0, "src/other.ts"), relay("newest", C1, "docs/adr/0004-x.md")].map((x, i) => ({ kind: "learned" as const, arrivalNumber: i + 1, id: randomUUID(), ...x, learnedAt: new Date(Date.now() - 4000 + i * 1000).toISOString() }));
+  const received = { version: 1, records: { [RECORD]: { server: SERVER, lastArrivalNumberReceived: 4, chain: chainOver("", entries), serverLastArrivalNumber: 4, entries, removed: [], keptNotYetReceived: [] } } };
+  const t = await setUp({ tied: true, file: expertFile({ learnedElsewhereTokensPerQuestion: 60 }), changed: ["src/other.ts"], learnedFiles: { "what-was-learned-in-the-expert-record.json": received }, rules: [{ ...THIRD_TURN, context: 195000 }, ...BASE] });
+  await until(() => t.expert.hosted().state === "ready");
+  const third = turns(t, "trunk").find((l) => l.text?.includes("Before you, this expert's instances learned"))!.text!;
+  expect(third).toContain("Rule or fact: older.");
+  expect(third).toContain("Rule or fact: newest.");
+  expect(third).not.toContain("Rule or fact: oldest.");
+  expect(third).not.toContain("Rule or fact: changed.");
+  const g = t.state().generations[0]!;
+  expect(g).toMatchObject({ state: "junior", meter: 195000, pickedUpTo: { [RECORD]: 4 } });
+  expect(g.addedToItsTrunk).toEqual([expect.objectContaining({ id: entries[1]!.id, expertRecordId: RECORD, arrivalNumber: 2 }), expect.objectContaining({ id: entries[3]!.id, expertRecordId: RECORD, arrivalNumber: 4 })]);
+  expect(indexOf(t, 1)).toEqual({ "CONTEXT.md": C1, "src/relay.ts": C1, "docs/adr/0004-x.md": C1 });
+  expect(t.health()).toMatch(/grounding generation=1 .* carried=2/);
+});
+
+test("removed on the card: a new generation grounds before the next fork while the old junior answers, its fork and its senior's told not to rely on it; the new generation's grounding doesn't carry it; a thing removed while a fork ran isn't added after its answer", async () => {
+  const t = await setUp({ ...withSenior([{ kind: "trunk", text: "Now read", reply: "grounded", context: 50000, delayMs: 2000 }, ...JUNIOR_ASKS]), tied: true, restored: { generations: [gen(1, T1, "senior", holding), gen(2, T2, "junior", holding)], indexes: { 1: { "src/relay.ts": C0 } } } });
+  t.removed(HELD);
+  t.expert.beforeQuestion();
+  await until(() => starts(t, "trunk").length === 1);
+  t.ask("x-1");
+  expect(await t.reply("x-1")).toMatchObject({ kind: "answered" });
+  for (const trunk of [T2, T1]) expect(turns(t, "fork", trunk)[0]!.text).toContain("removed these from what this expert learned. Don't rely on them, and don't repeat them in <learned>:\n\n- Rule or fact: the relay holds it for a day.");
+  await until(() => /ready generation=3/.test(t.health()));
+  expect(t.state().generations.find((g) => g.n === 3)!.addedToItsTrunk).not.toContainEqual(expect.objectContaining({ id: HELD }));
+
+  const release = path.join(tempRoot(), "release-x-2");
+  const s = await setUp({ tied: true, restored: { generations: [gen(1, T1, "junior")] }, rules: [{ kind: "fork", text: "(x-2)", reply: ANSWER, until: release }, ...BASE] });
+  const [carried] = s.elsewhere([relay("removed while the fork ran")]);
+  s.ask("x-2");
+  await until(() => turns(s, "fork").length === 1);
+  expect(forkOf(s, "x-2")).toContain("removed while the fork ran");
+  s.removed(carried!);
+  fs.writeFileSync(release, "");
+  await s.reply("x-2");
+  await until(() => /question id=x-2/.test(s.health()));
+  await new Promise((r) => setTimeout(r, 300));
+  expect(turns(s, "append")).toHaveLength(0);
+  expect(s.state().generations[0]!.addedToItsTrunk).toEqual([]);
+});
+
+test("a removal and a catch-up whose new generation fails its proof: the next question starts no grounding, the junior answers, told of the removal and carrying the newest within the limit, and the try again's grounding is the next", async () => {
+  const t = await setUp({ tied: true, minuteMs: 200, file: expertFile({ learnedElsewhereTokensPerQuestion: 300 }), restored: { generations: [gen(1, T1, "junior", holding)] }, rules: [{ kind: "judge", reply: "FAIL: no." }, THIRD_TURN, ...BASE] });
+  t.removed(HELD);
+  t.elsewhere([1, 2, 3, 4, 5].map((i) => sized(i)));
+  t.expert.beforeQuestion();
+  expect(t.expert.catchingUp()).toBe(true);
+  await until(() => /proof generation=2 result=fail/.test(t.health()) && !t.expert.catchingUp());
+  t.expert.beforeQuestion();
+  expect(t.expert.catchingUp()).toBe(false);
+  t.ask("x-1");
+  expect(await t.reply("x-1")).toMatchObject({ kind: "answered" });
+  expect(starts(t, "trunk")).toHaveLength(1);
+  const question = forkOf(t, "x-1");
+  expect(question).toContain("- Rule or fact: the relay holds it for a day.");
+  expect(question).toContain("thing 5");
+  expect(question).toContain("thing 4");
+  expect(question).not.toContain("thing 2");
+  t.rules([THIRD_TURN, ...BASE]);
+  await until(() => /ready generation=3/.test(t.health()));
+  expect(t.health()).toMatch(/retry attempt=1/);
+}, 30000);
+
+test("a state of version 2 reads, its count of what was added still counts for promotion, and it is written as version 3", async () => {
+  const before = { ...gen(1, T1, "junior", { meter: 160000 }), [COUNT_BEFORE_VERSION_3]: 1 } as Partial<SavedGeneration>;
+  delete before.addedToItsTrunk;
+  delete before.pickedUpTo;
+  const t = await setUp({ file: expertFile({ promoteAtTokens: 150000 }), restored: { version: 2, generations: [before as SavedGeneration] } });
+  await until(() => /ready generation=2/.test(t.health()));
+  expect(t.state().version).toBe(3);
+  expect(t.state().generations[0]).toMatchObject({ n: 1, addedBeforeEachHadAnId: 1, addedToItsTrunk: [], pickedUpTo: {} });
+  expect(t.state().generations[0]).not.toHaveProperty(COUNT_BEFORE_VERSION_3);
+});
+
+test("stopped between writing what a fork learned and adding it to the trunk: as it starts, it is added", async () => {
+  const thing = { id: randomUUID(), text: "Rule or fact: waited through a stop. Files: src/relay.ts", files: [{ path: "src/relay.ts", commit: C1 }], learnedAt: new Date().toISOString(), generation: 1, firstLine: "Rule or fact: waited through a stop. Files: src/relay.ts", parts: {}, waitingForARecord: true };
+  const t = await setUp({ restored: { generations: [gen(1, T1, "junior")] }, learnedFiles: { "what-was-learned-waiting-to-be-sent.json": { version: 1, things: [thing] } } });
+  await until(() => turns(t, "append").length === 1);
+  expect(turns(t, "append")[0]!.text).toContain("waited through a stop");
+  await until(() => t.state().generations[0]!.addedToItsTrunk.some((x) => x.id === thing.id));
+});
+
+test("D18: a fork that starts during an addition reads the trunk at the uuid before it and carries what is being added; with a Claude Code that refuses the flag, forks wait for the addition instead", async () => {
+  const learnsOne: Rule = { kind: "fork", text: "(x-1)", reads: ["src/relay.ts"], reply: `${ANSWER}\n<learned>Rule or fact: one being added. Files: src/relay.ts</learned>` };
+  const restored = { generations: [gen(1, T1, "junior", { last: "u-2" })], transcripts: { [T1]: [turn("user", "u-1"), turn("assistant", "u-2")] } };
+  const release = path.join(tempRoot(), "release-addition");
+  const t = await setUp({ tied: true, restored, rules: [learnsOne, { kind: "append", until: release, reply: "added", context: 60000 }, ...BASE] });
+  t.ask("x-1");
+  await t.reply("x-1");
+  await until(() => turns(t, "append").length === 1);
+  t.ask("x-2");
+  expect(await t.reply("x-2")).toMatchObject({ kind: "answered" });
+  expect(starts(t, "fork").at(-1)!.argv).toEqual(expect.arrayContaining(["--resume-session-at", "u-2"]));
+  expect(forkOf(t, "x-2")).toContain("one being added");
+  fs.writeFileSync(release, "");
+
+  const held = path.join(tempRoot(), "release-addition-2");
+  const f = await setUp({ tied: true, restored, rules: [{ refuseResumeAt: true }, learnsOne, { kind: "append", until: held, reply: "added", context: 60000 }, ...BASE] });
+  f.elsewhere([relay("learned on another computer")]);
+  f.ask("x-1");
+  await f.reply("x-1");
+  expect(forkOf(f, "x-1")).toContain("learned on another computer");
+  expect(f.logs).toContainEqual(expect.stringContaining("doesn't take --resume-session-at"));
+  await until(() => turns(f, "append").length === 1);
+  f.ask("x-2");
+  await new Promise((r) => setTimeout(r, 500));
+  expect(turns(f, "fork").filter((l) => l.text?.includes("(x-2)"))).toHaveLength(0);
+  fs.writeFileSync(held, "");
+  await f.reply("x-2");
+  expect(forkOf(f, "x-2")).not.toContain("learned on another computer");
+  expect(forkOf(f, "x-2")).not.toContain("one being added");
+  expect(starts(f, "fork").filter((s) => s.argv!.includes("--resume-session-at"))).toHaveLength(1);
 }, 30000);
