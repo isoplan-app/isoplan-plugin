@@ -12,11 +12,15 @@ test("an absolute path becomes its last segment, keeping where in the file", () 
   expect(scrubText("open \\\\fileserver\\share\\team\\notes.txt", windows)).toBe("open notes.txt");
   expect(scrubText("at /home/dev/w/app/index.js:1:2 and /var/folders/xy/T/run.json", mac)).toBe("at index.js:1:2 and run.json");
   expect(scrubText("at file:///Users/adam/w/app/take.ts:120:5", mac)).toBe("at take.ts:120:5");
-  // A relative path names nothing of the person's, so it stays.
-  expect(scrubText("in src/bun/index.ts", mac)).toBe("in src/bun/index.ts");
+  expect(scrubText("at C:\\Users\\sam\\Client Projects For Acme Corp Ltd 2026\\app\\take.ts:1:2", mac)).toBe("at take.ts:1:2");
+  expect(scrubText("EACCES /etc/isoplan/server.json, /nix/store/x1-node/bin/node and /run/user/1000/bus", mac)).toBe("EACCES server.json, node and bus");
+  // Escaped once, as JSON writes it, a UNC root too.
+  expect(scrubText('{"file":"C:\\\\Users\\\\sam\\\\take.ts","share":"\\\\\\\\fileserver\\\\team\\\\notes.txt"}', mac)).toBe('{"file":"take.ts","share":"notes.txt"}');
+  // A route and a relative path name nothing of the person's, so they stay.
+  expect(scrubText("POST /data-layer/errors failed: see src/bun/index.ts", mac)).toBe("POST /data-layer/errors failed: see src/bun/index.ts");
 });
 
-test("the home folder and the user name go wherever they are, a home with a space in it too", () => {
+test("the home folder goes wherever a path could start, and the user name wherever it is, a home with a space in it too", () => {
   const spaced = whoOf("C:\\Users\\Adam Linscott");
   expect(scrubText("ENOENT: no such file or directory, open 'C:\\Users\\Adam Linscott\\.claude\\isoplan\\config.json'", spaced)).toBe(
     "ENOENT: no such file or directory, open 'config.json'",
@@ -24,6 +28,10 @@ test("the home folder and the user name go wherever they are, a home with a spac
   expect(scrubText("EPERM: /c/Users/adamr/.claude/isoplan/pairing.json", windows)).toBe("EPERM: pairing.json");
   expect(scrubText("the folder C:/Users/ADAMR is locked", windows)).toBe("the folder ~ is locked");
   expect(scrubText("no access for adamr, AdamR or adamr2", windows)).toBe("no access for <user>, <user> or adamr2");
+  // A short home is no URL's path, nor a relative path's.
+  expect(scrubText("GET https://team.isoplan.app/app/x from src/app/y.ts failed at /app/dist/server.js:1:2", { home: "/app", user: "" })).toBe(
+    "GET https://team.isoplan.app/app/x from src/app/y.ts failed at server.js:1:2",
+  );
   // A one-letter user name would take every word it is.
   expect(scrubText("a file in a folder", whoOf("/home/a"))).toBe("a file in a folder");
 });
@@ -55,4 +63,13 @@ test("only the message and the stack's frames are kept, never source lines", () 
     stack: "at run (take.ts:120:5)\nat async Promise.all (index 0)\nrender@views://view-assets/index.js:3:14",
   });
   expect(scrubError({ message: "nothing\u0000 odd\r" }, windows)).toEqual({ message: "nothing odd" });
+});
+
+test("a long run of backslashes or slashes is passed over at once, so no report holds the app up", () => {
+  const started = performance.now();
+  for (const run of [String.fromCharCode(92).repeat(32_000), `at ${"/".repeat(32_000)}`]) {
+    scrubText(run, whoOf("/home/sam"));
+    scrubError({ message: run, stack: run }, whoOf("/home/sam"));
+  }
+  expect(performance.now() - started).toBeLessThan(200);
 });
