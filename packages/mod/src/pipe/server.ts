@@ -14,7 +14,8 @@
 // session's, so it is the user's own processes that can ask, and only for a session that is open.
 // A question for an expert (the ask_expert script, protocol 0.13.0) is answered the same way, by a
 // runner given `askExpert`; one without closes the connection, as for any message it doesn't know.
-// An end it answers with is acked only once its line has been written to the script (ask/expert.ts).
+// An end it answers with counts as shown only once its line has been written to the script
+// (runner/expert-questions-asked-here.ts).
 // A close (the desktop app's menu) is answered only with the token too: whether the runner closed
 // the headless session it names.
 //
@@ -23,10 +24,9 @@
 
 import { timingSafeEqual } from "node:crypto";
 import net, { type Socket } from "node:net";
-import type { ExpertTold } from "../ask/expert.js";
 import { expertText } from "../ask/expert-text.js";
 import type { DataLayerLine } from "../lines.js";
-import { newToken, pipeAddress, preparePipe, proofOf, readLines, sessionEnv, writeLine, writePipeInfo, type PipeAsk, type PipeAskExpert, type PipeClose, type PipeHello, type PipeHi, type Told } from "./pipe.js";
+import { newToken, pipeAddress, preparePipe, proofOf, readLines, sessionEnv, writeLine, writePipeInfo, type ExpertTold, type PipeAsk, type PipeAskExpert, type PipeClose, type PipeHello, type PipeHi, type Told } from "./pipe.js";
 
 /** A session's registered hooks module, as the runner reports for it. */
 export interface Hooked {
@@ -169,7 +169,7 @@ export async function createPipeServer(o: PipeServerOptions): Promise<PipeServer
       ? await askExpert({ ...request, cwd: hooked.cwd }).catch((err: unknown) => unreachable(String((err as Error)?.message ?? err)))
       : unreachable("this session isn't connected to it");
     // Written only once the line has gone into the pipe: a script that has gone (its timeout, an
-    // interrupted call) leaves the end unacked, so the server tells it again as a note.
+    // interrupted call) leaves the end unshown, so it reaches the session again, later.
     const written = await new Promise<boolean>((resolve) => {
       if (socket.destroyed || !socket.writable) return resolve(false);
       socket.write(JSON.stringify({ type: "answer", ...told }) + "\n", (err) => resolve(!err));

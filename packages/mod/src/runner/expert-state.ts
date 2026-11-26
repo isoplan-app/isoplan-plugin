@@ -3,7 +3,10 @@
 // - state.json: its generations, each with its trunk's session id, the model id it resolved to,
 //   the commit it was grounded at, its meter and learned notes, its role and its proof, and the
 //   uuid of its trunk transcript's last user or assistant entry as the runner left it; and the
-//   fingerprint of the expert file fields a new generation is grounded for.
+//   fingerprint of the expert file fields a new generation is grounded for. Version 2 (#340) is a
+//   state whose generations were all grounded since this computer kept instances set up from
+//   expert records (`setUpFromExpertRecord`); version 1, from before, still reads, and its expert
+//   grounds a new generation that retires the old ones once it passes (expert.ts).
 // - index-<n>.json: generation n's file → commit index, `{ "version": 1, "files": { path: commit } }`,
 //   the commit each file the generation read (or cited) was read at.
 //
@@ -26,6 +29,8 @@ export interface SavedGeneration {
   groundedAt: number;
   /** Its trunk's context after its last turn. */
   meter: number;
+  /** Its trunk's context right after its grounding; missing in a state from before it was recorded. */
+  groundingTokens?: number;
   /** How many learned notes were appended to it. */
   notes: number;
   state: "grounding" | "junior" | "senior" | "retired" | "failed";
@@ -42,7 +47,9 @@ export interface SavedGeneration {
 
 /** state.json. */
 export interface SavedExpert {
-  version: 1;
+  version: 1 | 2;
+  /** With version 2: every generation was grounded since this computer kept instances set up from expert records. */
+  setUpFromExpertRecord?: true;
   fingerprint: string;
   repo: string;
   /** Origin's default branch, which the read checkout follows. */
@@ -60,7 +67,7 @@ const isGeneration = (g: unknown): g is SavedGeneration => {
   return !!o && Number.isInteger(o.n) && typeof o.trunk === "string" && typeof o.model === "string" && typeof o.commit === "string" && Number.isFinite(o.groundedAt) && Number.isFinite(o.meter) && Number.isInteger(o.notes) && STATES.includes(o.state) && (o.last === undefined || o.last === null || typeof o.last === "string");
 };
 
-async function readJson(file: string): Promise<unknown> {
+export async function readJson(file: string): Promise<unknown> {
   try {
     return JSON.parse(await fs.readFile(file, "utf8"));
   } catch {
@@ -68,7 +75,8 @@ async function readJson(file: string): Promise<unknown> {
   }
 }
 
-async function writeJson(file: string, value: unknown): Promise<void> {
+/** Writes `value` as JSON whole: a reader never sees half of it. */
+export async function writeJson(file: string, value: unknown): Promise<void> {
   await fs.mkdir(path.dirname(file), { recursive: true });
   const temp = `${file}.${process.pid}.tmp`;
   await fs.writeFile(temp, JSON.stringify(value, null, 2) + "\n");
@@ -86,7 +94,7 @@ async function writeJson(file: string, value: unknown): Promise<void> {
 /** The expert's state.json, or null when there is none it can use. */
 export async function readState(dir: string): Promise<SavedExpert | null> {
   const o = (await readJson(statePath(dir))) as SavedExpert | null;
-  if (!o || o.version !== 1 || typeof o.fingerprint !== "string" || typeof o.repo !== "string" || typeof o.branch !== "string" || !Array.isArray(o.generations) || !o.generations.every(isGeneration)) return null;
+  if (!o || (o.version !== 1 && o.version !== 2) || typeof o.fingerprint !== "string" || typeof o.repo !== "string" || typeof o.branch !== "string" || !Array.isArray(o.generations) || !o.generations.every(isGeneration)) return null;
   return o;
 }
 

@@ -386,6 +386,21 @@ test("hooks: an open expert creation suggestion is in the status line after its 
   expect(h.logged).toEqual(["Isoplan: this session has spent about 12 minutes and 18% of its context on src/parser. A Parser Expert could answer questions about src/parser without searching it again. Review it: http://127.0.0.1:4747/?expert-creation-suggestion=o1 (or type /isoplan:review-expert-suggestion)"]);
 });
 
+test("hooks: the offer to set up an expert this computer has no instance of is in the status line after its office's part until it ends, and a pipe's end that starts clears it", async () => {
+  const offer: DataLayerLine = { type: "expert-set-up-offer", server: "ws://127.0.0.1:4747/data-layer", key: "parser", name: "Parser Expert", url: "http://127.0.0.1:4747/?expert-set-up=parser" };
+  const h = await start([connected, offer, { type: "expert-set-up-offer-ended", server: "ws://127.0.0.1:4747/data-layer", key: "parser" }, offer, { type: "runner", state: "down" }, { type: "runner", state: "up" }, connected], { stays: true });
+  await vi.waitFor(() => expect(h.status).toHaveLength(7));
+  expect(h.status).toEqual([
+    "Isoplan: dev ✓",
+    "Isoplan: dev ✓ · The Parser Expert isn't set up on this computer · set up: http://127.0.0.1:4747/?expert-set-up=parser",
+    "Isoplan: dev ✓",
+    "Isoplan: dev ✓ · The Parser Expert isn't set up on this computer · set up: http://127.0.0.1:4747/?expert-set-up=parser",
+    "Isoplan: this session isn't reaching the office until Isoplan's runner is back; starting it",
+    undefined,
+    "Isoplan: dev ✓",
+  ]);
+});
+
 test("hooks: a suggestion open in two offices shows once, after the first; each office shows its newest; a runner that comes back clears them until they come again", async () => {
   const team: DataLayerLine = { type: "status", server: TEAM, label: "team", state: "connected" };
   const h = await start([connected, team, expertCreationSuggestionLine(DEV, "o1"), expertCreationSuggestionLine(TEAM, "o1"), expertCreationSuggestionLine(TEAM, "o2", "billing"), { type: "runner", state: "down" }, { type: "runner", state: "up" }, connected], { stays: true });
@@ -816,7 +831,7 @@ test("hooks: ask_expert is registered only once an office names experts the sess
   const spec = named.specs[0]!;
   expect(spec.isDeferred).toBe(false);
   expect(spec.description).toContain("Ask one of this office's experts a question.");
-  expect(spec.description).toContain("- reporting (isoplan-app, on Ada's machine): What leaves a machine.");
+  expect(spec.description).toContain("- reporting (isoplan-app): What leaves a machine.");
   expect(spec.description).toContain("waits a short while (10 seconds unless this machine's Isoplan settings say otherwise)");
   expect(spec.inputSchema).toMatchObject({ required: ["expert", "question", "blocking"], properties: { expert: { enum: ["reporting"] }, blocking: { type: "boolean" } } });
 });
@@ -917,16 +932,16 @@ test("hooks: two offices' rights a second apart are both in ask_expert's enum, a
   expect(enumOf(h)).toEqual(["billing", "pairing", "reporting"]);
 });
 
-test("hooks: a change of an expert's subject, host or repo registers ask_expert again with it", async () => {
+test("hooks: a change of an expert's subject or repo registers ask_expert again with it; its owner's name alone, which it doesn't show, doesn't", async () => {
   const more = feed();
   const h = await start([connected, expertRights(INTERNAL, "reporting")], { stays: true, feed: more });
   await vi.waitFor(() => expect(h.tools).toEqual(["ask_expert"]));
   more.push([{ type: "expert-rights", v: PROTOCOL_VERSION, experts: [expertRight("reporting", "What leaves a machine.")], server: INTERNAL } as DataLayerLine]);
   await vi.waitFor(() => expect(h.tools).toHaveLength(2));
-  expect(h.specs[1]!.description).toContain("- reporting (isoplan-app, on Ada's machine): What leaves a machine.");
-  more.push([{ type: "expert-rights", v: PROTOCOL_VERSION, experts: [{ ...expertRight("reporting", "What leaves a machine."), host: "Grace", repo: "isoplan-site" }], server: INTERNAL } as DataLayerLine]);
+  expect(h.specs[1]!.description).toContain("- reporting (isoplan-app): What leaves a machine.");
+  more.push([{ type: "expert-rights", v: PROTOCOL_VERSION, experts: [{ ...expertRight("reporting", "What leaves a machine."), repo: "isoplan-site" }], server: INTERNAL } as DataLayerLine]);
   await vi.waitFor(() => expect(h.tools).toHaveLength(3));
-  expect(h.specs[2]!.description).toContain("- reporting (isoplan-site, on Grace's machine): What leaves a machine.");
+  expect(h.specs[2]!.description).toContain("- reporting (isoplan-site): What leaves a machine.");
   more.push([{ type: "expert-rights", v: PROTOCOL_VERSION, experts: [{ ...expertRight("reporting", "What leaves a machine."), host: "Grace", repo: "isoplan-site" }], server: INTERNAL } as DataLayerLine]);
   await new Promise((r) => setTimeout(r, 10));
   expect(h.tools).toHaveLength(3);

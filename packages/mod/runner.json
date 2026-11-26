@@ -41,6 +41,10 @@
   "branchRefreshMinutes": 5,
   "expertJudgeModel": "haiku",
   "expertWaitSeconds": 10,
+  "expertInstances": {
+    "setUpWithoutAsking": false,
+    "questionsKeptHours": 144
+  },
   "clonesFolder": "",
   "expertCreationSuggestions": {
     "readAgain": 3,

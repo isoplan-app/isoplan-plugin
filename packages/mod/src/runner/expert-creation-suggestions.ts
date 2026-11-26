@@ -90,8 +90,9 @@
 //   (isoplan-clone.ts, as a hidden start does; never into the person's folders), from
 //   https://<project id>.git, then, when that fails, from git@<host>:<path>.git, git asking nothing
 //   either way, saying `cloning` while it runs; a repo with no remote, or a clone git refuses both
-//   ways, fails the creation with git's reasons. An expert of that name here already fails it at
-//   once, saying why. Else it writes experts/<key>.json, naming the checkout or the clone as its
+//   ways, fails the creation with git's reasons (project-checkout-for-expert.ts, the route an
+//   instance's set-up takes too). An expert of that name here already, from an expert file or an
+//   instance file, fails it at once, saying why. Else it writes experts/<key>.json, naming the checkout or the clone as its
 //   `repo`, whole or not at all, which the experts' watcher picks up (experts.ts), and follows the
 //   expert's state.json (expert-state.ts) every `pollMs`, saying each step
 //   (`expert-creation-progress`): cloning (its own clone), grounding, proof, then ready or failed,
@@ -143,6 +144,7 @@ import type { FileReading } from "../data-layer/claude-code.js";
 import type { SessionAreas } from "../data-layer/report-session.js";
 import type { DataLayerLine, ExpertCreationSuggestionLine, ExpertCreationSuggestionRepetition, OfficeWideReason } from "../lines.js";
 import { parseExpertFile } from "./expert-file.js";
+import { findOrCloneProjectCheckoutForExpert } from "./project-checkout-for-expert.js";
 import { windowFor } from "./expert-meter.js";
 import { readState } from "./expert-state.js";
 import type { HostedExpert } from "./expert.js";
@@ -339,13 +341,6 @@ export async function areaTokens(checkout: string, paths: readonly string[], max
 const within = (folder: string, other: string) => other === "." || folder === other || folder.startsWith(other + "/");
 const near = (a: string, b: string) => within(a, b) || within(b, a);
 const parentOf = (p: string) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : ".");
-
-/** The addresses Isoplan's own clone of a project is made from where this computer has no checkout, in order: https from its id, then ssh; none for a repo with no remote. */
-export function cloneUrls(project: string): string[] {
-  if (project.startsWith("local:")) return [];
-  const [host, ...rest] = project.split("/");
-  return rest.length ? [`https://${project}.git`, `git@${host}:${rest.join("/")}.git`] : [`https://${project}.git`];
-}
 
 /** The files under `folder` of `checkout`, relative to it, by name, at most `max`; dot entries and node_modules left out. */
 export async function folderFiles(checkout: string, folder: string, max = MAX_FILES): Promise<string[]> {
@@ -1000,26 +995,14 @@ export function createExpertCreationSuggestions(o: ExpertCreationSuggestionsOpti
       if (m.by.id !== o.account.id) return fail("this computer's runner is someone else's, so it makes experts only for them");
       // A key whose creation failed here is free once the expert it left has stopped.
       if (cleared.has(m.key) && !(await stopped(m.key))) return fail(`the expert named ${m.key}, whose creation failed, is still stopping on this computer; try again in a minute`);
-      const taken = o.experts().some((e) => e.name === m.key) || (await fs.stat(expertFile(m.key)).then(() => true, () => false));
+      const there = (file: string) => fs.stat(file).then(() => true, () => false);
+      const taken = o.experts().some((e) => e.name === m.key) || (await there(expertFile(m.key))) || (await there(path.join(o.isoplanDir, "expert-instances", `${m.key}.json`)));
       if (taken) return fail(`an expert named ${m.key} is already on this computer`);
-      let checkout = await o.checkout(index, m.project).catch(() => null);
-      if (!checkout) {
-        // For the expert alone: Isoplan's own hidden clone, never one in the person's folders; over ssh when https fails.
-        const urls = cloneUrls(m.project.id);
-        if (!urls.length) return fail(`this computer has no checkout of ${m.project.name}, and its repo has no remote to clone it from`);
-        sendExpertCreationProgress(expertCreation);
-        const reasons: string[] = [];
-        for (const url of urls) {
-          const clone = await o.clone(url, m.project.id);
-          if (closed) return;
-          if (typeof clone === "string") {
-            checkout = clone;
-            break;
-          }
-          reasons.push(`from ${url}, ${clone.reason ?? clone.problem}`);
-        }
-        if (!checkout) return fail(`this computer has no checkout of ${m.project.name}, and Isoplan's own copy of it couldn't be made: ${reasons.join("; ")}`);
-      }
+      // For the expert alone, with no checkout here: Isoplan's own hidden clone, never one in the person's folders.
+      const found = await findOrCloneProjectCheckoutForExpert({ project: m.project, checkoutOf: (project) => o.checkout(index, project), clone: o.clone, onCloning: () => sendExpertCreationProgress(expertCreation) });
+      if (closed) return;
+      if ("failed" in found) return fail(found.failed);
+      const checkout = found.folder;
       const t = await settings();
       const body = { version: 1, name: m.key, repo: checkout, subject: m.subject, model: m.model, promoteAtTokens: t.promoteAtTokens, proof: m.proof, areas: m.area };
       const text = JSON.stringify(body, null, 2) + "\n";

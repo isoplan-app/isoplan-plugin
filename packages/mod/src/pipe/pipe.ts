@@ -17,7 +17,8 @@
 // hello for its session and is sent that session's lines (src/lines.ts); the ask_earlier_session script
 // (src/ask/main.ts) asks once and is sent the answer, and so does the ask_expert script
 // (src/ask/expert-main.ts, protocol 0.13.0), whose connection a runner from before experts closes,
-// as it does on any message it doesn't know; the desktop app (packages/app) asks the runner
+// as it does on any message it doesn't know, and which the runner answers from this computer's
+// instance of the expert (isoplan-app#340); the desktop app (packages/app) asks the runner
 // to close one of its own headless sessions (`close`, closeSession), and with `remove` to remove it
 // too (#129), and is told whether it did. A runner from before `remove` ignores it and only closes.
 
@@ -120,6 +121,13 @@ export interface PipeAnswer {
 
 /** What the agent is told by an ask, as the runner works it out. */
 export type Told = Omit<PipeAnswer, "type">;
+
+/**
+ * What the agent is told by an expert ask; for an end, `shown`, to call once the answer was written
+ * to the ask_expert script (`written`) or couldn't be: an end not written reaches the session later,
+ * with one of its agent's next tool results (runner/expert-questions-asked-here.ts).
+ */
+export type ExpertTold = Told & { shown?: (written: boolean) => Promise<void> };
 
 /** Where the worker's pipe is, as pipe.json holds it. */
 export interface PipeInfo {

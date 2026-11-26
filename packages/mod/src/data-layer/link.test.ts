@@ -1,5 +1,5 @@
 import type { AddressInfo } from "node:net";
-import { PROTOCOL_VERSION, type ExpertsMessage, type Facts, type HelloMessage, type RunnerHelloMessage } from "@isoplan/protocol";
+import { PROTOCOL_VERSION, type ExpertInstanceStatesMessage, type Facts, type HelloMessage, type RunnerHelloMessage } from "@isoplan/protocol";
 import { afterEach, expect, test } from "vitest";
 import { WebSocketServer, type WebSocket as ServerSocket } from "ws";
 import type { DataLayerLine } from "../lines.js";
@@ -247,7 +247,7 @@ test("link: a runner's link passes drive requests and drive-policy to onDrive, t
   expect(types(s.got)).toEqual(["runner", "driven", "runner"]);
 });
 
-test("link: a session's link passes the experts it may ask on as a line; a runner's passes hosting to onHosting, and sends its listing only while up", async () => {
+test("link: a session's link passes the experts it may ask on as a line; a runner's passes the expert directory to onExpertRecordMessages, and sends its instance states only while up", async () => {
   const s = await server();
   const { link: session, lines } = link(s.url, { minIntervalMs: 0 });
   session.update(facts("active"));
@@ -258,16 +258,16 @@ test("link: a session's link passes the experts it may ask on as a line; a runne
   expect(lines.find((l) => l.type === "expert-rights")).toEqual(rights);
 
   const runner = await server();
-  const runnerHello: RunnerHelloMessage = { type: "runner", v: PROTOCOL_VERSION, account: hello.account, machine: hello.machine, experts: true };
-  const hosting: unknown[] = [];
-  const { link: l, lines: runnerLines } = link(runner.url, { hello: runnerHello, onHosting: (m) => hosting.push(m) });
+  const runnerHello: RunnerHelloMessage = { type: "runner", v: PROTOCOL_VERSION, account: hello.account, machine: hello.machine, expertInstances: true };
+  const records: unknown[] = [];
+  const { link: l, lines: runnerLines } = link(runner.url, { hello: runnerHello, onExpertRecordMessages: (m) => records.push(m) });
   await until(() => runner.got.length === 1);
-  expect(runner.got[0]).toMatchObject({ type: "runner", experts: true });
-  const listed = { type: "hosting", v: PROTOCOL_VERSION, listed: ["reporting"] };
-  runner.sockets[0]!.send(JSON.stringify(listed));
-  await until(() => hosting.length === 1);
-  expect(hosting).toEqual([listed]);
-  const listing: ExpertsMessage = { type: "experts", v: PROTOCOL_VERSION, experts: [{ name: "reporting", project: { id: "github.com/ada/isoplan-app", name: "isoplan-app" }, subject: "What leaves a machine.", state: "ready" }] };
+  expect(runner.got[0]).toMatchObject({ type: "runner", expertInstances: true });
+  const directory = { type: "expert-directory", v: PROTOCOL_VERSION, experts: [], asking: { openPerPersonPerExpert: 3, perPersonPerDay: 30, maxAgeHours: 72 } };
+  runner.sockets[0]!.send(JSON.stringify(directory));
+  await until(() => records.length === 1);
+  expect(records).toEqual([directory]);
+  const listing: ExpertInstanceStatesMessage = { type: "expert-instance-states", v: PROTOCOL_VERSION, instances: [{ key: "reporting", expertRecordId: "4f0c3a52-8a2b-4d6e-9f10-2b3c4d5e6f70", state: "ready" }] };
   expect(l.sendLive(listing)).toBe(true);
   await until(() => runner.got.length === 2);
   expect(runner.got[1]).toMatchObject(listing);
