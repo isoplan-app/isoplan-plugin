@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  arrivalEntryId,
   expertDisplayName,
   MAX_AREA_PATH_LENGTH,
   MAX_AREA_PATHS,
@@ -10,6 +11,7 @@ import {
   MAX_EXPERT_RECORDS,
   MAX_EXPERT_SUBJECT_LENGTH,
   MAX_EXPERTS,
+  MAX_FILES_WHAT_WAS_LEARNED_RESTS_ON,
   MAX_FOLDER_LENGTH,
   MAX_FOLDER_REPOS,
   MAX_HOLDING,
@@ -28,6 +30,8 @@ import {
   MAX_SUMMARY_LENGTH,
   MAX_TASK_LENGTH,
   MAX_TOOL_NAME_LENGTH,
+  MAX_WHAT_WAS_LEARNED_ENTRIES_PER_MESSAGE,
+  MAX_WHAT_WAS_LEARNED_LENGTH,
   MAX_WORKFLOW_DESCRIPTION_LENGTH,
   MAX_WORKFLOW_LABEL_LENGTH,
   MAX_WORKFLOW_NAME_LENGTH,
@@ -42,6 +46,7 @@ import {
   type FloorDriveRefusalReason,
   type Handoff,
   type ParseResult,
+  type WhatWasLearnedEntry,
   type WorkflowFact,
 } from "./index.js";
 
@@ -152,6 +157,20 @@ const expertDefinition = {
 const expertInstance = { key: "adr-0004", expertRecordId, state: "ready", senior: true, groundingTokens: 42000 };
 const expertDirectoryEntry = { key: "adr-0004", expertRecordId, project: isoplan, owner: adam, yours: true, revision: 2, groundingTokens: 42000 };
 const asking = { openPerPersonPerExpert: 3, perPersonPerDay: 30, maxAgeHours: 72 };
+const learnedId = "6a1f0c2e-8b3d-4f5a-9c7e-2d4b6f8a0c1e";
+const removedId = "b2c4d6e8-0a1b-4c3d-9e5f-7a8b9c0d1e2f";
+const chain = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+const thingLearned = {
+  id: learnedId,
+  text: "A session's title is a fact, so it may leave the computer; its messages never do.",
+  files: [{ path: "docs/adr/0004-what-leaves-a-machine.md", commit }, { path: "CONTEXT.md" }],
+  learnedAt: at,
+};
+const learnedEntries: WhatWasLearnedEntry[] = [
+  { kind: "learned", arrivalNumber: 4, ...thingLearned },
+  { kind: "learned-then-removed", arrivalNumber: 5, id: removedId },
+  { kind: "removed", arrivalNumber: 6, id: removedId, at },
+];
 const expertCreationSuggestion = {
   type: "expert-creation-suggestion",
   v,
@@ -313,6 +332,18 @@ const valid = {
   "set-up-expert-instance again": { type: "set-up-expert-instance", v, request: "set-up-x-0123456790", key: "adr-0004", expertRecordId, by: sam, again: true },
   "expert-set-up-offer-ended": { type: "expert-set-up-offer-ended", v, key: "adr-0004", expertRecordId, why: "dismissed" },
   "expert-questions-asked-on-your-other-computers": { type: "expert-questions-asked-on-your-other-computers", v, open: [{ key: "adr-0004", count: 2 }], askedAtInTheLastDay: [at, "2026-10-20T08:00:00.000Z"] },
+  "runner that shares what expert instances learn": { type: "runner", v, account: adam, machine: { name: "sevengill" }, expertInstances: true, sharesWhatExpertInstancesLearn: true },
+  "expert-directory that shares what expert instances learn": { type: "expert-directory", v, experts: [expertDirectoryEntry], asking, sharesWhatExpertInstancesLearn: true },
+  "expert-definition with how much learned elsewhere a question carries": { type: "expert-definition", v, definition: { ...expertDefinition, learnedElsewhereTokensPerQuestion: 300 } },
+  "expert-instance-learned": { type: "expert-instance-learned", v, key: "adr-0004", expertRecordId, ...thingLearned },
+  "expert-learned-wanted-after": { type: "expert-learned-wanted-after", v, key: "adr-0004", expertRecordId, afterArrivalNumber: 3, chain },
+  "expert-learned-wanted-after with none yet": { type: "expert-learned-wanted-after", v, key: "adr-0004", expertRecordId, afterArrivalNumber: 0, chain: "" },
+  "expert-instance-learned-received kept": { type: "expert-instance-learned-received", v, key: "adr-0004", expertRecordId, id: learnedId, outcome: "kept", arrivalNumber: 4 },
+  "expert-instance-learned-received removed": { type: "expert-instance-learned-received", v, key: "adr-0004", expertRecordId, id: removedId, outcome: "removed" },
+  "expert-instance-learned-received refused": { type: "expert-instance-learned-received", v, key: "adr-0004", expertRecordId, id: learnedId, outcome: "refused", reason: "not-an-instance-here" },
+  "expert-learned-since": { type: "expert-learned-since", v, key: "adr-0004", expertRecordId, afterArrivalNumber: 3, entries: learnedEntries, chain, lastArrivalNumber: 6 },
+  "expert-learned-since started again": { type: "expert-learned-since", v, key: "adr-0004", expertRecordId, afterArrivalNumber: 0, entries: [{ ...thingLearned, kind: "learned", arrivalNumber: 1 }], chain, lastArrivalNumber: 2, startedAgain: true, more: true },
+  "expert-learned-wanted-after-refused": { type: "expert-learned-wanted-after-refused", v, key: "adr-0004", expertRecordId, reason: "record-gone" },
   "runner that starts hidden sessions": { type: "runner", v, account: adam, machine: { name: "sevengill" }, drive: true, hiddenStarts: true },
   "drive start hidden": { type: "drive", v, kind: "start", id: "d13", by: adam, folder: "/Users/sam/code/isoplan", branch: "feat/dark-mode", project: isoplan, instruction: "Add a dark mode.", permissions: "auto", hidden: true },
   "runner that can create experts from suggestions": { type: "runner", v, account: adam, machine: { name: "sevengill" }, canCreateExpertsFromSuggestions: true, expertInstances: true },
@@ -446,6 +477,18 @@ const parsers = {
   "set-up-expert-instance again": parseOfficeServerMessage,
   "expert-set-up-offer-ended": parseOfficeServerMessage,
   "expert-questions-asked-on-your-other-computers": parseOfficeServerMessage,
+  "runner that shares what expert instances learn": parseDataLayerMessage,
+  "expert-directory that shares what expert instances learn": parseOfficeServerMessage,
+  "expert-definition with how much learned elsewhere a question carries": parseDataLayerMessage,
+  "expert-instance-learned": parseDataLayerMessage,
+  "expert-learned-wanted-after": parseDataLayerMessage,
+  "expert-learned-wanted-after with none yet": parseDataLayerMessage,
+  "expert-instance-learned-received kept": parseOfficeServerMessage,
+  "expert-instance-learned-received removed": parseOfficeServerMessage,
+  "expert-instance-learned-received refused": parseOfficeServerMessage,
+  "expert-learned-since": parseOfficeServerMessage,
+  "expert-learned-since started again": parseOfficeServerMessage,
+  "expert-learned-wanted-after-refused": parseOfficeServerMessage,
   "runner that starts hidden sessions": parseDataLayerMessage,
   "drive start hidden": parseOfficeServerMessage,
   "runner that can create experts from suggestions": parseDataLayerMessage,
@@ -580,6 +623,18 @@ const broken: Record<keyof typeof valid, [unknown, string]> = {
   "set-up-expert-instance again": [{ ...valid["set-up-expert-instance again"], again: false }, "again"],
   "expert-set-up-offer-ended": [{ ...valid["expert-set-up-offer-ended"], why: "ignored" }, "why"],
   "expert-questions-asked-on-your-other-computers": [{ ...valid["expert-questions-asked-on-your-other-computers"], open: [{ key: "adr-0004", count: 0 }] }, "open[0].count"],
+  "runner that shares what expert instances learn": [{ ...valid["runner that shares what expert instances learn"], sharesWhatExpertInstancesLearn: false }, "sharesWhatExpertInstancesLearn"],
+  "expert-directory that shares what expert instances learn": [{ ...valid["expert-directory that shares what expert instances learn"], sharesWhatExpertInstancesLearn: false }, "sharesWhatExpertInstancesLearn"],
+  "expert-definition with how much learned elsewhere a question carries": [{ ...valid["expert-definition"], definition: { ...expertDefinition, learnedElsewhereTokensPerQuestion: 0 } }, "definition.learnedElsewhereTokensPerQuestion"],
+  "expert-instance-learned": [{ ...valid["expert-instance-learned"], id: "learned-1" }, "id"],
+  "expert-learned-wanted-after": [{ ...valid["expert-learned-wanted-after"], chain: chain.toUpperCase() }, "chain"],
+  "expert-learned-wanted-after with none yet": [{ ...valid["expert-learned-wanted-after with none yet"], afterArrivalNumber: -1 }, "afterArrivalNumber"],
+  "expert-instance-learned-received kept": [{ ...valid["expert-instance-learned-received kept"], arrivalNumber: 0 }, "arrivalNumber"],
+  "expert-instance-learned-received removed": [{ ...valid["expert-instance-learned-received removed"], outcome: "deleted" }, "outcome"],
+  "expert-instance-learned-received refused": [{ ...valid["expert-instance-learned-received refused"], reason: "gone" }, "reason"],
+  "expert-learned-since": [{ ...valid["expert-learned-since"], entries: [{ ...learnedEntries[0], kind: "forgotten" }] }, "entries[0].kind"],
+  "expert-learned-since started again": [{ ...valid["expert-learned-since started again"], lastArrivalNumber: 1.5 }, "lastArrivalNumber"],
+  "expert-learned-wanted-after-refused": [{ ...valid["expert-learned-wanted-after-refused"], reason: "removed" }, "reason"],
   "runner that starts hidden sessions": [{ ...valid["runner that starts hidden sessions"], hiddenStarts: false }, "hiddenStarts"],
   "drive start hidden": [{ ...valid["drive start hidden"], hidden: "yes" }, "hidden"],
   "runner that can create experts from suggestions": [{ ...valid["runner that can create experts from suggestions"], canCreateExpertsFromSuggestions: false }, "canCreateExpertsFromSuggestions"],
@@ -1178,6 +1233,72 @@ describe("expert records and instances", () => {
       const refused = { ...valid["expert-definition-result key-taken"], reason };
       expect(parseOfficeServerMessage(refused)).toEqual({ ok: true, message: refused });
     }
+  });
+});
+
+describe("what instances learn", () => {
+  const learned = (changed: object) => parseDataLayerMessage({ ...valid["expert-instance-learned"], ...changed });
+  const since = (changed: object) => parseOfficeServerMessage({ ...valid["expert-learned-since"], ...changed });
+  const numbered = (arrivalNumber: number): WhatWasLearnedEntry => ({ ...learnedEntries[0]!, arrivalNumber });
+
+  test("a thing learned is 1 to MAX_WHAT_WAS_LEARNED_LENGTH characters and rests on 1 to MAX_FILES_WHAT_WAS_LEARNED_RESTS_ON files of its repo, as a runner sends it and as it is sent back", () => {
+    const files = (count: number) => Array.from({ length: count }, (_, i) => ({ path: `src/file-${i}.ts`, commit }));
+    const longest = { text: "x".repeat(MAX_WHAT_WAS_LEARNED_LENGTH), files: files(MAX_FILES_WHAT_WAS_LEARNED_RESTS_ON) };
+    expect(learned(longest)).toMatchObject({ ok: true });
+    expect(since({ entries: [{ ...numbered(4), ...longest }] })).toMatchObject({ ok: true });
+    for (const [changed, path] of [
+      [{ text: "" }, "text"],
+      [{ text: "x".repeat(MAX_WHAT_WAS_LEARNED_LENGTH + 1) }, "text"],
+      [{ files: [] }, "files"],
+      [{ files: files(MAX_FILES_WHAT_WAS_LEARNED_RESTS_ON + 1) }, "files"],
+      [{ files: [{ path: "../secrets.txt" }] }, "files[0].path"],
+      [{ files: [{ path: "src\\a.ts" }] }, "files[0].path"],
+      [{ files: [{ path: "C:/w/isoplan/src/a.ts" }] }, "files[0].path"],
+      [{ files: [{ path: "src/a.ts", commit: "0123abc" }] }, "files[0].commit"],
+    ] as const) {
+      for (const [result, where] of [
+        [learned(changed), path],
+        [since({ entries: [{ ...numbered(4), ...changed }] }), `entries[0].${path}`],
+      ] as const) {
+        expect(result).toMatchObject({ ok: false, kind: "invalid" });
+        expect(!result.ok && result.error).toContain(where);
+      }
+    }
+  });
+
+  test("an expert-learned-since carries at most MAX_WHAT_WAS_LEARNED_ENTRIES_PER_MESSAGE entries, in increasing arrival numbers above afterArrivalNumber and at most lastArrivalNumber, and says startedAgain only from 0", () => {
+    const many = (count: number) => Array.from({ length: count }, (_, i) => numbered(i + 1));
+    expect(since({ afterArrivalNumber: 0, entries: many(MAX_WHAT_WAS_LEARNED_ENTRIES_PER_MESSAGE), lastArrivalNumber: 500, more: true })).toMatchObject({ ok: true });
+    expect(since({ afterArrivalNumber: 3, entries: [], lastArrivalNumber: 3 })).toMatchObject({ ok: true });
+    for (const [changed, path] of [
+      [{ afterArrivalNumber: 0, entries: many(MAX_WHAT_WAS_LEARNED_ENTRIES_PER_MESSAGE + 1), lastArrivalNumber: 500 }, "entries"],
+      [{ entries: [numbered(5), numbered(4)] }, "entries[1].arrivalNumber"],
+      [{ entries: [numbered(4), numbered(4)] }, "entries[1].arrivalNumber"],
+      [{ afterArrivalNumber: 4, entries: [numbered(4)] }, "entries[0].arrivalNumber"],
+      [{ entries: [numbered(4)], lastArrivalNumber: 3 }, "entries[0].arrivalNumber"],
+      [{ startedAgain: true }, "startedAgain"],
+    ] as const) {
+      const result = since(changed);
+      expect(result).toMatchObject({ ok: false, kind: "invalid" });
+      expect(!result.ok && result.error).toContain(path);
+    }
+  });
+
+  test("only a thing learned the server kept carries its arrival number, and it must", () => {
+    const { arrivalNumber: _, ...keptWithoutItsNumber } = valid["expert-instance-learned-received kept"];
+    for (const message of [
+      keptWithoutItsNumber,
+      { ...valid["expert-instance-learned-received removed"], arrivalNumber: 4 },
+      { ...valid["expert-instance-learned-received refused"], arrivalNumber: 4 },
+    ]) {
+      const result = parseOfficeServerMessage(message);
+      expect(result).toMatchObject({ ok: false, kind: "invalid" });
+      expect(!result.ok && result.error).toContain("arrivalNumber");
+    }
+  });
+
+  test("an entry adds its thing learned's own id to the chain, removed since or not, and a removal `removal:<id>`", () => {
+    expect(learnedEntries.map(arrivalEntryId)).toEqual([learnedId, removedId, `removal:${removedId}`]);
   });
 });
 

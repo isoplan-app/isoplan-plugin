@@ -226,6 +226,9 @@ export const HelloMessageSchema = z.object({
  * up from their expert records and answers its own sessions' questions from them; it sends and
  * takes the messages of "Expert records and instances" (see `expert-directory`). The server sends
  * none of them to a runner that didn't say it.
+ * `sharesWhatExpertInstancesLearn` (protocol 0.18.0, isoplan-app#366): this runner sends what its
+ * instances' forks learn to their expert records, and takes what other instances learned, in the
+ * messages of "What instances learn". The server sends none of them to a runner that didn't say it.
  */
 export const RunnerHelloMessageSchema = z.object({
   type: z.literal("runner"),
@@ -241,6 +244,7 @@ export const RunnerHelloMessageSchema = z.object({
   hiddenStarts: z.literal(true).optional(),
   canCreateExpertsFromSuggestions: z.literal(true).optional(),
   expertInstances: z.literal(true).optional(),
+  sharesWhatExpertInstancesLearn: z.literal(true).optional(),
 });
 
 /** All of the session's facts. Sent on connect and on repair. */
@@ -647,6 +651,12 @@ const BasedOn = z.object({ expertRecordId: ExpertRecordIdSchema, revision: Revis
  * its project, one with a remote, never a folder on one computer (`local:`); its subject; the model
  * it grounds with; the context, in tokens, at which its junior is promoted (`promoteAtTokens`); the
  * folders and globs of its repo it covers (`areas`); and its proof question with the answer expected.
+ * `learnedElsewhereTokensPerQuestion` (protocol 0.18.0, isoplan-app#366): the most tokens of what
+ * other instances learned that one fork's question carries, and that a new generation's grounding
+ * carries; absent is DEFAULT_LEARNED_ELSEWHERE_TOKENS_PER_QUESTION. A runner sends it only when the
+ * expert file sets it, so a definition that never set it is the same as before. An owner's computer
+ * from before 0.18.0 publishes the definition without it, which the server takes as a change, so
+ * every computer of a person is updated.
  * The rest of an expert file is that computer's own, and never leaves it.
  */
 export const ExpertDefinitionSchema = z.object({
@@ -657,6 +667,7 @@ export const ExpertDefinitionSchema = z.object({
   promoteAtTokens: z.number().int().positive(),
   areas: z.array(AreaPathSchema).max(MAX_AREA_PATHS),
   proof: Proof,
+  learnedElsewhereTokensPerQuestion: z.number().int().positive().max(1_000_000).optional(),
 });
 
 /**
@@ -803,6 +814,114 @@ export const ExpertProofFailedMessageSchema = z
   .superRefine((message, context) => {
     if ((message.answer === undefined) === (message.answerHeld === undefined)) context.addIssue({ code: "custom", path: ["answer"], message: "the fork's answer, or answerHeld: one of the two" });
   });
+
+// What instances learn (protocol 0.18.0, isoplan-app#366): what a fork of one computer's instance of
+// an expert learns while answering reaches every other instance of it, through the expert record.
+// The runner sends a thing learned to the record (`expert-instance-learned`): its text, the files it
+// rests on with the commit each was read at, when it was learned, and an id the runner made; never
+// the words of the question or of its answer. It checks it on its computer first, against the secret
+// patterns and its personal-data patterns, and a match is never sent. The server keeps one of each
+// id per record, so the same id again gets the same answer (`expert-instance-learned-received`), and
+// numbers each on arrival: 1, 2, 3, … per record. A removal on the expert's card is an entry of the
+// same sequence, numbered in turn, naming the thing removed and when, never who removed it. Over the
+// sequence each side keeps a chain: sha256, in lowercase hex, of the chain before, "\n" and the
+// entry's `arrivalEntryId`; "" before the first entry. Each side works it out itself, with sha256,
+// since the floor's bundle imports this package too.
+// A runner asks for a record's entries after its own last arrival number, with its own chain there
+// (`expert-learned-wanted-after`). The server answers `expert-learned-since`, from 0 and marked
+// `startedAgain` when that number is beyond its last or its chain there differs (a server restored
+// from an older copy), and then pushes each new entry of the record on that connection; or, when it
+// can't take the ask, `expert-learned-wanted-after-refused`, so the runner is never left waiting.
+// A runner that can says `sharesWhatExpertInstancesLearn` in its hello, and the server says it in
+// the `expert-directory` it sends such a runner. The server sends none of the family to a runner
+// whose hello didn't say it; a runner sends none on a connection whose first `expert-directory`
+// didn't, and only after a listing (`expert-instance-states`) on that connection, so the server
+// knows the instance first. As for "Expert records and instances", a runner sends the family only
+// while its link is up and counts a message sent only once it went.
+// An older side: a server from before 0.18.0 doesn't say the flag, so a 0.18.0 runner sends it
+// nothing of the family, keeps what its forks learn waiting, and carries nothing from elsewhere into
+// its forks, until that server is updated. A runner from before 0.18.0 doesn't say it, so it is sent
+// none: its instances learn only into their own trunks, as in 0.17.0, and it drops the directory's
+// flag and a definition's `learnedElsewhereTokensPerQuestion` as keys it doesn't know.
+
+/** The longest thing learned a runner sends: a fork's <learned> block is cut to this. */
+export const MAX_WHAT_WAS_LEARNED_LENGTH = 3000;
+/** The most files one thing learned names. */
+export const MAX_FILES_WHAT_WAS_LEARNED_RESTS_ON = 50;
+/** The most entries one `expert-learned-since` carries: more go in the messages after it. */
+export const MAX_WHAT_WAS_LEARNED_ENTRIES_PER_MESSAGE = 100;
+/** How much of what other instances learned one fork's question carries, in tokens, when the definition says none (D17). */
+export const DEFAULT_LEARNED_ELSEWHERE_TOKENS_PER_QUESTION = 20_000;
+
+/** Made by the runner that wrote it: the server keeps one of each per expert record. */
+export const WhatWasLearnedIdSchema = z.uuid();
+/** Numbered by the server as each entry reaches an expert record: 1, 2, 3, … per record. */
+const ArrivalNumber = z.number().int().positive();
+/** An arrival number, or 0 for none yet. */
+const ArrivalNumberOrNone = z.number().int().nonnegative();
+/** The chain at an arrival number: sha256, in lowercase hex, of the chain before, "\n" and the entry's `arrivalEntryId`; "" before the first entry. */
+const ArrivalChain = z.union([z.literal(""), z.string().regex(/^[0-9a-f]{64}$/, "a sha256 in lowercase hex")]);
+/** A file a thing learned rests on, and the commit it was read at; absent when unknown. */
+export const FileWhatWasLearnedRestsOnSchema = z.object({ path: AreaPathSchema, commit: Commit.optional() });
+/** Why the server can't take a thing learned or an ask: `record-gone`, the office holds no record of that id under the key; `not-an-instance-here`, this computer lists no instance of it. */
+const WhatWasLearnedRefusal = z.enum(["record-gone", "not-an-instance-here"]);
+/** Only `kept` carries an arrival number. */
+const NoArrivalNumber = z.never().optional();
+
+const whatWasLearned = {
+  id: WhatWasLearnedIdSchema,
+  text: z.string().min(1).max(MAX_WHAT_WAS_LEARNED_LENGTH),
+  files: z.array(FileWhatWasLearnedRestsOnSchema).min(1).max(MAX_FILES_WHAT_WAS_LEARNED_RESTS_ON),
+  learnedAt: z.iso.datetime({ offset: true }),
+};
+
+/**
+ * One entry of an expert record's sequence, in arrival order: `learned`, a thing an instance learned;
+ * `learned-then-removed`, one removed on the card since (its text and files gone); `removed`, the
+ * removal itself, of the thing `id`, at `at`. Who removed it stays on the server.
+ */
+export const WhatWasLearnedEntrySchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("learned"), arrivalNumber: ArrivalNumber, ...whatWasLearned }),
+  z.object({ kind: z.literal("learned-then-removed"), arrivalNumber: ArrivalNumber, id: WhatWasLearnedIdSchema }),
+  z.object({ kind: z.literal("removed"), arrivalNumber: ArrivalNumber, id: WhatWasLearnedIdSchema, at: z.iso.datetime({ offset: true }) }),
+]);
+
+/** The id an entry adds to the chain: a thing learned's own id, or `removal:<id>` for its removal. */
+export const arrivalEntryId = (entry: Pick<WhatWasLearnedEntry, "kind" | "id">) => (entry.kind === "removed" ? `removal:${entry.id}` : entry.id);
+
+/**
+ * A fork of this computer's instance of the expert `key`, tied to the record `expertRecordId`, learned
+ * this (protocol 0.18.0): its `text`, cut to MAX_WHAT_WAS_LEARNED_LENGTH; the `files` it rests on,
+ * each with the commit it was read at where the runner knows it; `learnedAt`; and `id`, which the
+ * runner made. Never the question's or the answer's words. Sent once it passed both checks on this
+ * computer, after each listing this connection sends and again while unanswered or refused
+ * `not-an-instance-here`, until `expert-instance-learned-received` for its id comes `kept`,
+ * `removed` or refused `record-gone`. The same id again is the same thing learned.
+ */
+export const ExpertInstanceLearnedMessageSchema = z.object({
+  type: z.literal("expert-instance-learned"),
+  v: Version,
+  key: ExpertNameSchema,
+  expertRecordId: ExpertRecordIdSchema,
+  ...whatWasLearned,
+});
+
+/**
+ * Send this computer every entry of the record `expertRecordId` after `afterArrivalNumber`, and push
+ * it the new ones on this connection (protocol 0.18.0), answered `expert-learned-since` or
+ * `expert-learned-wanted-after-refused`. Always this computer's own last arrival number for the
+ * record and its `chain` there: 0 and "" when it has none. Sent after a listing on this connection
+ * for each record an instance here is tied to that hasn't been asked for on it, again after a
+ * refusal `not-an-instance-here`, and to start again; one unanswered at a time per record.
+ */
+export const ExpertLearnedWantedAfterMessageSchema = z.object({
+  type: z.literal("expert-learned-wanted-after"),
+  v: Version,
+  key: ExpertNameSchema,
+  expertRecordId: ExpertRecordIdSchema,
+  afterArrivalNumber: ArrivalNumberOrNone,
+  chain: ArrivalChain,
+});
 
 const driven = { type: z.literal("driven"), v: Version };
 
@@ -984,6 +1103,8 @@ export const DataLayerMessageSchema = z.discriminatedUnion("type", [
   ExpertQuestionMessageSchema,
   ExpertSetUpOfferedMessageSchema,
   ExpertProofFailedMessageSchema,
+  ExpertInstanceLearnedMessageSchema,
+  ExpertLearnedWantedAfterMessageSchema,
 ]);
 
 // Office server → data layer.
@@ -1436,7 +1557,9 @@ export const ServerExpertCreationSuggestionEndedMessageSchema = z.discriminatedU
  * questions per person per expert, questions per person in the last day, and the hours after which
  * a question still unanswered ends. Sent to a runner that said `expertInstances` once its hello is
  * let in, even an empty one, and whenever it changes; the first on a connection opens the family on
- * it (see "Expert records and instances"). Each key once.
+ * it (see "Expert records and instances"). Each key once. `sharesWhatExpertInstancesLearn` (protocol
+ * 0.18.0): this server takes and sends the messages of "What instances learn", said only to a runner
+ * whose hello said it; the first directory on a connection decides it for that connection.
  */
 export const ExpertDirectoryMessageSchema = z
   .object({
@@ -1448,6 +1571,7 @@ export const ExpertDirectoryMessageSchema = z
       perPersonPerDay: z.number().int().positive(),
       maxAgeHours: z.number().positive(),
     }),
+    sharesWhatExpertInstancesLearn: z.literal(true).optional(),
   })
   .superRefine((message, context) => checkEachKeyOnce("experts", message.experts, context));
 
@@ -1548,6 +1672,72 @@ export const ExpertQuestionsAskedOnYourOtherComputersMessageSchema = z.object({
   askedAtInTheLastDay: z.array(z.iso.datetime({ offset: true })).max(MAX_EXPERT_QUESTION_TIMES_IN_THE_LAST_DAY),
 });
 
+const expertInstanceLearnedReceived = {
+  type: z.literal("expert-instance-learned-received"),
+  v: Version,
+  key: ExpertNameSchema,
+  expertRecordId: ExpertRecordIdSchema,
+  id: WhatWasLearnedIdSchema,
+};
+
+/**
+ * The answer to `expert-instance-learned`, by its `id` (protocol 0.18.0): `kept`, at `arrivalNumber`
+ * in the record; `removed`, it was kept and removed on the card since; or `refused`, for its `reason`
+ * (`not-an-instance-here`: the runner sends it again after its next listing, and on its timer). A
+ * repeat of the same id gets the same answer. Only `kept` carries an arrival number.
+ */
+export const ExpertInstanceLearnedReceivedMessageSchema = z.discriminatedUnion("outcome", [
+  z.object({ ...expertInstanceLearnedReceived, outcome: z.literal("kept"), arrivalNumber: ArrivalNumber }),
+  z.object({ ...expertInstanceLearnedReceived, outcome: z.literal("removed"), arrivalNumber: NoArrivalNumber }),
+  z.object({ ...expertInstanceLearnedReceived, outcome: z.literal("refused"), reason: WhatWasLearnedRefusal, arrivalNumber: NoArrivalNumber }),
+]);
+
+/**
+ * Entries of the record `expertRecordId` after `afterArrivalNumber`, in arrival order (protocol
+ * 0.18.0): in answer to `expert-learned-wanted-after`, in as many messages as it takes, each at most
+ * MAX_WHAT_WAS_LEARNED_ENTRIES_PER_MESSAGE entries, each continuing from the one before, `more` on
+ * all but the last; then pushed on that connection as entries arrive, each continuing from the last
+ * sent. `chain` is the chain at its last entry, or at `afterArrivalNumber` when it carries none.
+ * `lastArrivalNumber` is the server's last for the record, at or above every entry's. `startedAgain`,
+ * on the first message of an answer only, which then starts from 0: the number asked after is beyond
+ * the server's last, or the chain asked with isn't the server's at that number (a restored server).
+ */
+export const ExpertLearnedSinceMessageSchema = z
+  .object({
+    type: z.literal("expert-learned-since"),
+    v: Version,
+    key: ExpertNameSchema,
+    expertRecordId: ExpertRecordIdSchema,
+    afterArrivalNumber: ArrivalNumberOrNone,
+    entries: z.array(WhatWasLearnedEntrySchema).max(MAX_WHAT_WAS_LEARNED_ENTRIES_PER_MESSAGE),
+    chain: ArrivalChain,
+    lastArrivalNumber: ArrivalNumberOrNone,
+    startedAgain: z.literal(true).optional(),
+    more: z.literal(true).optional(),
+  })
+  .superRefine((message, context) => {
+    let before = message.afterArrivalNumber;
+    message.entries.forEach((entry, i) => {
+      if (entry.arrivalNumber <= before) context.addIssue({ code: "custom", path: ["entries", i, "arrivalNumber"], message: `above ${before}: each entry's arrival number is above the one before it, the first above afterArrivalNumber` });
+      if (entry.arrivalNumber > message.lastArrivalNumber) context.addIssue({ code: "custom", path: ["entries", i, "arrivalNumber"], message: `at most lastArrivalNumber, ${message.lastArrivalNumber}` });
+      before = Math.max(before, entry.arrivalNumber);
+    });
+    if (message.startedAgain && message.afterArrivalNumber !== 0) context.addIssue({ code: "custom", path: ["startedAgain"], message: "only on an answer from 0: afterArrivalNumber 0" });
+  });
+
+/**
+ * The answer to an `expert-learned-wanted-after` the server can't take (protocol 0.18.0), so the
+ * runner is never left waiting: `record-gone`, and the runner deletes what it has of that record;
+ * `not-an-instance-here`, and it asks again after its next listing, and on its timer.
+ */
+export const ExpertLearnedWantedAfterRefusedMessageSchema = z.object({
+  type: z.literal("expert-learned-wanted-after-refused"),
+  v: Version,
+  key: ExpertNameSchema,
+  expertRecordId: ExpertRecordIdSchema,
+  reason: WhatWasLearnedRefusal,
+});
+
 export const OfficeServerMessageSchema = z.discriminatedUnion("type", [
   RepairMessageSchema,
   WelcomeMessageSchema,
@@ -1575,6 +1765,9 @@ export const OfficeServerMessageSchema = z.discriminatedUnion("type", [
   SetUpExpertInstanceMessageSchema,
   ExpertSetUpOfferEndedMessageSchema,
   ExpertQuestionsAskedOnYourOtherComputersMessageSchema,
+  ExpertInstanceLearnedReceivedMessageSchema,
+  ExpertLearnedSinceMessageSchema,
+  ExpertLearnedWantedAfterRefusedMessageSchema,
 ]);
 
 export type HandoffRepo = z.infer<typeof HandoffRepoSchema>;
@@ -1638,6 +1831,13 @@ export type ExpertDeletedMessage = z.infer<typeof ExpertDeletedMessageSchema>;
 export type SetUpExpertInstanceMessage = z.infer<typeof SetUpExpertInstanceMessageSchema>;
 export type ExpertSetUpOfferEndedMessage = z.infer<typeof ExpertSetUpOfferEndedMessageSchema>;
 export type ExpertQuestionsAskedOnYourOtherComputersMessage = z.infer<typeof ExpertQuestionsAskedOnYourOtherComputersMessageSchema>;
+export type FileWhatWasLearnedRestsOn = z.infer<typeof FileWhatWasLearnedRestsOnSchema>;
+export type WhatWasLearnedEntry = z.infer<typeof WhatWasLearnedEntrySchema>;
+export type ExpertInstanceLearnedMessage = z.infer<typeof ExpertInstanceLearnedMessageSchema>;
+export type ExpertLearnedWantedAfterMessage = z.infer<typeof ExpertLearnedWantedAfterMessageSchema>;
+export type ExpertInstanceLearnedReceivedMessage = z.infer<typeof ExpertInstanceLearnedReceivedMessageSchema>;
+export type ExpertLearnedSinceMessage = z.infer<typeof ExpertLearnedSinceMessageSchema>;
+export type ExpertLearnedWantedAfterRefusedMessage = z.infer<typeof ExpertLearnedWantedAfterRefusedMessageSchema>;
 export type ExpertCreationSuggestionMessage = z.infer<typeof ExpertCreationSuggestionMessageSchema>;
 export type ExpertCreationSuggestionRepetition = z.infer<typeof ExpertCreationSuggestionRepetitionSchema>;
 export type RunnerExpertCreationSuggestionEndedMessage = z.infer<typeof RunnerExpertCreationSuggestionEndedMessageSchema>;
