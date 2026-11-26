@@ -34,7 +34,9 @@
 // - A deletion, of the record this computer's file is tied to (`expert-deleted`, or that record gone
 //   from the directory of the server an instance file was set up from): the expert stops and its
 //   trunks, clone and folder are deleted, its instance file too; an owner's expert file moves to
-//   ~/.claude/isoplan/deleted-experts/<key>-<ms>.json, so it is never published again.
+//   ~/.claude/isoplan/deleted-experts/<key>-<ms>.json, so it is never published again. One that
+//   stopped because its file was removed here goes the same way, its folder still tied to the record,
+//   so a new file of the key is published as a new expert.
 // - A proof that failed until its tries ran out, on a computer whose record isn't its person's own,
 //   tells the owner once per revision (D20): its answer, secret-checked (a match sends only
 //   `answerHeld`).
@@ -249,9 +251,11 @@ export function createExpertInstances(o: ExpertInstancesOptions): ExpertInstance
       await fs.mkdir(path.dirname(aside), { recursive: true });
       await renamed(o.experts.expertFilePath(key), aside).catch((err: Error) => log(key, `couldn't move its expert file aside: ${err.message}`));
       log(key, `${why}: it stops and its folder goes; its expert file was moved to ${aside}`);
-    } else {
+    } else if (running) {
       await fs.rm(o.experts.instanceFilePath(key), { force: true });
       log(key, `${why}: it stops, and its instance file and folder go`);
+    } else {
+      log(key, `${why}: it had stopped here, its file removed, and now its folder goes`);
     }
     o.experts.health(key).say("deleted", { server, why });
     records.delete(key);
@@ -403,8 +407,10 @@ export function createExpertInstances(o: ExpertInstancesOptions): ExpertInstance
       const running = tiedTo(server, m.key, m.expertRecordId);
       const s = setting.get(m.key);
       const settingUp = heldOn(server, m.key)?.setUp?.expertRecordId === m.expertRecordId || (s?.server === server && s.expertRecordId === m.expertRecordId);
-      if (!running && !settingUp) return;
-      if (!running) {
+      // Its file removed here, it stopped, but its folder still ties the key to the record: that goes too, so a new file of the key is a new expert.
+      const stoppedHere = !o.experts.running(m.key) && heldOn(server, m.key)?.record?.expertRecordId === m.expertRecordId;
+      if (!running && !settingUp && !stoppedHere) return;
+      if (!running && !stoppedHere) {
         setting.delete(m.key);
         await save(m.key, (x) => void delete x[server]!.setUp);
         wasDeleted(m.key);

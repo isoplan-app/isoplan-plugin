@@ -229,6 +229,8 @@ export function createExpertRecordLink(o: ExpertRecordLinkOptions): ExpertRecord
 
   o.experts.onChange(() => gate && resync(false));
   o.instances.onChange(() => gate && resync(false));
+  // A key deleted here is a new expert from its next file on: that goes even with the definition sent before.
+  o.instances.onDeleted((key) => void sentDefinitions.delete(key));
   const timer = setInterval(() => gate && resync(false), o.checkMs);
   timer.unref?.();
 

@@ -22741,10 +22741,10 @@ function createExpertInstances(o) {
 			await fs.mkdir(path.dirname(aside), { recursive: true });
 			await renamed(o.experts.expertFilePath(key), aside).catch((err) => log(key, `couldn't move its expert file aside: ${err.message}`));
 			log(key, `${why}: it stops and its folder goes; its expert file was moved to ${aside}`);
-		} else {
+		} else if (running) {
 			await fs.rm(o.experts.instanceFilePath(key), { force: true });
 			log(key, `${why}: it stops, and its instance file and folder go`);
-		}
+		} else log(key, `${why}: it had stopped here, its file removed, and now its folder goes`);
 		o.experts.health(key).say("deleted", {
 			server,
 			why
@@ -22915,8 +22915,9 @@ function createExpertInstances(o) {
 			const running = tiedTo(server, m.key, m.expertRecordId);
 			const s = setting.get(m.key);
 			const settingUp = heldOn(server, m.key)?.setUp?.expertRecordId === m.expertRecordId || s?.server === server && s.expertRecordId === m.expertRecordId;
-			if (!running && !settingUp) return;
-			if (!running) {
+			const stoppedHere = !o.experts.running(m.key) && heldOn(server, m.key)?.record?.expertRecordId === m.expertRecordId;
+			if (!running && !settingUp && !stoppedHere) return;
+			if (!running && !stoppedHere) {
 				setting.delete(m.key);
 				await save(m.key, (x) => void delete x[server].setUp);
 				wasDeleted(m.key);
@@ -23749,6 +23750,7 @@ function createExpertRecordLink(o) {
 	};
 	o.experts.onChange(() => gate && resync(false));
 	o.instances.onChange(() => gate && resync(false));
+	o.instances.onDeleted((key) => void sentDefinitions.delete(key));
 	const timer = setInterval(() => gate && resync(false), o.checkMs);
 	timer.unref?.();
 	o.instances.attach(server, {
@@ -25474,6 +25476,7 @@ function createExperts(o) {
 			saidIgnored: false,
 			saidNoRecord: false,
 			running: null,
+			stoppedExpert: null,
 			chain: Promise.resolve()
 		});
 		return s;
@@ -25538,6 +25541,7 @@ function createExperts(o) {
 			running.expert.stop();
 			stopped.push(running.expert);
 			s.running = null;
+			s.stoppedExpert = running.expert;
 			return changed();
 		}
 		if (running) {
@@ -25568,6 +25572,7 @@ function createExperts(o) {
 			instance,
 			expert
 		};
+		s.stoppedExpert = null;
 		loading.push(expert.start().catch((err) => o.log(`expert ${key}: couldn't start: ${err.message}`)));
 		changed();
 	}
@@ -25610,11 +25615,12 @@ function createExperts(o) {
 		remove(key) {
 			const s = slotOf(key);
 			return queue(s, async () => {
-				const running = s.running;
+				const expert = s.running?.expert ?? s.stoppedExpert;
 				s.running = null;
+				s.stoppedExpert = null;
 				s.expertFile = null;
 				s.instanceFile = null;
-				if (running) await running.expert.remove();
+				if (expert) await expert.remove();
 				else await fs$1.promises.rm(dir(key), {
 					recursive: true,
 					force: true,

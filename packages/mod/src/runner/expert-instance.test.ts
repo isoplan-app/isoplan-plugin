@@ -215,6 +215,26 @@ test("a removed expert file stops only this computer's instance: the office is s
   }
 });
 
+test("deleted on the floor after its expert file was removed here: its folder goes, and a new expert file of the key is published as a new expert, on no record", async () => {
+  const c = await computer();
+  try {
+    await publishOwn(c);
+    await until(() => listed(c)?.[0]?.state === "ready", 30000);
+    fs.rmSync(c.file("experts", "adr.json"));
+    await c.experts.refresh("adr");
+    await until(() => listed(c)?.length === 0);
+    c.take({ type: "expert-deleted", v: PROTOCOL_VERSION, key: "adr", expertRecordId: RECORD, by: ADA });
+    await until(() => !fs.existsSync(c.file("experts", "adr")));
+    c.take(directoryOf([]));
+    writeExpertFile(c);
+    await c.experts.refresh("adr");
+    await until(() => c.of("expert-definition").length === 2);
+    expect(c.of("expert-definition")[1]).not.toHaveProperty("basedOn");
+  } finally {
+    await c.close();
+  }
+});
+
 test("a proof that fails until its tries run out, on a computer that isn't the owner's, tells the owner once (D20), with its answer, or only that it was held when it looks like a secret; Try again grounds again", async () => {
   for (const [answer, sent] of [
     ["Forty-three.", { answer: "Forty-three." }],

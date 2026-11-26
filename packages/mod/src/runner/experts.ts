@@ -112,6 +112,8 @@ interface Slot {
   saidIgnored: boolean;
   saidNoRecord: boolean;
   running: RunningExpert | null;
+  /** The expert stopped when its files were removed, kept so that `remove` still deletes its trunks. */
+  stoppedExpert: Expert | null;
   chain: Promise<void>;
 }
 
@@ -143,7 +145,7 @@ export function createExperts(o: ExpertsOptions): Experts {
   };
   const slotOf = (key: string) => {
     let s = slots.get(key);
-    if (!s) slots.set(key, (s = { key, expertFile: null, instanceFile: null, badText: { expert: null, instance: null }, saidIgnored: false, saidNoRecord: false, running: null, chain: Promise.resolve() }));
+    if (!s) slots.set(key, (s = { key, expertFile: null, instanceFile: null, badText: { expert: null, instance: null }, saidIgnored: false, saidNoRecord: false, running: null, stoppedExpert: null, chain: Promise.resolve() }));
     return s;
   };
 
@@ -211,6 +213,7 @@ export function createExperts(o: ExpertsOptions): Experts {
       running.expert.stop();
       stopped.push(running.expert);
       s.running = null;
+      s.stoppedExpert = running.expert;
       return changed();
     }
     if (running) {
@@ -231,6 +234,7 @@ export function createExperts(o: ExpertsOptions): Experts {
       onTriesRanOut: (ran) => triesListeners.forEach((l) => l(key, ran)),
     });
     s.running = { key, from, file, instance, expert };
+    s.stoppedExpert = null;
     loading.push(expert.start().catch((err: Error) => o.log(`expert ${key}: couldn't start: ${err.message}`)));
     changed();
   }
@@ -280,11 +284,12 @@ export function createExperts(o: ExpertsOptions): Experts {
     remove(key) {
       const s = slotOf(key);
       return queue(s, async () => {
-        const running = s.running;
+        const expert = s.running?.expert ?? s.stoppedExpert;
         s.running = null;
+        s.stoppedExpert = null;
         s.expertFile = null;
         s.instanceFile = null;
-        if (running) await running.expert.remove();
+        if (expert) await expert.remove();
         else await fs.promises.rm(dir(key), { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => {});
         changed();
       });
