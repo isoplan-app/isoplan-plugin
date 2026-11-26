@@ -240,6 +240,29 @@ export interface ExpertReadyLine {
   folder: string;
 }
 
+/**
+ * This computer has no instance of the expert `key` of the office `server`, which this session's
+ * agent asked, so its set-up is offered (isoplan-app#340, runner/expert-instance-set-up-offer.ts):
+ * `name` is how people read it, and `url` opens its card on that office's floor, with its set-up.
+ * Sent by the runner itself to the session whose agent asked, and again when its pipe's end connects
+ * afresh, while the offer is open. The hooks module shows it in the status line until an
+ * ExpertSetUpOfferEndedLine for the same `server` and `key` comes.
+ */
+export interface ExpertSetUpOfferLine {
+  type: "expert-set-up-offer";
+  server: string;
+  key: string;
+  name: string;
+  url: string;
+}
+
+/** The offer to set up the expert `key` from `server` ended: set up, dismissed, expired, or gone. */
+export interface ExpertSetUpOfferEndedLine {
+  type: "expert-set-up-offer-ended";
+  server: string;
+  key: string;
+}
+
 /** A problem worth a line in the debug log. */
 export interface LogLine {
   type: "log";
@@ -257,10 +280,11 @@ export interface TitleReply {
  * `asked` is the end of a question the session's agent asked the room, arriving after it stopped
  * waiting, and `ask-rights` whether the session may ask its room (#49), each with the office server
  * it came from (#105), which the room is asked through. An `asked` with `expert` is the end of a
- * question the agent asked an expert, and `expert-rights` the experts the session may ask through
- * that office (protocol 0.13.0).
+ * question the agent asked an expert, sent by this computer's runner, which answers it from this
+ * computer's instance of the expert (isoplan-app#340): `text` the question, `note` the end's
+ * words; and `expert-rights` the experts the session may ask through that office (protocol 0.13.0).
  */
-export type DataLayerLine = StatusLine | TitleAskLine | PairLine | WaitsLine | WindowLine | OwnerAnswerLine | UpdatedLine | SupersededLine | RunnerLine | OwnerMessageLine | LogLine | ExpertCreationSuggestionLine | ExpertCreationSuggestionEndedLine | ExpertReadyLine | ConflictMessage | ErrorMessage | FromOffice<AskedMessage> | FromOffice<AskRightsMessage> | FromOffice<ExpertRightsMessage>;
+export type DataLayerLine = StatusLine | TitleAskLine | PairLine | WaitsLine | WindowLine | OwnerAnswerLine | UpdatedLine | SupersededLine | RunnerLine | OwnerMessageLine | LogLine | ExpertCreationSuggestionLine | ExpertCreationSuggestionEndedLine | ExpertReadyLine | ExpertSetUpOfferLine | ExpertSetUpOfferEndedLine | ConflictMessage | ErrorMessage | FromOffice<AskedMessage> | FromOffice<AskRightsMessage> | FromOffice<ExpertRightsMessage>;
 
 /** A server's message, with the data-layer address of the office server that sent it; none from a data layer before #105. */
 export type FromOffice<M> = M & { server?: string };

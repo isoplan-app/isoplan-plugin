@@ -1,5 +1,7 @@
-// One expert on this machine: its generations, their grounding and proof, the forks that answer its
-// questions, its senior, learned notes, promotion and caps (design: Agent Expertise).
+// One expert on this computer: its generations, their grounding and proof, the forks that answer its
+// questions, its senior, what it learned, promotion and caps (design: Agent Expertise). It answers
+// only this computer's own sessions (#340): its instance (expert-instance.ts) gives it each
+// question, and is told each outcome.
 //
 // - A generation is a trunk session grounded once, in two turns, in the expert's own clone of its
 //   repo (expert-checkout.ts): turn 1 is the fixed grounding block (the cache breakpoint), turn 2 tells it
@@ -16,12 +18,12 @@
 //   checkout when no grounding holds it, then runs on a fork of the junior's trunk, at most maxForks
 //   at once, under the checkout's shared hold. The junior may ask its senior with an <ask-senior>
 //   reply: the runner runs a fork of the senior and gives its answer back as the junior's next turn,
-//   at most twice a question, and the first time the request's `senior` is told (the floor shows
-//   the senior joining). Forks of a senior, and trunk turns, are never given a senior.
+//   at most twice a question, and the first time the question's `onSenior` is told (the floor
+//   shows the senior joining). Forks of a senior, and trunk turns, are never given a senior.
 // - The answer's citations are stamped by the runner, not the expert: read in this fork, at its
 //   commit; else the senior's stamp; else the junior's file → commit index; else unknown. A cited
-//   file that isn't in the checkout is dropped. The answer is scanned for secrets before it goes:
-//   a match is refused at once (EXPERT_FORK_FAILED, with the pattern's name in the log), never held.
+//   file that isn't in the checkout is dropped. The answer is scanned for secrets before its session
+//   is given it: a match is refused at once (EXPERT_FORK_FAILED, with the pattern's name in the log).
 // - What a fork that asked its senior or explored learned is appended to the junior's trunk as a
 //   learned note when a file it names was read for it, one at a time, with new forks held back
 //   meanwhile so they start from it. The runner's log names each one's question. Past
@@ -31,8 +33,15 @@
 //   its transcript's last user or assistant entry (a fork never writes to it), and compares before
 //   it forks a junior or a senior and on start: a junior changed outside Isoplan is retired and a
 //   new generation grounds, and a changed senior is dropped, so the junior explores instead.
-// - A question is known by the server's question id: a request sent again for one still running is
-//   attached to it, and one that finished is answered from memory, so a question never runs twice.
+// - A question is known by its id (the asking tool call's): asked again while it runs, the newest
+//   asking is told its outcome, and one that finished is answered from memory, so a question never
+//   runs twice. An outcome is `answered`, `refused` with its code, or `not-yet` (still grounding,
+//   a checkout being reset, a junior being replaced), which isn't remembered: asked again, it runs.
+// - A failed grounding that is no longer tried again on its own tells `onTriesRanOut` why, with the
+//   proof's answer when it was the proof that failed; `retryNow` (Try again on the floor) grounds now.
+// - A state.json of version 1, from before #340, is an existing expert's: it grounds a new
+//   generation at once while its junior answers, and once that passes, every older generation
+//   retires (none stays as its senior), and state.json becomes version 2.
 //
 // Everything an expert does goes to its health log (expert-health.ts); its processes are recorded
 // in the process registry as forks of their trunk, except the judge, whose command line names none.
@@ -41,12 +50,11 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { PROTOCOL_VERSION, RefusalMessageSchema, ReplyMessageSchema, type ExpertCap, type ExpertRefusal, type ExpertState, type RefusalMessage, type ReplyMessage, type RequestMessage } from "@isoplan/protocol";
 import type { Usage } from "./answerer.js";
 import { estimate, openLedger, weighted, type CapSettings, type Ledger } from "./caps.js";
 import { claudeCommand } from "./claude-binary.js";
 import { forkEnv, hiddenSpawn, killTree, type Spawn, type Track } from "./claude.js";
-import { EXPERT_ROOM, expertOverCap } from "./expert-caps.js";
+import { EXPERT_CAP_WORDS, EXPERT_ROOM, expertOverCap, type ExpertCap } from "./expert-caps.js";
 import { createExpertCheckout, type ExpertCheckout } from "./expert-checkout.js";
 import { appendArgs, converse, expertForkArgs, judgeArgs, trunkArgs, type Conversation, type ConversationFailure, type ConverseOptions, type TurnResult } from "./expert-claude.js";
 import type { ExpertFile } from "./expert-file.js";
@@ -59,20 +67,45 @@ import type { RunGit } from "../handoff/git.js";
 import { fill } from "./prompts.js";
 import { createForkSlots } from "./runner.js";
 
-type Outgoing = ReplyMessage | RefusalMessage;
-export type AnswerExpertRequest = Extract<RequestMessage, { kind: "answer-expert" }>;
 export type ExpertSettings = CapSettings & { expertJudgeModel: string };
 
-/** One expert as the runner lists it: `repo` is its folder, which the office's list is asked about. */
+/** A question this computer's session asks the expert: `id` is the tool call's, `asker` the asking session, which its caps count by. */
+export interface ExpertQuestionForInstance {
+  id: string;
+  question: string;
+  blocking: boolean;
+  asker: string;
+}
+
+/**
+ * How a question went: answered, with the commit and branch its answer describes; refused, with its
+ * code and why (a cap with its limit and when it frees, in ms); or not yet, to be asked again.
+ */
+export type InstanceOutcome =
+  | { kind: "answered"; answer: string; commit: string; branch: string }
+  | { kind: "refused"; code: "EXPERT_CAP" | "EXPERT_FORK_FAILED" | "EXPERT_UNKNOWN"; detail: string; cap?: ExpertCap; limit?: number; frees?: number }
+  | { kind: "not-yet"; detail: string };
+
+/** Why its last grounding failed, as an asker is told: never the log's detail, which can name paths on this computer. */
+export type ExpertFailure = "proof" | "checkout" | "other";
+
+/** One expert as the runner runs it: `repo` is its folder. */
 export interface HostedExpert {
   name: string;
   repo: string;
   subject: string;
-  state: ExpertState;
+  /** `starting`: no generation of it has passed its proof question yet; `ready`: its junior answers; `failed`: its last grounding failed and none answers. */
+  state: "starting" | "ready" | "failed";
   /** It has a senior generation its junior can ask. */
   senior: boolean;
   /** The folders and globs of its repo its file says it covers; absent when it names none. */
   areas?: string[];
+  /** While it is starting: whether its generation is grounding or being asked its proof question. */
+  step?: "grounding" | "proof";
+  /** Its junior's context right after its grounding. */
+  groundingTokens?: number;
+  /** With `failed`: why. */
+  failure?: ExpertFailure;
 }
 
 export interface ExpertOptions {
@@ -97,6 +130,8 @@ export interface ExpertOptions {
   log: (text: string) => void;
   /** Told whenever `hosted()` may have changed. */
   onChange: () => void;
+  /** A failed grounding isn't tried again on its own any more: why, and the proof's answer when its proof failed. */
+  onTriesRanOut?: (ran: { why: ExpertFailure; proofAnswer: string | null }) => void;
   /** Told every trunk id, recorded or new, so the runner never reports one. */
   onTrunk?: (trunk: string) => void;
   now?: () => number;
@@ -108,17 +143,18 @@ export interface Expert {
   hosted(): HostedExpert;
   /** Reads its state; settles before any git or grounding, which run in the background. */
   start(): Promise<void>;
-  /** Its expert file changed. */
+  /** Its file changed. */
   update(file: ExpertFile): void;
-  owns(request: string): boolean;
-  /** `senior` is told the request's id when its junior first asks its senior for it. */
-  answer(request: AnswerExpertRequest, send: (m: Outgoing) => void, senior?: (id: string) => void): void;
-  release(request: string, send: (m: Outgoing) => void): void;
-  drop(request: string): void;
+  /** `onOutcome` is told how it went; `onSenior` once, when its junior first asks its senior. Asked again under its id, the newest asking is told. */
+  answer(question: ExpertQuestionForInstance, onOutcome: (outcome: InstanceOutcome) => void, onSenior?: () => void): void;
+  /** Grounds again now, as if its file had changed: Try again after a failure. */
+  retryNow(): void;
   /** No grounding, fork, append or judge running. */
   idle(): boolean;
   /** Its file was removed: its processes end, and its questions are refused. Its folder is kept. */
   stop(): void;
+  /** Its expert was deleted: it stops, and its trunks, its clone and its folder are deleted. */
+  remove(): Promise<void>;
   /** Ends every process it runs, as the runner exits. */
   close(): void;
 }
@@ -143,12 +179,6 @@ export const ANSWER_NOW = "You have asked your senior twice for this question: a
 const KEPT_ASKING = "the expert kept asking its senior instead of answering";
 const NOT_PASSED = "it didn't pass its proof question";
 const SENIOR_FAILED ="Your senior couldn't answer. Answer from your own context, exploring if you need to, in the format from your grounding.";
-
-const CAP_WORDS: Record<ExpertCap, string> = {
-  "asker-day": "questions per asking session per day",
-  "asker-open": "open questions per asking session",
-  "expert-tokens": "the expert's daily token budget",
-};
 
 const zero = (): Usage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 const add = (a: Usage, b: Usage): Usage => ({ input: a.input + b.input, output: a.output + b.output, cacheRead: a.cacheRead + b.cacheRead, cacheWrite: a.cacheWrite + b.cacheWrite });
@@ -198,14 +228,10 @@ interface Question {
   asker: string;
   blocking: boolean;
   text: string;
-  /** The newest request id for it, which its reply goes under. */
-  latest: string;
-  /** Its request ids the server hasn't dropped. */
-  requests: Set<string>;
-  send: (m: Outgoing) => void;
-  /** Told the newest request's id when its junior first asks its senior, as `send` gets its reply. */
-  senior: ((id: string) => void) | undefined;
-  /** Released while it was still being answered. */
+  /** The newest asking's: told its outcome. */
+  onOutcome: (outcome: InstanceOutcome) => void;
+  /** The newest asking's: told when its junior first asks its senior. */
+  onSenior: (() => void) | undefined;
 }
 
 export function createExpert(o: ExpertOptions): Expert {
@@ -227,14 +253,15 @@ export function createExpert(o: ExpertOptions): Expert {
   const appends = new Map<string, Promise<unknown>>(); // each trunk's last append
   const questions = new Map<string, Question>(); // running, by question id
   const inFlight = new Set<Question>(); // past the caps, not finished
-  const byRequest = new Map<string, string>(); // request id → question id
-  const finished = new Map<string, Outgoing>(); // question id → what was last sent
+  const finished = new Map<string, InstanceOutcome>(); // question id → how it went
   const waiters = new Set<() => void>();
   const transcripts = new Map<string, string>(); // trunk → its transcript's path, once found
   const live = new Map<string, number>(); // trunk → its processes running
   const discarded = new Set<string>(); // trunks whose files are deleted
 
-  let saved: SavedExpert = { version: 1, fingerprint: "", repo: file.repo, branch: "", generations: [] };
+  let saved: SavedExpert = { version: 2, setUpFromExpertRecord: true, fingerprint: "", repo: file.repo, branch: "", generations: [] };
+  // A state from before #340: its new generation, once it passes, retires every one before it.
+  let migrating = false;
   let ledger: Ledger | null = null;
   let checkout = makeCheckout(file.repo);
   let preparing: Promise<boolean> | null = null;
@@ -245,7 +272,9 @@ export function createExpert(o: ExpertOptions): Expert {
   let holding = 0; // groundings and proofs holding the checkout
   let lastFailed = false; // the last grounding failed
   // Why, as an asker is told: never the log's detail, which can name paths on this machine.
-  let lastFailure: "proof" | "checkout" | "other" = "other";
+  let lastFailure: ExpertFailure = "other";
+  let lastProofAnswer: string | null = null; // the answer of the last proof that failed
+  let proving = false; // a generation is being asked its proof question
   let promotionBlocked = false; // a promotion failed: not again until a retry, the file changes or a restart
   let retries = 0; // groundings tried again since one last passed or the file changed
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -264,8 +293,23 @@ export function createExpert(o: ExpertOptions): Expert {
   }
 
   const gen = (state: SavedGeneration["state"]) => saved.generations.find((g) => g.state === state) ?? null;
-  const state = (): ExpertState => (gen("junior") ? "ready" : !groundingRun && lastFailed ? "failed" : "starting");
-  const hosted = (): HostedExpert => ({ name, repo: file.repo, subject: file.subject, state: state(), senior: !!gen("junior") && !!gen("senior"), ...(file.areas.length && { areas: [...file.areas] }) });
+  const state = (): HostedExpert["state"] => (gen("junior") ? "ready" : !groundingRun && lastFailed ? "failed" : "starting");
+  const hosted = (): HostedExpert => {
+    const st = state();
+    const junior = gen("junior");
+    const groundingTokens = junior ? junior.groundingTokens ?? junior.meter : 0;
+    return {
+      name,
+      repo: file.repo,
+      subject: file.subject,
+      state: st,
+      senior: !!junior && !!gen("senior"),
+      ...(file.areas.length && { areas: [...file.areas] }),
+      ...(st === "starting" && groundingRun && { step: proving ? ("proof" as const) : ("grounding" as const) }),
+      ...(groundingTokens > 0 && { groundingTokens }),
+      ...(st === "failed" && { failure: lastFailure }),
+    };
+  };
 
   // Wakes every question waiting for a junior, and tells the runner when the listing changed.
   function changed() {
@@ -488,8 +532,9 @@ export function createExpert(o: ExpertOptions): Expert {
   // A failed grounding is tried again on the runner's own timer, a few times, further apart each time.
   function retryLater(retryable: boolean) {
     if (stopped) return;
-    if (!retryable) return log("its grounding failed in a way that fails every time, so it isn't tried again until its file changes");
-    if (retries >= RETRY_MINUTES.length) return log(`its grounding failed ${retries + 1} times running, so it isn't tried again until its file changes or the runner restarts`);
+    const ranOut = () => o.onTriesRanOut?.({ why: lastFailure, proofAnswer: lastFailure === "proof" ? lastProofAnswer : null });
+    if (!retryable) return (log("its grounding failed in a way that fails every time, so it isn't tried again until its file changes"), ranOut());
+    if (retries >= RETRY_MINUTES.length) return (log(`its grounding failed ${retries + 1} times running, so it isn't tried again until its file changes or the runner restarts`), ranOut());
     const minutes = RETRY_MINUTES[retries++]!;
     const attempt = retries;
     log(`its grounding failed, so it is tried again in ${minutes} minutes`);
@@ -536,6 +581,7 @@ export function createExpert(o: ExpertOptions): Expert {
     if (room) failure.repeats = true;
     const problem = (windowed ? null : check(g.model)) ?? (c.turns.length < 2 ? "its grounding ended before its second turn" : room);
     g.meter = c.turns.length ? meterOf(c.turns.at(-1)!) : 0;
+    g.groundingTokens = g.meter;
     if (problem) {
       failGeneration(g, problem);
       return false;
@@ -550,7 +596,18 @@ export function createExpert(o: ExpertOptions): Expert {
 
   // The proof: the new generation answers its owner's question on a fork, and the judge compares.
   async function prove(g: SavedGeneration, f: ExpertFile, s: ExpertSettings, commit: string, mine: number): Promise<boolean> {
-    const senior = gen("junior") ?? gen("senior");
+    proving = true;
+    changed();
+    try {
+      return await proveNow(g, f, s, commit, mine);
+    } finally {
+      proving = false;
+    }
+  }
+
+  async function proveNow(g: SavedGeneration, f: ExpertFile, s: ExpertSettings, commit: string, mine: number): Promise<boolean> {
+    // A migrating expert's new generation answers alone, so its proof asks no senior from before #340.
+    const senior = migrating ? null : (gen("junior") ?? gen("senior"));
     const kids = new Set<ChildProcessWithoutNullStreams>();
     const asked = await askFork({ junior: g, senior, question: f.proof.question, id: `proof-${g.n}`, deadline: now() + f.forkTimeLimitMinutes * minute, commit, kids });
     for (const kid of kids) killTree(kid);
@@ -575,6 +632,7 @@ export function createExpert(o: ExpertOptions): Expert {
     const pass = /^\W*PASS\b/i.test(line) && !/\bFAIL\b/i.test(line);
     g.proof = { passed: pass, at: now() };
     say("proof", { generation: g.n, result: pass ? "pass" : "fail", expected: f.proof.answer, answer, judge: verdict });
+    lastProofAnswer = pass ? null : answer;
     if (!pass) failGeneration(g, NOT_PASSED);
     else await save();
     return pass;
@@ -583,6 +641,7 @@ export function createExpert(o: ExpertOptions): Expert {
   // The switch, under the exclusive hold: forks running finish on the generation before.
   async function promote(g: SavedGeneration, fp: string) {
     await lock.exclusive(async () => {
+      if (migrating) return migrated(g, fp);
       const junior = gen("junior");
       const senior = gen("senior");
       if (junior) {
@@ -599,6 +658,28 @@ export function createExpert(o: ExpertOptions): Expert {
       say("ready", { generation: g.n });
       log(`generation ${g.n} answers now`);
     });
+  }
+
+  // The first generation grounded since #340 passed: every one before it retires, its old trunk
+  // with it, and state.json says it is version 2.
+  async function migrated(g: SavedGeneration, fp: string) {
+    const old = saved.generations.filter((x) => x !== g && (x.state === "junior" || x.state === "senior"));
+    for (const x of old) {
+      x.state = "retired";
+      x.why = "a generation grounded since each computer keeps its own instance took over";
+    }
+    g.state = "junior";
+    saved.fingerprint = fp;
+    saved.version = 2;
+    saved.setUpFromExpertRecord = true;
+    migrating = false;
+    retries = 0;
+    promotionBlocked = false;
+    await save();
+    for (const x of old) discardIfDone(x);
+    say("promotion", { junior: g.n, senior: "none", retired: old.length ? old.map((x) => x.n).join(",") : "none" });
+    say("ready", { generation: g.n });
+    log(`generation ${g.n} answers now; the generations from before each computer kept its own instance retire`);
   }
 
   function checkPromotion() {
@@ -676,38 +757,22 @@ export function createExpert(o: ExpertOptions): Expert {
     return kept;
   }
 
-  const unavailable = (detail: string, expert?: ExpertRefusal): RefusalMessage => ({ type: "refusal", v: PROTOCOL_VERSION, id: "", reason: "unavailable", detail, ...(expert && { expert }) });
-  const forkFailed = (detail: string) => unavailable(detail, { code: "EXPERT_FORK_FAILED" });
-  const unknown = () => unavailable(`this machine hosts no expert named ${name} now`, { code: "EXPERT_UNKNOWN" });
+  const notYet = (detail: string): InstanceOutcome => ({ kind: "not-yet", detail });
+  const forkFailed = (detail: string): InstanceOutcome => ({ kind: "refused", code: "EXPERT_FORK_FAILED", detail });
+  const unknown = (): InstanceOutcome => ({ kind: "refused", code: "EXPERT_UNKNOWN", detail: `this computer has no instance of the expert ${name} now` });
 
-  // Nothing the runner sends may fail the protocol, or the server would drop it unanswered.
-  function checked(m: Outgoing): Outgoing {
-    if ((m.type === "reply" ? ReplyMessageSchema : RefusalMessageSchema).safeParse(m).success) return m;
-    log(`its reply for ${m.id} didn't fit the protocol, so it is refused instead`);
-    return { ...forkFailed("the expert's reply didn't fit the protocol"), id: m.id };
-  }
-
-  // A question's request ids are kept while it is remembered.
-  const forget = (qid: string) => {
-    if (finished.has(qid)) return;
-    for (const [request, q] of byRequest) if (q === qid) byRequest.delete(request);
-  };
-
-  function remember(qid: string, m: Outgoing) {
+  function remember(qid: string, outcome: InstanceOutcome) {
     finished.delete(qid);
-    finished.set(qid, m);
+    finished.set(qid, outcome);
     if (finished.size <= REMEMBER) return;
-    const oldest = finished.keys().next().value!;
-    finished.delete(oldest);
-    forget(oldest);
+    finished.delete(finished.keys().next().value!);
   }
 
-  /** Sends `m` for `q`; one that isn't `kept` (a refusal the server asks again after) isn't remembered. */
-  function deliver(q: Question, m: Outgoing, kept = true) {
-    const out = stopped ? unknown() : m;
-    if (kept) remember(q.id, out);
-    if (!q.requests.size) return log(`question ${q.id} was dropped by the office server, so its answer isn't sent`);
-    q.send(checked({ ...out, id: q.latest }));
+  /** Tells `q` how it went; `not-yet` isn't remembered, so asked again it runs. */
+  function deliver(q: Question, outcome: InstanceOutcome) {
+    const out = stopped ? unknown() : outcome;
+    if (out.kind !== "not-yet") remember(q.id, out);
+    q.onOutcome(out);
   }
 
   // Until there is a junior, bounded by the grounding's time limit. A checkout that couldn't be
@@ -738,7 +803,7 @@ export function createExpert(o: ExpertOptions): Expert {
   async function handle(q: Question): Promise<void> {
     const started = now();
     const line = { id: q.id, blocking: q.blocking, ms: 0, cost: 0, outcome: "failed", senior: "no", explored: "no", note: "none" };
-    const failed = (cause: string, refusal: Outgoing) => {
+    const failed = (cause: string, refusal: InstanceOutcome) => {
       say("error", { id: q.id, cause });
       deliver(q, refusal);
     };
@@ -751,12 +816,11 @@ export function createExpert(o: ExpertOptions): Expert {
         const why = { proof: "the expert's grounding didn't pass its proof question", checkout: "the expert's checkout of its repo couldn't be prepared", other: "the expert's last grounding failed; its host's health log for it says why" }[lastFailure];
         return failed(why, forkFailed(why));
       }
-      // Still grounding: a plain refusal, which the server asks again later, so it isn't remembered.
+      // Still grounding: not yet, so it isn't remembered, and its asker asks again.
       if (ready === "timeout") {
         say("error", { id: q.id, cause: "it is still grounding" });
-        return deliver(q, unavailable("the expert is still grounding its first junior"), false);
+        return deliver(q, notYet("the expert is still grounding its first junior"));
       }
-      if (!q.requests.size) return log(`question ${q.id} was dropped by the office server before it ran`);
 
       const s = await o.settings();
       // The junior may have failed while the settings were read.
@@ -769,7 +833,7 @@ export function createExpert(o: ExpertOptions): Expert {
       if (cap) {
         line.outcome = "cap";
         say("cap", { id: q.id, cap: cap.cap, limit: cap.limit });
-        return deliver(q, unavailable(`${CAP_WORDS[cap.cap]} of ${cap.limit} reached on this machine`, { code: "EXPERT_CAP", cap: cap.cap, limit: cap.limit, ...(cap.frees !== undefined && { frees: new Date(cap.frees).toISOString() }) }));
+        return deliver(q, { kind: "refused", code: "EXPERT_CAP", detail: `${EXPERT_CAP_WORDS[cap.cap]} of ${cap.limit} reached on this computer`, cap: cap.cap, limit: cap.limit, ...(cap.frees !== undefined && { frees: cap.frees }) });
       }
       inFlight.add(q);
       const reservation = ledger!.reserve({ at: now(), room: q.asker, usage: expected });
@@ -795,14 +859,13 @@ export function createExpert(o: ExpertOptions): Expert {
               await reservation.cancel();
               return failed("its junior failed while the question waited", forkFailed("the expert's junior failed; a new one is grounding"));
             }
-            // A plain refusal, which the server asks again later, so it isn't remembered: a checkout
-            // waiting to be reset, or a junior whose trunk was changed while the question waited
-            // (retired now; a new one grounds), isn't forked.
+            // Not yet, so it isn't remembered: a checkout waiting to be reset, or a junior whose trunk
+            // was changed while the question waited (retired now; a new one grounds), isn't forked.
             const notNow = resetPending ? "the expert's checkout is being reset" : !(await trusted(junior)) ? "the expert's junior is being replaced" : null;
             if (notNow) {
               await reservation.cancel();
               say("error", { id: q.id, cause: notNow });
-              return deliver(q, unavailable(notNow), false);
+              return deliver(q, notYet(notNow));
             }
             // The fork's time limit counts from here, not from when the question came: a question
             // held while the expert started, or queued for a slot or the checkout, isn't cut short.
@@ -810,7 +873,7 @@ export function createExpert(o: ExpertOptions): Expert {
             const senior = gen("senior");
             const commit = await checkout.head();
             const kids = new Set<ChildProcessWithoutNullStreams>();
-            const asked = await askFork({ junior, senior, question: q.text, id: q.id, deadline, commit, kids, onSenior: () => q.senior?.(q.latest) });
+            const asked = await askFork({ junior, senior, question: q.text, id: q.id, deadline, commit, kids, onSenior: () => q.onSenior?.() });
             for (const kid of kids) killTree(kid);
             freeSlot();
             line.cost = Math.round(weighted(asked.usage, s));
@@ -849,7 +912,6 @@ export function createExpert(o: ExpertOptions): Expert {
             }
             const since = await checkout.changed(Object.fromEntries(stamped.flatMap((x) => (x.commit && x.commit !== commit ? [[x.file, x.commit]] : []))));
             const answer = answerText(body, citationBlock(stamped, saved.branch, commit, since));
-            const reply: ReplyMessage = { type: "reply", v: PROTOCOL_VERSION, id: "", kind: "answer-expert", answer, commit, branch: saved.branch };
             const matched = await o.scan(answer);
             if (matched) {
               // Refused, never held: an expert runs on its own, so no person would release it.
@@ -858,7 +920,7 @@ export function createExpert(o: ExpertOptions): Expert {
               deliver(q, forkFailed("its answer looked like it held a secret, so it wasn't sent"));
             } else {
               line.outcome = "answered";
-              deliver(q, reply);
+              deliver(q, { kind: "answered", answer, commit, branch: saved.branch });
             }
 
             if (r.learned && (asked.askedSenior || asked.explored)) {
@@ -944,7 +1006,8 @@ export function createExpert(o: ExpertOptions): Expert {
       // Numbers start again at 1, so the old indexes go before any new one is written.
       for (const g of generations) if (!discarded.has(g.trunk)) (discarded.add(g.trunk), await discard(g));
     });
-    saved = { version: 1, fingerprint: "", repo: file.repo, branch: "", generations: [] };
+    saved = { version: 2, setUpFromExpertRecord: true, fingerprint: "", repo: file.repo, branch: "", generations: [] };
+    migrating = false;
     indexes.clear();
     await save();
     checkout = makeCheckout(file.repo);
@@ -1052,6 +1115,8 @@ export function createExpert(o: ExpertOptions): Expert {
       }
       if (was) {
         saved = was;
+        migrating = was.version === 1 && was.generations.some((g) => g.state === "junior" || g.state === "senior");
+        if (was.version === 1 && !migrating) Object.assign(saved, { version: 2, setUpFromExpertRecord: true });
         for (const g of saved.generations) {
           o.onTrunk?.(g.trunk);
           if (g.state === "grounding") failGeneration(g, "the runner stopped during its grounding");
@@ -1062,7 +1127,9 @@ export function createExpert(o: ExpertOptions): Expert {
       }
       changed();
       // A junior from before answers at once; the checkout is prepared beside it, so its questions fetch.
-      if (!gen("junior") || saved.fingerprint !== fingerprint(file)) void ground();
+      // One from before #340 answers while a new generation grounds to take over from it.
+      if (migrating) log("its state is from before each computer kept its own instance, so a new generation grounds to take over from its old ones");
+      if (!gen("junior") || saved.fingerprint !== fingerprint(file) || migrating) void ground();
       else void prepare().then(checkPromotion);
     },
     update(f) {
@@ -1076,54 +1143,31 @@ export function createExpert(o: ExpertOptions): Expert {
       if (fingerprint(f) !== saved.fingerprint) void ground();
       else checkPromotion();
     },
-    owns: (request) => byRequest.has(request),
-    answer(request, send, senior) {
-      const known = byRequest.get(request.id);
-      if (known !== undefined) {
-        const running = questions.get(known);
-        if (running) {
-          running.send = send;
-          running.senior = senior;
-        } else if (finished.has(known)) send(checked({ ...finished.get(known)!, id: request.id }));
-        return;
-      }
-      const qid = request.questionId;
-      byRequest.set(request.id, qid);
-      const running = questions.get(qid);
+    answer(question, onOutcome, onSenior) {
+      const running = questions.get(question.id);
       if (running) {
-        running.requests.add(request.id);
-        running.latest = request.id;
-        running.send = send;
-        running.senior = senior;
+        running.onOutcome = onOutcome;
+        running.onSenior = onSenior;
         return;
       }
-      const sent = finished.get(qid);
-      if (sent) {
-        send(checked({ ...sent, id: request.id }));
-        return;
-      }
-      const q: Question = { id: qid, asker: request.asker, blocking: request.blocking, text: request.question, latest: request.id, requests: new Set([request.id]), send, senior };
-      questions.set(qid, q);
+      const done = finished.get(question.id);
+      if (done) return onOutcome(done);
+      const q: Question = { id: question.id, asker: question.asker, blocking: question.blocking, text: question.question, onOutcome, onSenior };
+      questions.set(q.id, q);
       void handle(q)
         .catch((err: unknown) => {
-          log(`question ${qid}: the runner failed: ${(err as Error)?.stack ?? String(err)}`);
-          if (!finished.has(qid)) deliver(q, forkFailed("the runner failed"));
+          log(`question ${q.id}: the runner failed: ${(err as Error)?.stack ?? String(err)}`);
+          if (!finished.has(q.id)) deliver(q, forkFailed("the runner failed"));
         })
-        .finally(() => {
-          questions.delete(qid);
-          // Nothing remembered for it (a refusal the server asks again after, or one dropped before it ran): its request ids go too.
-          forget(qid);
-        });
+        .finally(() => questions.delete(q.id));
     },
-    release(request, send) {
-      // Nothing is ever held here: an answer that matches the secret scan is refused at once.
-      send({ ...(stopped ? unknown() : unavailable("an expert holds no answers: one that matches the secret scan is refused at once")), id: request });
-    },
-    drop(request) {
-      const qid = byRequest.get(request);
-      if (qid === undefined) return;
-      const running = questions.get(qid);
-      if (running) running.requests.delete(request);
+    retryNow() {
+      if (stopped) return;
+      clearRetry();
+      retries = 0;
+      promotionBlocked = false;
+      log("asked to try its grounding again now");
+      void ground();
     },
     idle: () => busy === 0 && !groundingRun && questions.size === 0,
     stop() {
@@ -1132,6 +1176,23 @@ export function createExpert(o: ExpertOptions): Expert {
       clearRetry();
       killAll();
       for (const wake of [...waiters]) wake();
+    },
+    async remove() {
+      stopped = true;
+      epoch++;
+      clearRetry();
+      killAll();
+      for (const wake of [...waiters]) wake();
+      for (const g of saved.generations) {
+        if (g.state === "junior" || g.state === "senior" || g.state === "grounding") Object.assign(g, { state: "retired", why: "its expert was deleted" });
+      }
+      // Once its processes have ended, so none of them holds a file.
+      for (let waited = 0; children.size && waited < 5000; waited += 50) await new Promise((r) => setTimeout(r, 50));
+      for (const g of saved.generations) if (!discarded.has(g.trunk)) (discarded.add(g.trunk), await discard(g));
+      await saving;
+      await fs.rm(readDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch((err: Error) => log(`couldn't delete its clone: ${err.message}`));
+      await fs.rm(o.dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch((err: Error) => log(`couldn't delete its folder: ${err.message}`));
+      log("deleted, with its trunks, its clone and its folder, as its expert was deleted");
     },
     close() {
       stopped = true;

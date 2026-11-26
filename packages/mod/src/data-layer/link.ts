@@ -31,9 +31,11 @@
 // through `sendLive`, only while the link is up: they never wait in the outbox. `onOpen` is told
 // after every hello and `onClose` at every drop, so the runner forgets the connection's drive-policy
 // and sends no driven message on the new one until its first drive-policy has come (runner/session.ts).
-// A runner that hosts experts (protocol 0.13.0) is told which of them the server lists (`hosting`,
-// to `onHosting`), and sends its listing (`experts`) through `sendLive` as well: it is live-only, as
-// is `expert-senior` (protocol 0.14.0), sent only to a server whose hosting says it reads it.
+// A runner that keeps instances of experts (protocol 0.17.0, isoplan-app#340) is given the server's
+// expert directory, records, definition results, deletions, set-ups, set-up offers' ends and the
+// counts of its person's questions on their other computers (`onExpertRecordMessages`), and sends
+// its definitions, records wanted, instance states, wordless question records, set-up offers and
+// failed proofs live as well (runner/expert-record-link.ts).
 // A session's link passes the experts it may ask (`expert-rights`) on as a line, as `ask-rights`.
 // A runner that can create experts from suggestions (protocol 0.15.0) is given the server's `expert-creation-suggestion-dismissals`,
 // `draft-office-wide-expert-creation-suggestion`, `create-expert-from-suggestion` and `expert-creation-suggestion-ended` (`onExpertCreationSuggestionMessages`), and sends its `expert-creation-suggestion`,
@@ -53,14 +55,24 @@ import {
   type DrivePolicyMessage,
   type ExpertCreationProgressMessage,
   type ExpertCreationSuggestionMessage,
-  type ExpertSeniorMessage,
-  type ExpertsMessage,
+  type ExpertDefinitionMessage,
+  type ExpertDefinitionResultMessage,
+  type ExpertDeletedMessage,
+  type ExpertDirectoryMessage,
+  type ExpertInstanceStatesMessage,
+  type ExpertProofFailedMessage,
+  type ExpertQuestionMessage,
+  type ExpertQuestionsAskedOnYourOtherComputersMessage,
+  type ExpertRecordMessage,
+  type ExpertRecordWantedMessage,
+  type ExpertSetUpOfferedMessage,
+  type ExpertSetUpOfferEndedMessage,
   type Facts,
+  type SetUpExpertInstanceMessage,
   type CreateExpertFromSuggestionMessage,
   type ExpertCreationSuggestionDismissalsMessage,
   type RunnerExpertCreationSuggestionEndedMessage,
   type ServerExpertCreationSuggestionEndedMessage,
-  type HostingMessage,
   type DropMessage,
   type HandoffMessage,
   type HelloMessage,
@@ -105,8 +117,8 @@ export interface LinkOptions {
   onMessage?: (message: ServerAsk) => void;
   /** Takes the server's drive requests and drive-policy; without it they are logged as not handled. */
   onDrive?: (message: DriveMessage | DrivePolicyMessage) => void;
-  /** Takes the server's word on which of this runner's experts it lists; without it, logged as not handled. */
-  onHosting?: (message: HostingMessage) => void;
+  /** Takes the server's expert record messages; without it, logged as not handled. */
+  onExpertRecordMessages?: (message: ServerExpertRecordMessage) => void;
   /** Takes the server's expert creation suggestion messages; without it, logged as not handled. */
   onExpertCreationSuggestionMessages?: (message: ServerExpertCreationSuggestionMessage) => void;
   /** Told after every hello, once what waited in the outbox has gone. */
@@ -141,13 +153,21 @@ export type ServerExpertCreationSuggestionMessage = ExpertCreationSuggestionDism
 /** What a runner that can create experts from suggestions sends, live. */
 export type RunnerExpertCreationSuggestionMessage = ExpertCreationSuggestionMessage | RunnerExpertCreationSuggestionEndedMessage | ExpertCreationProgressMessage;
 
+/** What the server tells a runner that keeps instances of experts (protocol 0.17.0). */
+export type ServerExpertRecordMessage = ExpertDirectoryMessage | ExpertRecordMessage | ExpertDefinitionResultMessage | ExpertDeletedMessage | SetUpExpertInstanceMessage | ExpertSetUpOfferEndedMessage | ExpertQuestionsAskedOnYourOtherComputersMessage;
+
+/** What a runner that keeps instances of experts sends, live. */
+export type RunnerExpertRecordMessage = ExpertDefinitionMessage | ExpertRecordWantedMessage | ExpertInstanceStatesMessage | ExpertQuestionMessage | ExpertSetUpOfferedMessage | ExpertProofFailedMessage;
+
+const SERVER_EXPERT_RECORD_TYPES = new Set<string>(["expert-directory", "expert-record", "expert-definition-result", "expert-deleted", "set-up-expert-instance", "expert-set-up-offer-ended", "expert-questions-asked-on-your-other-computers"]);
+
 export interface Link {
   /** The session's facts now; what differs from what the server has goes out when the pace allows. */
   update(facts: Facts): void;
   /** A reply, refusal or taken, first sent at `at` (now, unless it waited elsewhere first). One sent while the link is down goes out after the next hello, unless it is older than OUTBOX_MAX_AGE_MS by then. */
   send(message: Outgoing, at?: number): void;
-  /** A driven message, an expert listing or an expert creation suggestion's, sent now if the link is up; false when it is down, and the message is dropped. */
-  sendLive(message: DrivenMessage | ExpertsMessage | ExpertSeniorMessage | RunnerExpertCreationSuggestionMessage): boolean;
+  /** A driven message, an expert record message or an expert creation suggestion's, sent now if the link is up; false when it is down, and the message is dropped. */
+  sendLive(message: DrivenMessage | RunnerExpertRecordMessage | RunnerExpertCreationSuggestionMessage): boolean;
   /**
    * The projects the office holds, from this connection's welcome; null before one, and from a
    * server too old to send one, which would read another repo's files as the session's own (#74).
@@ -169,7 +189,7 @@ export function createLink({
   onPairingEnded,
   onMessage,
   onDrive,
-  onHosting,
+  onExpertRecordMessages,
   onExpertCreationSuggestionMessages,
   onOpen,
   onClose,
@@ -408,8 +428,8 @@ export function createLink({
       onMessage(message);
     } else if (onDrive && (message.type === "drive" || message.type === "drive-policy")) {
       onDrive(message);
-    } else if (onHosting && message.type === "hosting") {
-      onHosting(message);
+    } else if (onExpertRecordMessages && SERVER_EXPERT_RECORD_TYPES.has(message.type)) {
+      onExpertRecordMessages(message as ServerExpertRecordMessage);
     } else if (onExpertCreationSuggestionMessages && (message.type === "expert-creation-suggestion-dismissals" || message.type === "draft-office-wide-expert-creation-suggestion" || message.type === "create-expert-from-suggestion" || message.type === "expert-creation-suggestion-ended")) {
       onExpertCreationSuggestionMessages(message);
     } else {

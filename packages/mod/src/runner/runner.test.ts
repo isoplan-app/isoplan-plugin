@@ -592,40 +592,6 @@ test("runner: an owner's answer or message isn't the runner's; a handoff to take
   expect(t.logs).toEqual([expect.stringContaining("handoff h-1")]);
 });
 
-test("runner: an expert's question goes to the experts, and the release or drop of one of theirs; others' stay the runner's", async () => {
-  const calls: unknown[][] = [];
-  const experts = {
-    owns: (id: string) => id.startsWith("expert-"),
-    answer: (m: RequestMessage, send: (m: ReplyMessage | RefusalMessage) => void) => (calls.push(["answer", m.id]), send({ type: "reply", v: PROTOCOL_VERSION, id: m.id, kind: "answer-expert", answer: "a", commit: "c".repeat(40), branch: "main" })),
-    release: (id: string, send: (m: ReplyMessage | RefusalMessage) => void) => (calls.push(["release", id]), send({ type: "refusal", v: PROTOCOL_VERSION, id, reason: "withheld" })),
-    drop: (id: string) => void calls.push(["drop", id]),
-  };
-  const t = await setup({ experts });
-  const ask: RequestMessage = { type: "request", v: PROTOCOL_VERSION, id: "expert-x-1", kind: "answer-expert", expert: "adr", questionId: "x-1", question: "Q?", blocking: true, from: { id: "claude:bob", name: "Bob" }, asker: "s-1" };
-  t.runner.take(ask);
-  t.runner.take({ type: "release", v: PROTOCOL_VERSION, id: "expert-x-1" });
-  t.runner.take({ type: "drop", v: PROTOCOL_VERSION, id: "expert-x-1" });
-  // Not the experts': the runner's own answer that nothing is held.
-  t.runner.take({ type: "release", v: PROTOCOL_VERSION, id: "q9" });
-  expect(calls).toEqual([
-    ["answer", "expert-x-1"],
-    ["release", "expert-x-1"],
-    ["drop", "expert-x-1"],
-  ]);
-  await t.sentN(3);
-  expect(t.sent.map((m) => [m.type, "id" in m && m.id])).toEqual([
-    ["reply", "expert-x-1"],
-    ["refusal", "expert-x-1"],
-    ["refusal", "q9"],
-  ]);
-  expect(t.asks).toHaveLength(0);
-
-  // A runner with no experts refuses theirs.
-  const bare = await setup();
-  bare.runner.take(ask);
-  expect(bare.sent).toEqual([{ type: "refusal", v: PROTOCOL_VERSION, id: "expert-x-1", reason: "unavailable", detail: "this machine hosts no experts" }]);
-});
-
 test("runner.json: the labelled defaults load, and the owner's file overrides them per key", async () => {
   const user = path.join(tempRoot(), "runner.json");
   fs.writeFileSync(user, JSON.stringify({ claudeModel: "sonnet", answersPerRoomPerHour: 3, tokenBudgetPerMachinePerDay: -1 }));

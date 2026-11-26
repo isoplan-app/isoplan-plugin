@@ -1,5 +1,6 @@
-// Watching the experts folder, ~/.claude/isoplan/experts: each `*.json` at its top level is one
-// expert file. It is polled every `lookMs` rather than watched with fs.watch, which misses changes
+// Watching one folder of expert files: ~/.claude/isoplan/experts, whose `*.json` at its top level
+// are expert files, or ~/.claude/isoplan/expert-instances, whose are instance files (experts.ts
+// watches both). It is polled every `lookMs` rather than watched with fs.watch, which misses changes
 // on some file systems and fires twice on others. A file counts as changed when its content does:
 // its time and size say when to read it again, and a hash of what it holds says whether it changed,
 // so saving it unchanged changes nothing. A file that can't be read this look (an editor writing it)

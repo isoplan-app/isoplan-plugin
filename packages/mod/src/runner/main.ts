@@ -53,10 +53,14 @@
 // while a driven session's process runs, or while `startAtLogin` is on: then a person who works only
 // on the floor keeps a runner up.
 //
-// It hosts the machine's experts (experts.ts), one for each file in <claude dir>/isoplan/experts, and
-// says so in its hello (`experts`): each office is told which of them it may list (expert-link.ts),
-// and the office's questions to them come as `answer-expert` requests. Their trunks are never
-// reported, and while it hosts any it stays up, lit or not, so they can answer.
+// It keeps this computer's instance of each expert its sessions ask (experts.ts, expert-instance.ts,
+// isoplan-app#340), and says so in its hello (`expertInstances`): an owner's expert files in
+// <claude dir>/isoplan/experts, published to each office as expert records, and instance files in
+// <claude dir>/isoplan/expert-instances, set up from those records with one click on the floor or
+// offered (expert-instance-set-up-offer.ts), each office over its own link (expert-record-link.ts).
+// The sessions' ask_expert questions are answered here, from this computer's own instance
+// (expert-questions-asked-here.ts): nothing of a question leaves the computer but a record with no
+// words. Their trunks are never reported; a question or a grounding running keeps the runner up.
 //
 // It suggests creating experts where a session it reports would have been helped by one (expert-creation-suggestions.ts; its hello
 // says `canCreateExpertsFromSuggestions`): from each session's areas, drafted by a local model (expert-creation-suggestion-model-calls.ts), and it creates
@@ -67,13 +71,13 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { PROTOCOL_VERSION, type DrivenMessage, type ExpertSeniorMessage, type ExpertsMessage, type RefusalMessage, type ReplyMessage, type TakenMessage } from "@isoplan/protocol";
+import { PROTOCOL_VERSION, type DrivenMessage, type RefusalMessage, type ReplyMessage, type TakenMessage } from "@isoplan/protocol";
 import { loadConfig, loadSettings, officesOf, type Office } from "../data-layer/config.js";
 import { approvedHome, machineHomeIo, takesFrom } from "../data-layer/home.js";
 import { askingRemoteNames } from "../data-layer/remote-names.js";
 import { accountOf, claudePaths } from "../data-layer/identity.js";
 import { nodeIo } from "../data-layer/io.js";
-import { createLink, type RunnerExpertCreationSuggestionMessage } from "../data-layer/link.js";
+import { createLink, type RunnerExpertCreationSuggestionMessage, type RunnerExpertRecordMessage } from "../data-layer/link.js";
 import { pairingEntry, pairingPath, readPairing } from "../data-layer/pairing.js";
 import { HOLD_OFF_MS, alive, holdOff, refreshLock, releaseLock, takeLock } from "../wake/lock.js";
 import { openLedger } from "./caps.js";
@@ -104,9 +108,14 @@ import { managedDir, pluginDirsOf, pluginsDir } from "../install/state.js";
 import { recordedState } from "../install/install.js";
 import { reportSession, sessionLog } from "../data-layer/report-session.js";
 import { askFromMachine } from "../ask/machine.js";
-import { askExpertFromMachine } from "../ask/expert-machine.js";
-import { hostExperts } from "./expert-link.js";
-import { createExperts, expertIgnored, forOffice, type Experts } from "./experts.js";
+import { expertText } from "../ask/expert-text.js";
+import { createExpertInstances } from "./expert-instance.js";
+import { createExpertInstanceSetUpOffers } from "./expert-instance-set-up-offer.js";
+import { createExpertQuestionsAskedHere, type ExpertQuestionsAskedHere, type ExpertQuestionsAskedHereSettings } from "./expert-questions-asked-here.js";
+import { createExpertRecordLink, type ExpertRecordLink } from "./expert-record-link.js";
+import { createExpertRecordsPerOffice, expertRecordsPerOfficePath } from "./expert-records-per-office.js";
+import { createExpertRightsOnThisComputer, type ExpertRightsOnThisComputer } from "./expert-rights-on-this-computer.js";
+import { createExperts, expertIgnored, type Experts } from "./experts.js";
 import { createPipeServer, type Hooked } from "../pipe/server.js";
 import { createPairLinks } from "./pair-links.js";
 import { createSharedOffices } from "./shared-offices.js";
@@ -204,7 +213,7 @@ async function worker(): Promise<number> {
   });
   const io = nodeIo();
   const config = () => loadConfig(io, path.join(appDir, "config.json"), path.join(isoplanDir, "config.json"));
-  const settings = () => loadSettings<RunnerSettings & TakeSettings & DriveSettings & NamingSettings & ExpertCreationSuggestionsRunnerSettings & { claudeModel: string; repoSearchDepth: number; startAtLogin: boolean; trayRefreshSeconds: number; expertJudgeModel: string; expertWaitSeconds: number; clonesFolder: string }>(io, path.join(appDir, "runner.json"), path.join(isoplanDir, "runner.json"));
+  const settings = () => loadSettings<RunnerSettings & TakeSettings & DriveSettings & NamingSettings & ExpertCreationSuggestionsRunnerSettings & ExpertQuestionsAskedHereSettings & { claudeModel: string; repoSearchDepth: number; startAtLogin: boolean; trayRefreshSeconds: number; expertJudgeModel: string; clonesFolder: string }>(io, path.join(appDir, "runner.json"), path.join(isoplanDir, "runner.json"));
   const first = await config();
   // Plain ws:// to another machine would send the machine's credential unencrypted.
   const offices = officesOf(first);
@@ -253,12 +262,21 @@ async function worker(): Promise<number> {
   // The expert creation suggestions (expert-creation-suggestions.ts), made once the offices' links and the experts are; a session's
   // report and its hooks module reach them from the start, so they are looked up when used.
   let expertCreationSuggestionsOnceStarted: ExpertCreationSuggestions | null = null;
+  // The sessions' questions to experts, answered from this computer's instances (expert-questions-asked-here.ts),
+  // what each session may ask (expert-rights-on-this-computer.ts), and the set-up offers' lines to
+  // sessions that connect again: made once the experts are; looked up when used.
+  let expertQuestionsOnceStarted: ExpertQuestionsAskedHere | null = null;
+  let expertRightsOnceStarted: ExpertRightsOnThisComputer | null = null;
+  let rehookOffers = (_session: string) => {};
+  // Rights a session's office sent before those were made, given to them once they are.
+  const rightsBeforeStart: Parameters<ExpertRightsOnThisComputer["tap"]>[] = [];
   const pipe = await createPipeServer({
     claudeDir,
     log,
-    onChange: (session) => (rehook(session), expertCreationSuggestionsOnceStarted?.rehooked(session)),
-    ask: (request) => askFromMachine({ ...request, appDir, scan: scanText }),
-    askExpert: (request) => askExpertFromMachine({ ...request, appDir, scan: scanText }),
+    onChange: (session) => (rehook(session), expertCreationSuggestionsOnceStarted?.rehooked(session), expertQuestionsOnceStarted?.rehooked(session), rehookOffers(session)),
+    // An ack of an expert question's end is the asking module's; every other ask goes to the office.
+    ask: (request) => (request.ack && expertQuestionsOnceStarted?.holds(request.ack) ? expertQuestionsOnceStarted.ack(request.session, request.ack) : askFromMachine({ ...request, appDir, scan: scanText })),
+    askExpert: async (request) => expertQuestionsOnceStarted?.ask(request) ?? { text: expertText("EXPERT_RUNNER_UNREACHABLE", { expert: request.expert, id: request.key, words: "Isoplan's runner is still starting; try again in a minute" }), failed: true, code: "EXPERT_RUNNER_UNREACHABLE" },
     close: (close, remove) => closeFor(close, remove),
   }).catch((err: Error) => (log(`the runner couldn't open its pipe for the sessions' hooks modules: ${err.message}`), null));
   // Each session's title as its latest report pass worked out for the offices, by bare id, for the desktop app's
@@ -305,6 +323,12 @@ async function worker(): Promise<number> {
             asksExperts: hooks.experts,
             emit: (line) => {
               said.emit(line);
+              // What the session may ask is this computer's to rewrite first (expert-rights-on-this-computer.ts).
+              if (line.type === "expert-rights") {
+                if (expertRightsOnceStarted) expertRightsOnceStarted.tap(sessionId, cwd, line);
+                else rightsBeforeStart.push([sessionId, cwd, line]);
+                return;
+              }
               hooks.send(line);
               pairLinks.sent(sessionId, line, hooks.send);
             },
@@ -360,6 +384,7 @@ async function worker(): Promise<number> {
   // Ready once the expert files and their states are read; checkouts and groundings go on in the background.
   const hosted = createExperts({
     expertsDir,
+    instancesDir: path.join(isoplanDir, "expert-instances"),
     clonesFolder: clones.folder,
     clonesFolders: clones.folders,
     logsDir: path.join(isoplanDir, "logs"),
@@ -409,7 +434,7 @@ async function worker(): Promise<number> {
   const gitCacheMs = first.gitCacheSeconds * 1000;
   const homeIo = machineHomeIo(first.workspaceRepos, names, os.hostname(), false, gitCacheMs);
   // For experts alone, a git that can't read a repo's remote rejects rather than making it a local
-  // project: their listing keeps the last one sent, and a question is refused so the server asks again.
+  // project: what each office was last told of them stands (expert-record-link.ts).
   const expertHomeIo = machineHomeIo(first.workspaceRepos, names, os.hostname(), true, gitCacheMs);
   const ledger = await openLedger(path.join(isoplanDir, "runner", "ledger.json"));
   // What each brief's prepare found, by handoff, for its push and any push anyway after it.
@@ -417,7 +442,7 @@ async function worker(): Promise<number> {
   // One fork cap for the machine, whichever office asks.
   const forks = createForkSlots();
   let send = (_index: number): Parameters<typeof createRunner>[0]["send"] => () => {};
-  let live = (_index: number) => (_message: DrivenMessage | ExpertsMessage | ExpertSeniorMessage | RunnerExpertCreationSuggestionMessage): boolean => false;
+  let live = (_index: number) => (_message: DrivenMessage | RunnerExpertRecordMessage | RunnerExpertCreationSuggestionMessage): boolean => false;
   const isDir = (p: string) => fs.stat(p).then((s) => s.isDirectory(), () => false);
   const drives: DriveOffice[] = [];
   // Each office's list of this computer's repos (repo-folders.ts), with branches or without.
@@ -497,17 +522,6 @@ async function worker(): Promise<number> {
       send: (message) => send(index)(message),
       log,
       isDir,
-      // Only experts whose repo this office takes answer it, as only those are listed to it.
-      experts: forOffice(
-        hosted,
-        async (folder) => {
-          await approved.refresh();
-          return approvedHome(folder, expertHomeIo, approved.repos());
-        },
-        log,
-        // A junior asking its senior is told to this office alone, over its own link (expert-link.ts).
-        (id) => hosts[index]?.senior(id),
-      ),
       // Only the rooms the data layer would report: inside the askable window, and not held off, as
       // the runner holds a session off when the server doesn't want its project (or git can't place
       // its folder) (reporting.ts). And only in a repo the office takes (#91), as the data layer
@@ -571,22 +585,94 @@ async function worker(): Promise<number> {
     return { pairing, runner };
   };
   const answerers = answering.map(runnerFor);
-  // Each office is told which of the machine's experts it may list, over that office's link alone.
-  const hosts = answering.map((office, index) =>
-    hostExperts({
+  // One for hidden starts, experts created from suggestions and instances set up from records alike, so one project is never cloned twice at once.
+  const isoplanClone = createIsoplanClones({ git, claudeDir, clonesFolder: clones.folder, clonesFolders: clones.folders, timeoutMs: gitMs, log });
+  const indexOf = (server: string) => answering.findIndex((o) => o.server === server);
+  // This computer's checkout of a project, as New session finds one for the office (repo-folders.ts).
+  const checkoutFor = async (index: number, project: { id: string }) => (repoLists[index] ? (await repoLists[index](false)).find((r) => r.project === project.id.toLowerCase())?.folders[0] ?? null : null);
+  // The project an office takes that a folder is in, with that office's approved list.
+  const projectFor = async (server: string, folder: string) => {
+    const index = indexOf(server);
+    if (index < 0) return null;
+    const { approved } = shared(answering[index]!, first);
+    await approved.refresh();
+    return approvedHome(folder, expertHomeIo, approved.repos());
+  };
+  // This computer's instances of experts (expert-instance.ts), each office's record link, what each office last said, and the set-up offers.
+  const expertRecordsPerOffice = createExpertRecordsPerOffice({ file: expertRecordsPerOfficePath(isoplanDir), keptHours: async () => (await settings()).expertInstances.questionsKeptHours, log });
+  await expertRecordsPerOffice.load();
+  const instances = createExpertInstances({
+    experts: hosted,
+    isoplanDir,
+    scan: scanText,
+    log,
+    checkoutOf: (server, project) => checkoutFor(indexOf(server), project),
+    clone: (url, project) => isoplanClone({ url }, project),
+  });
+  await instances.start();
+  const recordLinks = new Map<string, ExpertRecordLink>();
+  const offers = createExpertInstanceSetUpOffers({
+    file: path.join(isoplanDir, "runner", "expert-instance-set-up-offers.json"),
+    setUpWithoutAsking: async () => (await settings()).expertInstances.setUpWithoutAsking,
+    setUp: (server, entry) => void instances.setUp(server, entry).catch((err: Error) => log(`expert ${entry.key}: couldn't set it up: ${err.message}`)),
+    send: (server, m) => recordLinks.get(server)?.sendNow(m) ?? false,
+    hooked: (session) => pipe?.hooked(session) ?? null,
+    hasInstance: (server, key, expertRecordId) => {
+      const found = instances.lookUp(server, key, null);
+      return !!found && found.kind !== "set-up-failed" && found.expertRecordId === expertRecordId;
+    },
+    log,
+  });
+  await offers.start();
+  instances.onChange(() => offers.instancesChanged());
+  rehookOffers = (session) => offers.rehooked(session);
+  answering.forEach((office, index) => {
+    const link = createExpertRecordLink({
+      server: office.server,
+      account,
       experts: hosted,
+      instances,
+      store: expertRecordsPerOffice,
+      offerEnded: (server, m) => offers.ended(server, m),
       approved: shared(office, first).approved,
       home: (folder, repos) => approvedHome(folder, expertHomeIo, repos),
       scan: scanText,
       log,
       send: (m) => live(index)(m),
-      sendSenior: (m) => live(index)(m),
-      server: office.server,
       checkMs: first.approvedRefreshMinutes * 60000,
-    }),
-  );
-  // One for hidden starts and experts created from suggestions alike, so one project is never cloned twice at once.
-  const isoplanClone = createIsoplanClones({ git, claudeDir, clonesFolder: clones.folder, clonesFolders: clones.folders, timeoutMs: gitMs, log });
+    });
+    link.onDirectory(() => offers.afterDirectory(office.server));
+    recordLinks.set(office.server, link);
+  });
+  const expertRights = createExpertRightsOnThisComputer({
+    instances,
+    store: expertRecordsPerOffice,
+    person: () => account.name,
+    projectOf: projectFor,
+    send: (session, line) => {
+      const hooks = pipe?.hooked(session);
+      if (!hooks) return;
+      hooks.send(line);
+      pairLinks.sent(session, line, hooks.send);
+    },
+    log,
+  });
+  expertRightsOnceStarted = expertRights;
+  for (const tap of rightsBeforeStart.splice(0)) expertRights.tap(...tap);
+  const expertQuestions = createExpertQuestionsAskedHere({
+    file: path.join(isoplanDir, "runner", "expert-questions-asked-here.json"),
+    claudeDir,
+    config,
+    settings,
+    links: recordLinks,
+    instances,
+    offers,
+    rights: (session, server) => expertRights.rights(session, server),
+    hooked: (session) => pipe?.hooked(session) ?? null,
+    log,
+  });
+  await expertQuestions.start();
+  expertQuestionsOnceStarted = expertQuestions;
   const drive: Driver = createDriver({
     claudeDir,
     account,
@@ -669,8 +755,7 @@ async function worker(): Promise<number> {
     corrects: (text, reply, t) => expertCreationSuggestionModelCalls.corrects(text, reply, t),
     experts: () => hosted.hosted(),
     projectOf: async (folder) => (await homeIo.projectOf(await homeIo.resolve(folder), folder)).id.toLowerCase(),
-    // This computer's checkout of the repo, as New session finds one for the office (repo-folders.ts).
-    checkout: async (index, project) => (await repoLists[index]!(false)).find((r) => r.project === project.id.toLowerCase())?.folders[0] ?? null,
+    checkout: checkoutFor,
     // With none, Isoplan's own hidden clone, as a hidden start makes it.
     clone: (url, project) => isoplanClone({ url }, project),
     hooked: (bare) => pipe?.hooked(bare) ?? null,
@@ -681,12 +766,12 @@ async function worker(): Promise<number> {
 
   // The supervisor holds stdin open; it closes when the supervisor has gone.
   const gone = new Promise<void>((resolve) => process.stdin.on("end", resolve).on("error", resolve).resume());
-  const links = answerOffices<Office, ReplyMessage | RefusalMessage | TakenMessage, DrivenMessage | ExpertsMessage | ExpertSeniorMessage | RunnerExpertCreationSuggestionMessage>({
+  const links = answerOffices<Office, ReplyMessage | RefusalMessage | TakenMessage, DrivenMessage | RunnerExpertRecordMessage | RunnerExpertCreationSuggestionMessage>({
     offices: answering,
     name: (office) => office.server,
     open: (office, said) => {
       const { pairing, runner } = answerers[answering.indexOf(office)]!;
-      const host = hosts[answering.indexOf(office)]!;
+      const records = recordLinks.get(office.server)!;
       log(`the runner's worker ${process.pid} is answering for this machine through ${office.server}`);
       status.opening(office.server);
       return createLink({
@@ -695,19 +780,23 @@ async function worker(): Promise<number> {
         pairing,
         onMessage: (message) => runner.take(message),
         onDrive: (message) => drive.take(office.server, message),
-        onHosting: host.onHosting,
-        onExpertCreationSuggestionMessages: (message) => expertCreationSuggestions.take(answering.indexOf(office), message),
+        onExpertRecordMessages: (message) => records.take(message),
+        onExpertCreationSuggestionMessages: (message) => {
+          // A first dismissals with no directory before it: a server from before 0.17.0 (expert-record-link.ts).
+          if (message.type === "expert-creation-suggestion-dismissals") records.dismissals();
+          expertCreationSuggestions.take(answering.indexOf(office), message);
+        },
         // At every hello and every drop, this office's drive-policy no longer holds; nothing driven goes on the new connection until its first one, which `holding` follows.
         // Nor does it take an expert creation suggestion's message until its first expert-creation-suggestion-dismissals.
         onOpen: () => {
           status.opened(office.server);
           drive.linked(office.server);
-          host.onOpen();
+          records.onOpen();
           expertCreationSuggestions.linked(answering.indexOf(office));
           // The renewal before this hello kept the email the office named, if it did.
           void readPairing(pairingPath(claudeDir)).then((all) => status.email(office.server, pairingEntry(all, office.server, account.id)?.email));
         },
-        onClose: () => (status.closed(office.server), drive.unlinked(office.server), host.onClose(), expertCreationSuggestions.linked(answering.indexOf(office))),
+        onClose: () => (status.closed(office.server), drive.unlinked(office.server), records.onClose(), expertCreationSuggestions.linked(answering.indexOf(office))),
         onNotWanted: () => (status.stopped(office.server, "not-wanted"), said.notWanted()),
         // A revoked or lapsed pairing closes this link: the sessions' links pair the machine again.
         onPairingEnded: () => (status.stopped(office.server, "unpaired"), said.unpaired()),
@@ -719,20 +808,19 @@ async function worker(): Promise<number> {
           ...(hasOrca ? { orca: true } : {}),
           ...(hasDesktop ? { desktop: true } : {}),
           drive: true,
-          experts: true,
           claude: claude.state(),
           starts: startPlaces(process.platform, hasOrca, hasDesktop),
           hiddenStarts: true,
           canCreateExpertsFromSuggestions: true,
+          expertInstances: true,
         },
       });
     },
     paired: async (office) => !!pairingEntry(await readPairing(pairingPath(claudeDir)), office.server, account.id)?.credential,
     // Nor while it reports sessions: their links, and the pairing they share, would end with it.
-    idle: () => answerers.every((a) => a.runner.idle()) && reporting.reporting().length === 0 && !pipe?.all().length && hosted.idle() && expertCreationSuggestions.idle(),
+    idle: () => answerers.every((a) => a.runner.idle()) && reporting.reporting().length === 0 && !pipe?.all().length && hosted.idle() && expertQuestions.idle() && expertCreationSuggestions.idle(),
     lit: async () => anyRoomSince(io, path.join(claudeDir, "projects"), Date.now() - askableMs(await config().catch(() => first))),
-    // An expert's host stays up to answer it.
-    keep: async () => drive.held() > 0 || hosted.hosted().length > 0 || (await settings()).startAtLogin,
+    keep: async () => drive.held() > 0 || (await settings()).startAtLogin,
     gone,
     log,
     checkMs: CHECK_MS,
@@ -741,7 +829,9 @@ async function worker(): Promise<number> {
   send = links.sender;
   live = links.live;
   const ended = await links.ended;
-  for (const host of hosts) host.stop();
+  for (const link of recordLinks.values()) link.stop();
+  expertQuestions.close();
+  await expertRecordsPerOffice.written();
   // Each session's link closes, and its log says so, before the worker exits; one stuck in a pass is left after STOP_WAIT_MS (reporting.ts).
   await reporting.stop();
   await pipe?.close();

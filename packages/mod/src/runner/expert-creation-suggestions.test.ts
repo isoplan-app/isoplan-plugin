@@ -11,7 +11,8 @@ import type { DataLayerLine, ExpertCreationSuggestionLine } from "../lines.js";
 import { parseExpertFile } from "./expert-file.js";
 import type { HostedExpert } from "./expert.js";
 import type { Draft, DraftInput } from "./expert-creation-suggestion-model-calls.js";
-import { areaTokens, cloneUrls, createExpertCreationSuggestions, EXCERPT_CHARS, EXPERT_CREATION_LIMIT_MS, folderExcerpts, folderFiles, ownSearches, passed, repeated, RETRY_MS, reviewUrl, signalsOf, type ExpertCreationSuggestionSettings, type ExpertCreationSuggestionsOptions } from "./expert-creation-suggestions.js";
+import { cloneUrls } from "./project-checkout-for-expert.js";
+import { areaTokens, createExpertCreationSuggestions, EXCERPT_CHARS, EXPERT_CREATION_LIMIT_MS, folderExcerpts, folderFiles, ownSearches, passed, repeated, RETRY_MS, reviewUrl, signalsOf, type ExpertCreationSuggestionSettings, type ExpertCreationSuggestionsOptions } from "./expert-creation-suggestions.js";
 
 const SETTINGS: ExpertCreationSuggestionSettings = JSON.parse(fs.readFileSync(path.join(modDir, "runner.json"), "utf8")).expertCreationSuggestions;
 // The correction check turned on, as runner.json doesn't by default.

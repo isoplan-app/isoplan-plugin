@@ -1,15 +1,25 @@
-// An expert's caps on its host, from its expert file, so a looping agent can't spend its owner's
-// subscription: open questions per asking session, questions per asking session in the last day,
-// and the expert's own token budget for the last day. They are counted in the expert's own ledger
-// (caps.ts's openLedger, in <name>/ledger.json): an entry per question, its room the asking
-// session's id, and one per grounding, proof or append under "expert", which counts toward the
-// budget only. Tokens are weighted as runner.json says. The machine's own caps (runner.json's
-// per-room, per-machine and budget) don't count expert work, and these don't count theirs.
+// An expert's caps on this computer, from its expert file or its instance file, so a looping agent
+// can't spend this computer's person's subscription: open questions per asking session, questions
+// per asking session in the last day, and the expert's own token budget for the last day. They are
+// counted in the expert's own ledger (caps.ts's openLedger, in <name>/ledger.json): an entry per
+// question, its room the asking session's id, and one per grounding, proof or append under
+// "expert", which counts toward the budget only. Tokens are weighted as runner.json says. The
+// computer's own caps (runner.json's per-room, per-machine and budget) don't count expert work, and
+// these don't count theirs.
 
-import type { ExpertCap } from "@isoplan/protocol";
 import type { Usage } from "./answerer.js";
 import { weighted, type CapSettings, type Entry } from "./caps.js";
 import type { ExpertCaps } from "./expert-file.js";
+
+/** Which of an expert's caps on this computer was reached. */
+export type ExpertCap = "asker-day" | "asker-open" | "expert-tokens";
+
+/** Each cap, as an asking agent is told it. */
+export const EXPERT_CAP_WORDS: Record<ExpertCap, string> = {
+  "asker-day": "questions per asking session per day",
+  "asker-open": "open questions per asking session",
+  "expert-tokens": "the expert's daily token budget",
+};
 
 const DAY_MS = 24 * 3600000;
 

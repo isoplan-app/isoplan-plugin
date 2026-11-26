@@ -987,7 +987,7 @@ const guid = /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9
 /** Returns a regex for validating an RFC 9562/4122 UUID.
 *
 * @param version Optionally specify a version 1-8. If no version is specified, all versions are supported. */
-const uuid = (version) => {
+const uuid$1 = (version) => {
 	if (!version) return /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/;
 	return new RegExp(`^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-${version}[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$`);
 };
@@ -1526,8 +1526,8 @@ const $ZodUUID = /*@__PURE__*/ $constructor("$ZodUUID", (inst, def) => {
 			v8: 8
 		}[def.version];
 		if (v === void 0) throw new Error(`Invalid UUID version: "${def.version}"`);
-		def.pattern ?? (def.pattern = uuid(v));
-	} else def.pattern ?? (def.pattern = uuid());
+		def.pattern ?? (def.pattern = uuid$1(v));
+	} else def.pattern ?? (def.pattern = uuid$1());
 	$ZodStringFormat.init(inst, def);
 });
 const $ZodEmail = /*@__PURE__*/ $constructor("$ZodEmail", (inst, def) => {
@@ -5052,6 +5052,9 @@ const ZodUUID = /*@__PURE__*/ $constructor("ZodUUID", (inst, def) => {
 	$ZodUUID.init(inst, def);
 	ZodStringFormat.init(inst, def);
 });
+function uuid(params) {
+	return /* @__PURE__ */ _uuid(ZodUUID, params);
+}
 const ZodURL = /*@__PURE__*/ $constructor("ZodURL", (inst, def) => {
 	$ZodURL.init(inst, def);
 	ZodStringFormat.init(inst, def);
@@ -6023,8 +6026,8 @@ const HelloMessageSchema = object({
 * runner can open them, and `orca` and `desktop` only where `orca` and `desktop` are said. The server
 * sends a start with a `mode` only to a runner that says `starts`, and only one of its places: a
 * runner from before 0.10.0 drops the field it doesn't know and would run the session from the floor.
-* `experts` (protocol 0.13.0): this runner hosts experts. It answers `hosting` with `experts`, and
-* takes `answer-expert` requests; the server sends neither to a runner that didn't say it.
+* `experts` (protocol 0.13.0 to 0.16.0, the relay of experts' questions through the server) is gone:
+* a 0.17.0 runner never says it, and an older runner's hello still parses, with it dropped.
 * `hiddenStarts` (protocol 0.14.0, isoplan-app#315): this runner can start a session from the floor
 * hidden (a start's `hidden`), in a clone Isoplan keeps for itself. The server sends `hidden` only to
 * a runner that says it: a runner from before 0.14.0 drops the field it doesn't know and would start
@@ -6036,6 +6039,10 @@ const HelloMessageSchema = object({
 * `expert-creation-suggestion-dismissals`, `draft-office-wide-expert-creation-suggestion`,
 * `create-expert-from-suggestion` and `expert-creation-suggestion-ended`; the server sends none of
 * these to a runner that didn't say it.
+* `expertInstances` (protocol 0.17.0, isoplan-app#340): this runner keeps instances of experts set
+* up from their expert records and answers its own sessions' questions from them; it sends and
+* takes the messages of "Expert records and instances" (see `expert-directory`). The server sends
+* none of them to a runner that didn't say it.
 */
 const RunnerHelloMessageSchema = object({
 	type: literal("runner"),
@@ -6048,9 +6055,9 @@ const RunnerHelloMessageSchema = object({
 	drive: boolean().optional(),
 	claude: ClaudeCliSchema.optional(),
 	starts: array(StartModeSchema).max(4).optional(),
-	experts: literal(true).optional(),
 	hiddenStarts: literal(true).optional(),
-	canCreateExpertsFromSuggestions: literal(true).optional()
+	canCreateExpertsFromSuggestions: literal(true).optional(),
+	expertInstances: literal(true).optional()
 });
 /** All of the session's facts. Sent on connect and on repair. */
 const FullMessageSchema = object({
@@ -6097,67 +6104,34 @@ const ExpertNameSchema = string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/, "lowercase 
 /** A full commit hash, as a handoff repo's. */
 const Commit = string().regex(/^([0-9a-f]{40}|[0-9a-f]{64})$/, "a full commit hash");
 const Subject = string().trim().min(1).max(MAX_EXPERT_SUBJECT_LENGTH);
-/** Every situation ask_expert tells its agent about, by a stable code. */
+/**
+* Every situation ask_expert tells its agent about, by a stable code. `EXPERT_NOT_SET_UP` (protocol
+* 0.17.0): this computer has no instance of the expert yet, so its set-up is offered. No 0.17.0 side
+* sends `EXPERT_QUEUED` or `EXPERT_DROPPED`; an office from before 0.17.0 may still send them in a
+* late end. `EXPERT_QUESTION_HELD` is gone (0.17.0): a runner made it, and no office ever sent it.
+*/
 const ExpertCodeSchema = _enum([
 	"EXPERT_RUNNER_UNREACHABLE",
 	"EXPERT_UNKNOWN",
 	"EXPERT_CAP",
-	"EXPERT_QUESTION_HELD",
 	"EXPERT_PLUGIN_OLD",
+	"EXPERT_NOT_SET_UP",
 	"EXPERT_QUEUED",
 	"EXPERT_STARTING",
 	"EXPERT_FORK_FAILED",
 	"EXPERT_DROPPED"
 ]);
-/** `starting`: no generation of it has passed its proof question yet; `ready`: its junior answers; `failed`: its last grounding failed and none answers. */
-const ExpertStateSchema = _enum([
-	"starting",
-	"ready",
-	"failed"
-]);
-/** The host's caps, from the expert file: questions per asking session per day, open questions per asking session, the expert's daily token budget. */
-const ExpertCapSchema = _enum([
-	"asker-day",
-	"asker-open",
-	"expert-tokens"
-]);
 /**
-* One expert a runner hosts, as it lists it to an office server whose list takes its repo. `senior`
-* (protocol 0.14.0): it has a senior generation, which its junior can ask (see `expert-senior`);
-* absent from an older runner. `areas` (protocol 0.15.0): the folders and globs of its repo it
-* covers, from its file, so the office never suggests creating an expert on a folder one already covers;
-* absent from an older runner, or when its file names none. An older server ignores both.
+* One expert a session may ask: `repo` is its project's short name, `host` a person's name: the
+* hosting person's until 0.17.0, and from 0.17.0 the expert's owner's, kept so an older plugin still
+* parses it.
 */
-const ExpertListingSchema = object({
-	name: ExpertNameSchema,
-	project: ProjectSchema,
-	subject: Subject,
-	state: ExpertStateSchema,
-	senior: boolean().optional(),
-	areas: array(AreaPathSchema).max(20).optional()
-});
-/** One expert a session may ask: `repo` is its project's short name, `host` the hosting person's name. */
 const ExpertRightSchema = object({
 	name: ExpertNameSchema,
 	subject: Subject,
 	repo: string().min(1),
 	host: string()
 });
-/**
-* Why the host's runner won't answer an expert question, beside an `unavailable` refusal's `detail`:
-* one of the expert file's caps is reached (`frees`, when it frees), the fork couldn't answer, or this
-* machine hosts no expert by that name now.
-*/
-const ExpertRefusalSchema = discriminatedUnion("code", [
-	object({
-		code: literal("EXPERT_CAP"),
-		cap: ExpertCapSchema,
-		limit: number().int().positive(),
-		frees: datetime({ offset: true }).optional()
-	}),
-	object({ code: literal("EXPERT_FORK_FAILED") }),
-	object({ code: literal("EXPERT_UNKNOWN") })
-]);
 /** A cap on the answers a machine gives: a room's per hour, the owner's per day, or the owner's tokens per day. */
 const CapSchema = _enum([
 	"room-hour",
@@ -6203,15 +6177,6 @@ const ReplyMessageSchema = discriminatedUnion("kind", [
 		v: Version,
 		id: RequestId,
 		kind: literal("focus")
-	}),
-	object({
-		type: literal("reply"),
-		v: Version,
-		id: RequestId,
-		kind: literal("answer-expert"),
-		answer: string().min(1).max(MAX_EXPERT_ANSWER_LENGTH),
-		commit: Commit,
-		branch: BranchName
 	})
 ]);
 /**
@@ -6243,8 +6208,7 @@ const RefusalMessageSchema = discriminatedUnion("reason", [
 		id: RequestId,
 		reason: literal("unavailable"),
 		detail: string().min(1),
-		code: OwnerMessageRefusalSchema.optional(),
-		expert: ExpertRefusalSchema.optional()
+		code: OwnerMessageRefusalSchema.optional()
 	})
 ]);
 /**
@@ -6329,46 +6293,6 @@ const AskedAckMessageSchema = object({
 	question: RequestId
 });
 /**
-* The experts this runner hosts (protocol 0.13.0), as it lists them to this office server, each one
-* whose repo the server's approved list takes. Sent only by a runner that said `experts`, only while
-* its link is up (never through the reply outbox), and never on a connection before that
-* connection's first `hosting`. The runner works the listing out again on every `hosting`, on every
-* change to its experts and every few minutes, and sends it when it differs from the last one it
-* sent on the connection; the first on a connection is always sent, even an empty one. It sends none
-* while it has no approved list. Each one replaces the last. Names are unique.
-*/
-const ExpertsMessageSchema = object({
-	type: literal("experts"),
-	v: Version,
-	experts: array(ExpertListingSchema).max(20)
-}).superRefine((message, context) => {
-	const seen = /* @__PURE__ */ new Set();
-	message.experts.forEach((expert, i) => {
-		if (seen.has(expert.name)) context.addIssue({
-			code: "custom",
-			path: [
-				"experts",
-				i,
-				"name"
-			],
-			message: `the name ${expert.name} is listed once only`
-		});
-		seen.add(expert.name);
-	});
-});
-/**
-* The junior answering the `answer-expert` request `id` has asked its senior (protocol 0.14.0), so
-* the floor can show the senior joining the question's meeting. It carries no text: nothing of the
-* question or of what the junior asked. Sent once per request, when the junior first asks, only to a
-* server whose `hosting` says `expertSenior`, and only while the link is up (never through the reply
-* outbox): a server from before 0.14.0, which doesn't say it, is never sent one.
-*/
-const ExpertSeniorMessageSchema = object({
-	type: literal("expert-senior"),
-	v: Version,
-	id: RequestId
-});
-/**
 * A session asks an expert a question (protocol 0.13.0), on its own short link with the session's
 * hello, as ask-room is. `key` is the tool call's id: asked again under it, it is the same question.
 * `blocking`: the agent waits a few seconds for the answer. The server answers `asked`, or an error
@@ -6376,6 +6300,8 @@ const ExpertSeniorMessageSchema = object({
 * pairing codes, as for ask-room). It is a message of its own, not an ask-room with an expert, so a
 * server from before experts refuses it rather than asking a room. The session then polls it with
 * ask-check and acks its end with asked-ack, as for a room question.
+* From 0.17.0 a server answers it only with an error `EXPERT_PLUGIN_OLD`, and a 0.17.0 plugin never
+* sends it: it asks its own computer's instance of the expert (see `expert-question`).
 */
 const AskExpertMessageSchema = object({
 	type: literal("ask-expert"),
@@ -6485,6 +6411,202 @@ const ExpertCreationProgressMessageSchema = object({
 	expertCreationSuggestionId: ExpertCreationSuggestionId,
 	state: ExpertCreationProgressStateSchema,
 	detail: Detail.optional()
+});
+/** The most expert records an `expert-directory` or an `expert-instance-states` names. */
+const MAX_EXPERT_RECORDS = 1e3;
+/** The most times an `expert-questions-asked-on-your-other-computers` lists for the last day. */
+const MAX_EXPERT_QUESTION_TIMES_IN_THE_LAST_DAY = 1e3;
+/** A definition's revision in its expert record: 1 when the record is made, one more at each change. */
+const Revision = number().int().positive();
+/**
+* Which expert record: made by the server when the record is made, so a record made again under the
+* key of a deleted one is told apart from the old one.
+*/
+const ExpertRecordIdSchema = uuid();
+/** The record and revision a computer last had of the definition it publishes. */
+const BasedOn = object({
+	expertRecordId: ExpertRecordIdSchema,
+	revision: Revision
+});
+/**
+* What every computer's instance of an expert shares, as its owner's expert file says it: its key;
+* its project, one with a remote, never a folder on one computer (`local:`); its subject; the model
+* it grounds with; the context, in tokens, at which its junior is promoted (`promoteAtTokens`); the
+* folders and globs of its repo it covers (`areas`); and its proof question with the answer expected.
+* The rest of an expert file is that computer's own, and never leaves it.
+*/
+const ExpertDefinitionSchema = object({
+	key: ExpertNameSchema,
+	project: ProjectSchema.refine((project) => !project.id.toLowerCase().startsWith("local:"), "a project with a remote: an expert's definition never names a folder on one computer"),
+	subject: Subject,
+	model: Model,
+	promoteAtTokens: number().int().positive(),
+	areas: array(AreaPathSchema).max(20),
+	proof: Proof
+});
+/**
+* Where this computer's instance of the expert `key` stands, set up from (or, on its owner's
+* computer, published as) the record `expertRecordId`: `setting-up`, with its `step` (`cloning`,
+* finding this computer's checkout of the project or cloning it; `grounding`; `proof`); `ready`, its
+* junior answers; or `failed`, with its `failure`: `clone`, the project couldn't be cloned, with
+* git's words in `detail`, secret-checked on this computer; `proof`, its proof question failed;
+* `key-used-here`, this computer has its own expert with that key, whose publish was refused
+* `key-taken`, so the record can't be set up here until that one is renamed; `other`, with why in
+* `detail`. `senior`: it has a senior generation, which its junior can ask. `groundingTokens`: its
+* junior's context after grounding. No definition field: the record has it.
+*/
+const ExpertInstanceStateSchema = object({
+	key: ExpertNameSchema,
+	expertRecordId: ExpertRecordIdSchema,
+	state: _enum([
+		"setting-up",
+		"ready",
+		"failed"
+	]),
+	step: _enum([
+		"cloning",
+		"grounding",
+		"proof"
+	]).optional(),
+	senior: literal(true).optional(),
+	groundingTokens: number().int().positive().optional(),
+	failure: object({
+		why: _enum([
+			"clone",
+			"proof",
+			"key-used-here",
+			"other"
+		]),
+		detail: Detail.optional()
+	}).optional()
+});
+/**
+* One expert record in an `expert-directory`: one whose project an office holds. `owner` is the
+* expert's owner, `yours` marks a record this runner's person owns, `revision` is its definition's
+* revision now, and `groundingTokens` a junior's context after grounding, as an instance last said.
+*/
+const ExpertDirectoryEntrySchema = object({
+	key: ExpertNameSchema,
+	expertRecordId: ExpertRecordIdSchema,
+	project: ProjectSchema,
+	owner: Account,
+	yours: literal(true).optional(),
+	revision: Revision,
+	groundingTokens: number().int().positive().optional()
+});
+/** Adds an issue for each entry of the list `field` that names a key an earlier entry named. */
+const checkEachKeyOnce = (field, entries, context) => {
+	const seen = /* @__PURE__ */ new Set();
+	entries.forEach((entry, i) => {
+		if (seen.has(entry.key)) context.addIssue({
+			code: "custom",
+			path: [
+				field,
+				i,
+				"key"
+			],
+			message: `the key ${entry.key} is named once only`
+		});
+		seen.add(entry.key);
+	});
+};
+/**
+* The owner's runner publishes the expert's definition from the expert file (protocol 0.17.0), after
+* checking it for secrets on this computer (a match sends nothing). `basedOn`: the record and
+* revision this computer last had of it from this server; absent for a file never published there.
+* Sent on each new connection while the file differs from that revision, and on each change. The
+* server answers `expert-definition-result`; the same definition and `basedOn` again get the same
+* result.
+*/
+const ExpertDefinitionMessageSchema = object({
+	type: literal("expert-definition"),
+	v: Version,
+	definition: ExpertDefinitionSchema,
+	basedOn: BasedOn.optional()
+});
+/**
+* Send this computer the record `expertRecordId` of the expert `key` (protocol 0.17.0), answered
+* with `expert-record`. Sent only once this computer has a checkout or clone of the record's
+* project, and again after each new connection's first `expert-directory` while it is still wanted.
+*/
+const ExpertRecordWantedMessageSchema = object({
+	type: literal("expert-record-wanted"),
+	v: Version,
+	key: ExpertNameSchema,
+	expertRecordId: ExpertRecordIdSchema
+});
+/**
+* Every instance on this computer of this server's expert records whose project this server takes
+* (protocol 0.17.0), the whole list each time: the first on each connection always, even an empty
+* one, then only when it differs. An instance set up from one office server is never named to
+* another. Each key once.
+*/
+const ExpertInstanceStatesMessageSchema = object({
+	type: literal("expert-instance-states"),
+	v: Version,
+	instances: array(ExpertInstanceStateSchema).max(MAX_EXPERT_RECORDS)
+}).superRefine((message, context) => checkEachKeyOnce("instances", message.instances, context));
+/**
+* A question this computer's session asked the expert `key` (protocol 0.17.0), as a record with no
+* words: never the question's or the answer's text. `id` is the tool call's id, `session` the asking
+* session as its hello names it (`claude-code:<id>`), `blocking` whether its agent waited, `state`
+* where it stands (`asking`, `answered` or `dropped`, with its `code`), `senior` that its junior asked
+* its senior, and `askedAt` and `endedAt` when it was asked and ended. Sent at each change of state,
+* and again after each new connection's first `expert-directory` until its end has gone. The same
+* `id` and `state` again is the same record.
+*/
+const ExpertQuestionMessageSchema = object({
+	type: literal("expert-question"),
+	v: Version,
+	id: string().min(1).max(100),
+	key: ExpertNameSchema,
+	expertRecordId: ExpertRecordIdSchema,
+	session: string().min(1),
+	blocking: boolean(),
+	state: _enum([
+		"asking",
+		"answered",
+		"dropped"
+	]),
+	code: ExpertCodeSchema.optional(),
+	senior: literal(true).optional(),
+	askedAt: datetime({ offset: true }),
+	endedAt: datetime({ offset: true }).optional()
+});
+/**
+* An agent on this computer asked the expert `key`, of which this computer has no instance, so its
+* person is offered to set it up (protocol 0.17.0, ADR 0013). Sent once per computer per record,
+* ever, and again after each new connection's first `expert-directory` until it has gone. A repeat
+* for the same record, person and computer changes nothing. No text of the question.
+*/
+const ExpertSetUpOfferedMessageSchema = object({
+	type: literal("expert-set-up-offered"),
+	v: Version,
+	key: ExpertNameSchema,
+	expertRecordId: ExpertRecordIdSchema
+});
+/**
+* This computer's instance of the expert `key`, whose record isn't its person's own, failed its proof
+* question at `revision` until its tries ran out (protocol 0.17.0), for the expert's owner to see:
+* `answer`, what its fork answered, secret-checked on this computer, or `answerHeld`, that it matched
+* a secret pattern and so isn't sent. Exactly one of the two. Sent once per revision, and again after
+* each new connection's first `expert-directory` until it has gone. A repeat for the same record,
+* computer and revision changes nothing.
+*/
+const ExpertProofFailedMessageSchema = object({
+	type: literal("expert-proof-failed"),
+	v: Version,
+	key: ExpertNameSchema,
+	expertRecordId: ExpertRecordIdSchema,
+	revision: Revision,
+	answer: string().min(1).max(MAX_EXPERT_ANSWER_LENGTH).optional(),
+	answerHeld: literal(true).optional()
+}).superRefine((message, context) => {
+	if (message.answer === void 0 === (message.answerHeld === void 0)) context.addIssue({
+		code: "custom",
+		path: ["answer"],
+		message: "the fork's answer, or answerHeld: one of the two"
+	});
 });
 const driven = {
 	type: literal("driven"),
@@ -6714,12 +6836,16 @@ discriminatedUnion("type", [
 			})).max(100)
 		})
 	]),
-	ExpertsMessageSchema,
 	AskExpertMessageSchema,
-	ExpertSeniorMessageSchema,
 	ExpertCreationSuggestionMessageSchema,
 	RunnerExpertCreationSuggestionEndedMessageSchema,
-	ExpertCreationProgressMessageSchema
+	ExpertCreationProgressMessageSchema,
+	ExpertDefinitionMessageSchema,
+	ExpertRecordWantedMessageSchema,
+	ExpertInstanceStatesMessageSchema,
+	ExpertQuestionMessageSchema,
+	ExpertSetUpOfferedMessageSchema,
+	ExpertProofFailedMessageSchema
 ]);
 /** Asks the data layer to send its facts in full. */
 const RepairMessageSchema = object({
@@ -6811,18 +6937,6 @@ const RequestMessageSchema = discriminatedUnion("kind", [
 		id: RequestId,
 		kind: literal("focus"),
 		handoff: HandoffId
-	}),
-	object({
-		type: literal("request"),
-		v: Version,
-		id: RequestId,
-		kind: literal("answer-expert"),
-		expert: ExpertNameSchema,
-		questionId: RequestId,
-		question: string().trim().min(1).max(MAX_QUESTION_LENGTH),
-		blocking: boolean(),
-		from: Account,
-		asker: string().min(1)
 	})
 ]);
 /**
@@ -6905,7 +7019,8 @@ const HandedOverMessageSchema = object({
 * An answered or dropped question is sent again down the session's own link until it is acked.
 * A question asked of an expert (protocol 0.13.0) has `expert`, and `owner` is the host's name; its
 * `code` says where it stands for ask_expert, and an answered one has the `commit` and `branch` its
-* answer describes.
+* answer describes. From 0.17.0 no office sends one for an expert's question, which the asker's own
+* runner answers, though an office from before 0.17.0 may still send a late end.
 */
 const AskedMessageSchema = object({
 	type: literal("asked"),
@@ -6950,21 +7065,6 @@ const ExpertRightsMessageSchema = object({
 	type: literal("expert-rights"),
 	v: Version,
 	experts: array(ExpertRightSchema).max(20)
-});
-/**
-* Which of this runner's experts the server shows in at least one office (protocol 0.13.0), sent only
-* to a runner that said `experts`: once its hello is let in (as the server last kept them, or none),
-* after each `experts` message, and whenever the offices change. The runner sends no `experts` on a
-* connection before that connection's first `hosting`, so a server from before experts, which sends
-* none, is never sent one.
-* `expertSenior` (protocol 0.14.0): this server reads `expert-senior`, so the runner may send it. A
-* server that reads it says it on every `hosting`; the runner goes by the connection's last one.
-*/
-const HostingMessageSchema = object({
-	type: literal("hosting"),
-	v: Version,
-	listed: array(ExpertNameSchema).max(20),
-	expertSenior: literal(true).optional()
 });
 const drive = {
 	type: literal("drive"),
@@ -7188,6 +7288,70 @@ const expertCreationSuggestionEnded = {
 	v: Version,
 	id: ExpertCreationSuggestionId
 };
+/**
+* How the expert creation suggestion `id` ended (protocol 0.15.0), sent to the runner that sent it:
+* `made`, once the expert `key` is created and ready (with the key the person set, which may differ
+* from the draft's), so the runner can tell the session that showed the need; `dismissed`, by a person
+* on the floor, and only that; `refused`, the office won't keep it (its repo isn't taken there, the
+* session is someone else's, it names an id the office didn't ask for, and the like); `expired`,
+* unopened or with no expert created for the period the server keeps expert creation suggestions.
+*/
+const ServerExpertCreationSuggestionEndedMessageSchema = discriminatedUnion("why", [object({
+	...expertCreationSuggestionEnded,
+	why: literal("made"),
+	key: ExpertNameSchema
+}), object({
+	...expertCreationSuggestionEnded,
+	why: _enum([
+		"dismissed",
+		"refused",
+		"expired"
+	])
+})]);
+/**
+* Every expert record whose project an office on this server holds (protocol 0.17.0), the whole list
+* each time, each marked `yours` for this runner's person, and the caps of asks.json that the
+* asker's runner checks over its person's questions on all their computers (`asking`): open
+* questions per person per expert, questions per person in the last day, and the hours after which
+* a question still unanswered ends. Sent to a runner that said `expertInstances` once its hello is
+* let in, even an empty one, and whenever it changes; the first on a connection opens the family on
+* it (see "Expert records and instances"). Each key once.
+*/
+const ExpertDirectoryMessageSchema = object({
+	type: literal("expert-directory"),
+	v: Version,
+	experts: array(ExpertDirectoryEntrySchema).max(MAX_EXPERT_RECORDS),
+	asking: object({
+		openPerPersonPerExpert: number().int().positive(),
+		perPersonPerDay: number().int().positive(),
+		maxAgeHours: number().positive()
+	})
+}).superRefine((message, context) => checkEachKeyOnce("experts", message.experts, context));
+/**
+* The expert record `expertRecordId` at `revision`, with its definition (protocol 0.17.0): in answer
+* to `expert-record-wanted`, and sent unasked when the revision changes to every linked runner whose
+* `expert-instance-states` has that record at `grounding` or `proof`, `ready`, or failed for a reason
+* other than `clone` or `key-used-here`; a runner still cloning asks once it has the project.
+* `owner` is the expert's owner, and `yours` marks it as this runner's person's own.
+*/
+const ExpertRecordMessageSchema = object({
+	type: literal("expert-record"),
+	v: Version,
+	expertRecordId: ExpertRecordIdSchema,
+	revision: Revision,
+	owner: Account,
+	yours: literal(true).optional(),
+	definition: ExpertDefinitionSchema
+});
+const expertDefinitionResult = {
+	type: literal("expert-definition-result"),
+	v: Version,
+	key: ExpertNameSchema
+};
+const expertDefinitionRefused = {
+	...expertDefinitionResult,
+	outcome: literal("refused")
+};
 discriminatedUnion("type", [
 	RepairMessageSchema,
 	WelcomeMessageSchema,
@@ -7204,22 +7368,69 @@ discriminatedUnion("type", [
 	DriveMessageSchema,
 	DrivePolicyMessageSchema,
 	ExpertRightsMessageSchema,
-	HostingMessageSchema,
 	CreateExpertFromSuggestionMessageSchema,
 	DraftOfficeWideExpertCreationSuggestionMessageSchema,
 	ExpertCreationSuggestionDismissalsMessageSchema,
-	discriminatedUnion("why", [object({
-		...expertCreationSuggestionEnded,
-		why: literal("made"),
-		key: ExpertNameSchema
+	ServerExpertCreationSuggestionEndedMessageSchema,
+	ExpertDirectoryMessageSchema,
+	ExpertRecordMessageSchema,
+	discriminatedUnion("outcome", [object({
+		...expertDefinitionResult,
+		outcome: literal("published"),
+		expertRecordId: ExpertRecordIdSchema,
+		revision: Revision
+	}), discriminatedUnion("reason", [object({
+		...expertDefinitionRefused,
+		reason: literal("edited-elsewhere"),
+		expertRecordId: ExpertRecordIdSchema,
+		revision: Revision,
+		definition: ExpertDefinitionSchema
 	}), object({
-		...expertCreationSuggestionEnded,
+		...expertDefinitionRefused,
+		reason: _enum([
+			"key-taken",
+			"not-owner",
+			"project-not-in-an-office",
+			"deleted"
+		])
+	})])]),
+	object({
+		type: literal("expert-deleted"),
+		v: Version,
+		key: ExpertNameSchema,
+		expertRecordId: ExpertRecordIdSchema,
+		by: Account
+	}),
+	object({
+		type: literal("set-up-expert-instance"),
+		v: Version,
+		request: RequestId,
+		key: ExpertNameSchema,
+		expertRecordId: ExpertRecordIdSchema,
+		by: Account,
+		again: literal(true).optional()
+	}),
+	object({
+		type: literal("expert-set-up-offer-ended"),
+		v: Version,
+		key: ExpertNameSchema,
+		expertRecordId: ExpertRecordIdSchema,
 		why: _enum([
 			"dismissed",
-			"refused",
-			"expired"
+			"expired",
+			"set-up",
+			"gone"
 		])
-	})])
+	}),
+	object({
+		type: literal("expert-questions-asked-on-your-other-computers"),
+		v: Version,
+		open: array(object({
+			key: ExpertNameSchema,
+			count: number().int().positive()
+		})).max(MAX_EXPERT_RECORDS),
+		askedAtInTheLastDay: array(datetime({ offset: true })).max(MAX_EXPERT_QUESTION_TIMES_IN_THE_LAST_DAY)
+	})
 ]);
 //#endregion
 //#region src/data-layer/git.ts
@@ -7355,13 +7566,12 @@ function expertText(code, a) {
 	return `${`Expert ${a.expert}, question ${a.id}: `}${(() => {
 		switch (code) {
 			case "EXPERT_RUNNER_UNREACHABLE": return `Isoplan's runner can't be reached on this machine${a.words ? `: ${said(a.words)}` : ""}, so nothing was sent. Explore this yourself`;
-			case "EXPERT_REFUSED": return `the office server refused the question${a.words ? `: ${said(a.words)}` : ""}, so it wasn't asked. Explore this yourself`;
 			case "EXPERT_UNKNOWN":
 				if (a.words) return a.words;
 				return a.names?.length ? `no expert named ${a.expert}; ask one of: ${a.names.join(", ")}` : "no expert can be asked from this session right now. Explore this yourself";
 			case "EXPERT_CAP": return a.words ?? "a cap on asking this expert has been reached";
-			case "EXPERT_QUESTION_HELD": return `the question looks like it holds a secret (it matches the secret pattern ${a.pattern ?? "unknown"}), so it wasn't sent. Ask again without it`;
-			case "EXPERT_PLUGIN_OLD": return a.words ?? "the Isoplan plugin on this machine or on the host's is from before experts; updating the Isoplan plugin there fixes it";
+			case "EXPERT_PLUGIN_OLD": return a.words ?? "the office server is from before each computer kept its own instance of an expert; updating the office server fixes it";
+			case "EXPERT_NOT_SET_UP": return `the ${a.name ?? a.expert} isn't set up on this computer yet. Explore this yourself`;
 			case "EXPERT_QUEUED":
 				if (a.words) return `${a.words} Carry on`;
 				return `queued: ${machineOf(a.host)} isn't connected. The answer arrives in this session when it reconnects, or a note says it was dropped and why. Carry on`;

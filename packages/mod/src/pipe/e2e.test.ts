@@ -4,8 +4,10 @@
 // hooks module's end of the pipe (client.ts) in this process, its lines read as the hooks module
 // reads them. The status line, an answer and a message from the floor, and ask_earlier_session (dist/ask.js,
 // rebuilt with every change) all go through the runner; a runner started again mid-session has the
-// session back on the floor, on one link at a time. So does ask_expert (dist/ask-expert.js), its
-// answer in time or, past the wait, as a late line down the session's link, acked through dist/ask.js.
+// session back on the floor, on one link at a time. So does ask_expert (dist/ask-expert.js), which
+// this computer's own instance of the expert answers (isoplan-app#340), with the fake `claude` and git
+// of runner/expert-fixture.ts: its answer in time or, past the wait, as a late line to the session's
+// hooks module, acked through dist/ask.js; the office is told only records with no words.
 
 import { execFile, execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -14,13 +16,23 @@ import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
 import { WebSocketServer } from "ws";
-import { loadConfig } from "../data-layer/config.js";
+import { loadConfig, loadSettings } from "../data-layer/config.js";
+import { createLink } from "../data-layer/link.js";
 import { modDir, tempRoot } from "../data-layer/fixture.js";
 import { nodeIo } from "../data-layer/io.js";
 import { reportSession, sessionLog } from "../data-layer/report-session.js";
 import type { DataLayerLine } from "../lines.js";
 import { watchSessions } from "../runner/reporting.js";
 import { loadPatterns } from "../runner/scan.js";
+import { BASE, C1, FAKE_CLAUDE, fakeGit, type Rule } from "../runner/expert-fixture.js";
+import { createExpertInstanceSetUpOffers } from "../runner/expert-instance-set-up-offer.js";
+import { createExpertInstances } from "../runner/expert-instance.js";
+import { createExpertQuestionsAskedHere, type ExpertQuestionsAskedHereSettings } from "../runner/expert-questions-asked-here.js";
+import { createExpertRecordLink } from "../runner/expert-record-link.js";
+import { createExpertRecordsPerOffice, expertRecordsPerOfficePath } from "../runner/expert-records-per-office.js";
+import { createExpertRightsOnThisComputer } from "../runner/expert-rights-on-this-computer.js";
+import type { ExpertSettings } from "../runner/expert.js";
+import { createExperts } from "../runner/experts.js";
 import { relay } from "./client.js";
 import { createPipeServer, type Hooked } from "./server.js";
 
@@ -43,17 +55,17 @@ async function until(check: () => boolean, ms = 20000) {
 
 type Sent = { type: string; id?: string; account?: { id: string }; facts?: { session: Record<string, unknown>; questions?: { id: string; answerable?: boolean }[] }; upsert?: { questions?: { id: string; answerable?: boolean }[] } };
 
-// A full commit hash, and the citation block an expert's answer ends with.
-const COMMIT = "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b";
-const EXPERT_ANSWER = "Only ids and counts leave it.\n\nCited, on main at 1a2b3c4:\n- docs/adr/0004-what-leaves-a-machine.md (read at 1a2b3c4)";
+// The expert record the office lists, and the expert's answers, cited at the fake git's commit.
+const RECORD = "4f0c3a52-8a2b-4d6e-9f10-2b3c4d5e6f70";
+const TEAM_APP = { id: "github.com/team/app", name: "app" };
+const EXPERT_ANSWER = "<answer>Only ids and counts leave it.</answer>\n<cited>\nsrc/relay.ts:1-2\n</cited>";
 
 /**
  * A stand-in office that takes github.com/team/app; it answers a question for the room at once, and
- * one for an expert at once while `expert.now`, otherwise only that it is being answered.
+ * lists the expert "reporting", Adam's, to a runner that keeps instances of experts.
  */
 async function office() {
   const connections: { messages: Sent[]; closed: boolean; openAtHello: number; send(message: unknown): void }[] = [];
-  const expert = { now: true };
   const server = http.createServer((request, response) => {
     if (!request.url?.startsWith("/data-layer/repos")) return void response.writeHead(404).end();
     response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ version: "v1", repos: ["github.com/team/app"] }));
@@ -68,11 +80,8 @@ async function office() {
       // How many of the session's links were still open as this one said hello.
       if (message.type === "hello") c.openAtHello = links().filter((l) => !l.closed).length;
       if (message.type === "ask-room") c.send({ type: "asked", v: 1, question: "q-1", text: message.question, state: "answered", answer: "Because the tests needed it.", owner: "Sam", key: message.key });
-      if (message.type === "ask-expert") {
-        const about = { type: "asked", v: 1, question: `x-${message.key === "toolu_x1" ? "0000000001" : "0000000002"}`, text: message.question, owner: "Adam", key: message.key, expert: "reporting" };
-        c.send(expert.now ? { ...about, state: "answered", answer: EXPERT_ANSWER, commit: COMMIT, branch: "main" } : { ...about, state: "asking" });
-      }
-      if (message.type === "ask-check" && message.question === "x-0000000002") c.send({ type: "asked", v: 1, question: message.question, text: "Where do usage events go?", state: "asking", owner: "Adam", expert: "reporting" });
+      if (message.type === "runner" && (message as { expertInstances?: true }).expertInstances)
+        c.send({ type: "expert-directory", v: 1, experts: [{ key: "reporting", expertRecordId: RECORD, project: TEAM_APP, owner: { id: "claude:adam", name: "Adam" }, revision: 1 }], asking: { openPerPersonPerExpert: 3, perPersonPerDay: 30, maxAgeHours: 72 } });
     });
     ws.on("close", () => (c.closed = true));
   });
@@ -80,7 +89,7 @@ async function office() {
   closing.push(() => new Promise((resolve) => (wss.close(), server.closeAllConnections(), server.close(resolve))));
   // The session's own links: those that sent its facts.
   const links = () => connections.filter((c) => c.messages.some((m) => m.type === "full"));
-  return { connections, links, expert, url: `ws://127.0.0.1:${(server.address() as AddressInfo).port}/data-layer` };
+  return { connections, links, url: `ws://127.0.0.1:${(server.address() as AddressInfo).port}/data-layer` };
 }
 
 /** A repo the office takes, and session s1 in it whose agent has just asked its owner a question. */
@@ -111,11 +120,60 @@ function machine(url: string) {
   return { claudeDir, repo };
 }
 
-/** The runner's worker as it reports sessions and serves its pipe; `stop` ends it as the worker ends. */
-async function runner(claudeDir: string) {
+/**
+ * This computer's instance of the expert "reporting", Adam's, set up from the office's record in an
+ * earlier run, in `repo`: its instance file and what it keeps of the record.
+ */
+function installReportingInstance(claudeDir: string, server: string, repo: string) {
+  const definition = { key: "reporting", project: TEAM_APP, subject: "What leaves a machine.", model: "sonnet", promoteAtTokens: 200000, areas: [], proof: { question: "What is the answer?", answer: "Forty-two." } };
+  const dir = path.join(claudeDir, "isoplan", "experts", "reporting");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "expert-records.json"), JSON.stringify({ version: 1, servers: { [server]: { record: { expertRecordId: RECORD, revision: 1, owner: { id: "claude:adam", name: "Adam" }, yours: false, definition } } } }));
+  fs.mkdirSync(path.join(claudeDir, "isoplan", "expert-instances"), { recursive: true });
+  fs.writeFileSync(path.join(claudeDir, "isoplan", "expert-instances", "reporting.json"), JSON.stringify({ version: 1, key: "reporting", server, repo }));
+}
+
+/**
+ * This computer's experts, as the runner's worker keeps them (runner/main.ts): their instances, the
+ * runner's own link to the office with its record link, what each session may ask, and the asking
+ * module, with the fake `claude` answering by `rules`.
+ */
+async function expertsHere(claudeDir: string, server: string, repo: string, rules: Rule[], hooked: (session: string) => Hooked | null) {
+  const io = nodeIo();
+  const isoplanDir = path.join(claudeDir, "isoplan");
+  const root = path.dirname(claudeDir);
+  const [bin, rulesFile, claudeLog] = [path.join(root, "claude.js"), path.join(root, "rules.json"), path.join(root, "claude.jsonl")];
+  fs.writeFileSync(bin, FAKE_CLAUDE);
+  fs.writeFileSync(rulesFile, JSON.stringify(rules));
+  fs.writeFileSync(claudeLog, "");
+  const settings = async () => ({ ...(await loadSettings<ExpertSettings & ExpertQuestionsAskedHereSettings>(io, path.join(modDir, "runner.json"), path.join(isoplanDir, "runner.json"))), expertJudgeModel: "haiku" });
+  const scan = async () => null;
+  const account = { id: "claude:sam", name: "Sam" };
+  const experts = createExperts({ expertsDir: path.join(isoplanDir, "experts"), instancesDir: path.join(isoplanDir, "expert-instances"), logsDir: path.join(isoplanDir, "logs"), projectsDir: path.join(root, "expert-projects"), appDir: modDir, binary: async () => bin, settings, scan, git: fakeGit(repo).git, gitTimeoutMs: async () => 5000, env: { ...process.env, FAKE_RULES: rulesFile, FAKE_LOG: claudeLog }, log: () => {} });
+  const instances = createExpertInstances({ experts, isoplanDir, scan, log: () => {}, checkoutOf: async () => repo, clone: async () => ({ problem: "no clone in this test" }) });
+  const store = createExpertRecordsPerOffice({ file: expertRecordsPerOfficePath(isoplanDir), keptHours: async () => 144, log: () => {} });
+  await store.load();
+  const offers = createExpertInstanceSetUpOffers({ file: path.join(isoplanDir, "runner", "expert-instance-set-up-offers.json"), setUpWithoutAsking: async () => false, setUp: () => {}, send: () => false, hooked, hasInstance: () => false, log: () => {} });
+  let send = (_m: Parameters<ReturnType<typeof createLink>["sendLive"]>[0]) => false;
+  const record = createExpertRecordLink({ server, account, experts, instances, store, offerEnded: () => {}, approved: { refresh: async () => {}, repos: () => new Set([TEAM_APP.id]) }, home: async (folder) => (folder === repo ? TEAM_APP : null), scan, log: () => {}, send: (m) => send(m), checkMs: 3600000 });
+  const link = createLink({ url: server, hello: { type: "runner", v: 1, account, machine: { name: "box" }, canCreateExpertsFromSuggestions: true, expertInstances: true }, emit: () => {}, onExpertRecordMessages: (m) => record.take(m), onOpen: () => record.onOpen(), onClose: () => record.onClose() });
+  send = (m) => link.sendLive(m);
+  const rights = createExpertRightsOnThisComputer({ instances, store, person: () => account.name, projectOf: async (_s, folder) => (folder === repo ? TEAM_APP : null), send: (session, line) => hooked(session)?.send(line), log: () => {} });
+  const asking = createExpertQuestionsAskedHere({ file: path.join(isoplanDir, "runner", "expert-questions-asked-here.json"), claudeDir, config: () => loadConfig(io, path.join(modDir, "config.json"), path.join(isoplanDir, "config.json")), settings, links: new Map([[server, record]]), instances, offers, rights: (s, office) => rights.rights(s, office), hooked, log: () => {} });
+  await experts.start();
+  await instances.start();
+  await asking.start();
+  closing.push(async () => (link.close(), record.stop(), asking.close(), experts.close()));
+  const claude = () => fs.readFileSync(claudeLog, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as { kind: string; turn?: number; text?: string });
+  return { experts, rights, asking, claude };
+}
+
+/** The runner's worker as it reports sessions and serves its pipe, with `experts` its experts; `stop` ends it as the worker ends. */
+async function runner(claudeDir: string, experts?: (hooked: (session: string) => Hooked | null) => Promise<Awaited<ReturnType<typeof expertsHere>>>) {
   const io = nodeIo();
   const config = () => loadConfig(io, path.join(modDir, "config.json"), path.join(claudeDir, "isoplan", "config.json"));
   let pipe: Awaited<ReturnType<typeof createPipeServer>> | null = null;
+  const here = experts ? await experts((id) => pipe?.hooked(id) ?? null) : null;
   const reporting = watchSessions<Hooked>({
     claudeDir,
     io,
@@ -127,22 +185,29 @@ async function runner(claudeDir: string) {
     held: (_id, hooks) => hooks.send({ type: "superseded", reason: "earlier" }),
     report: async ({ sessionId, cwd, closed, notWanted, hooks }) => {
       const said = sessionLog(claudeDir, sessionId);
-      if (hooks) return reportSession({ sessionId, cwd, by: "hooks", appDir: modDir, root: hooks.root, takesMessages: hooks.messages, asksExperts: hooks.experts, emit: (line) => (said.emit(line), hooks.send(line)), closed: Promise.race([closed, hooks.closed]) });
+      // What the session may ask is this computer's to rewrite first, as the worker's report does it.
+      if (hooks) return reportSession({ sessionId, cwd, by: "hooks", appDir: modDir, root: hooks.root, takesMessages: hooks.messages, asksExperts: hooks.experts, emit: (line) => (said.emit(line), line.type === "expert-rights" && here ? here.rights.tap(sessionId, cwd, line) : hooks.send(line)), closed: Promise.race([closed, hooks.closed]) });
       return reportSession({ sessionId, cwd, by: "runner", appDir: modDir, emit: said.emit, closed, notWanted, isOff: async () => false });
     },
   });
-  // The asks the runner makes for the session are the worker's (askFromMachine, askExpertFromMachine), with its secret scan.
+  // The asks the runner makes for the session are the worker's: the room's through the office
+  // (askFromMachine, with its secret scan), the experts' here, an ack of an expert's end too.
   const { askFromMachine } = await import("../ask/machine.js");
-  const { askExpertFromMachine } = await import("../ask/expert-machine.js");
   const { loadPatterns, scan } = await import("../runner/scan.js");
   const scanText = async (text: string) => scan(text, await loadPatterns(path.join(modDir, "secret-patterns.json"), path.join(claudeDir, "isoplan", "secret-patterns.json"), () => {}));
-  pipe = await createPipeServer({ claudeDir, log: () => {}, onChange: (s) => reporting.rehook(s), ask: (request) => askFromMachine({ ...request, appDir: modDir, scan: scanText }), askExpert: (request) => askExpertFromMachine({ ...request, appDir: modDir, scan: scanText }) });
+  pipe = await createPipeServer({
+    claudeDir,
+    log: () => {},
+    onChange: (s) => (reporting.rehook(s), here?.asking.rehooked(s)),
+    ask: (request) => (request.ack && here?.asking.holds(request.ack) ? here.asking.ack(request.session, request.ack) : askFromMachine({ ...request, appDir: modDir, scan: scanText })),
+    ...(here && { askExpert: (request) => here.asking.ask(request) }),
+  });
   const stop = async () => {
     await reporting.stop();
     await pipe!.close();
   };
   closing.push(stop);
-  return { pipe, reporting, stop };
+  return { pipe, reporting, stop, here };
 }
 
 /** The hooks module's end for s1, in this process, with what the hooks module would do with a few of its lines. */
@@ -184,12 +249,15 @@ const ackScript = (claudeDir: string, repo: string, url: string, question: strin
     execFile(process.execPath, [path.join(modDir, "dist", "ask.js"), "--session", "s1", "--cwd", repo, "--server", url, "--ack", question], { env: { ...process.env, CLAUDE_CONFIG_DIR: claudeDir }, windowsHide: true }, () => resolve());
   });
 
-test("ask_expert through the runner: the session's fact asks for rights, which reach its hooks module; a blocking question answered in time prints the answer and its citations; one answered after the wait tells the agent to explore, its answer comes down the session's link, and its ack reaches the office", async () => {
+test("ask_expert through the runner, answered by this computer's own instance: the session's fact asks for rights, which reach its hooks module; a blocking question answered in time prints the answer and its citations; one answered after the wait tells the agent to explore, its answer comes to the hooks module as a late line, acked back to the runner; the office is told nothing of either question but records with no words", async () => {
   const o = await office();
   const { claudeDir, repo } = machine(o.url);
-  // A long wait for the first question, so it is answered in time however slow the runner's way to the office is.
+  installReportingInstance(claudeDir, o.url, repo);
+  // A long wait for the first question, so it is answered in time however slow the instance's grounding.
   fs.writeFileSync(path.join(claudeDir, "isoplan", "runner.json"), JSON.stringify({ expertWaitSeconds: 30 }));
-  await runner(claudeDir);
+  const rules: Rule[] = [{ kind: "fork", text: "Question toolu_x1", reply: EXPERT_ANSWER }, { kind: "fork", text: "Question toolu_x2", reply: EXPERT_ANSWER, delayMs: 4000 }, ...BASE];
+  const { here } = await runner(claudeDir, (hooked) => expertsHere(claudeDir, o.url, repo, rules, hooked));
+  await until(() => here!.experts.running("reporting")?.expert.hosted().state === "ready", 30000);
   const h = hooksModule(claudeDir, repo);
   await until(() => o.links().length === 1);
   const [link] = o.links();
@@ -201,28 +269,34 @@ test("ask_expert through the runner: the session's fact asks for rights, which r
   await until(() => h.of("expert-rights").length > 0);
   expect(h.of("expert-rights")[0]).toMatchObject({ experts, server: o.url });
 
-  // Answered in time: the answer, its citation block whole.
+  // Answered in time, by this computer's instance: the answer, its citation block whole.
   const answered = await askExpertScript(claudeDir, repo, o.url, "toolu_x1", "What leaves a machine?");
   expect(answered.code).toBe(0);
-  expect(answered.said).toContain("Expert reporting answered question x-0000000001. It describes main at 1a2b3c4");
-  expect(answered.said).toContain("docs/adr/0004-what-leaves-a-machine.md (read at 1a2b3c4)");
-  const side = o.connections.find((c) => c.messages.some((m) => m.type === "ask-expert"))!;
-  expect(side.messages.find((m) => m.type === "hello")).toMatchObject({ session: "claude-code:s1" });
-  expect(side.messages.find((m) => m.type === "ask-expert")).toMatchObject({ expert: "reporting", question: "What leaves a machine?", blocking: true, key: "toolu_x1" });
-  await until(() => side.messages.some((m) => m.type === "asked-ack"));
+  expect(answered.said).toContain(`Expert reporting answered question toolu_x1. It describes main at ${C1.slice(0, 7)}`);
+  expect(answered.said).toContain(`src/relay.ts:1-2 (read at ${C1.slice(0, 7)})`);
+  expect(here!.claude().some((l) => l.kind === "fork" && l.text?.includes("What leaves a machine?"))).toBe(true);
 
-  // Past the wait: explore meanwhile; the answer then comes down the session's own link, and its ack goes back.
-  o.expert.now = false;
-  // A short wait, so the second question runs past it quickly; settings are read on every ask.
+  // Past the wait: explore meanwhile; the answer then comes to the hooks module as a late line, and its ack goes back to the runner.
   fs.writeFileSync(path.join(claudeDir, "isoplan", "runner.json"), JSON.stringify({ expertWaitSeconds: 2 }));
   const late = await askExpertScript(claudeDir, repo, o.url, "toolu_x2", "Where do usage events go?");
   expect(late.code).toBe(0);
   expect(late.said).toContain("the expert is still answering. Explore this yourself meanwhile");
-  link!.send({ type: "asked", v: 1, question: "x-0000000002", text: "Where do usage events go?", state: "answered", answer: EXPERT_ANSWER, owner: "Adam", key: "toolu_x2", expert: "reporting", commit: COMMIT, branch: "main" });
-  await until(() => h.of("asked").length > 0);
-  expect(h.of("asked")[0]).toMatchObject({ question: "x-0000000002", expert: "reporting", key: "toolu_x2", commit: COMMIT, server: o.url });
-  await ackScript(claudeDir, repo, o.url, "x-0000000002");
-  await until(() => o.connections.some((c) => c.messages.some((m) => m.type === "asked-ack" && (m as { question?: string }).question === "x-0000000002")));
+  await until(() => h.of("asked").length > 0, 20000);
+  expect(h.of("asked")[0]).toMatchObject({ question: "toolu_x2", expert: "reporting", key: "toolu_x2", text: "Where do usage events go?", state: "answered", commit: C1, server: o.url });
+  await ackScript(claudeDir, repo, o.url, "toolu_x2");
+  const kept = () => JSON.parse(fs.readFileSync(path.join(claudeDir, "isoplan", "runner", "expert-questions-asked-here.json"), "utf8")) as { questions: { id: string; shown: boolean; text: string | null }[] };
+  await until(() => kept().questions.find((q) => q.id === "toolu_x2")?.shown === true);
+  expect(kept().questions.find((q) => q.id === "toolu_x2")!.text).toBe(null);
+
+  // The office: no question, only records with no words, from the runner's own link.
+  const all = o.connections.flatMap((c) => c.messages);
+  expect(all.some((m) => m.type === "ask-expert" || m.type === "asked-ack")).toBe(false);
+  expect(JSON.stringify(all)).not.toContain("What leaves a machine?");
+  expect(JSON.stringify(all)).not.toContain("Where do usage events go?");
+  expect(JSON.stringify(all)).not.toContain("Only ids and counts leave it");
+  const records = all.filter((m) => m.type === "expert-question") as unknown as { id: string; state: string; session: string }[];
+  expect(records.map((m) => [m.id, m.state])).toEqual(expect.arrayContaining([["toolu_x1", "answered"], ["toolu_x2", "answered"]]));
+  expect(records.every((m) => m.session === "claude-code:s1")).toBe(true);
 });
 
 test("through the runner: the status line, a floor answer and a floor message reach the hooks module, and its ask_earlier_session question the earlier session; the runner started again has the session back on one link, and messages still reach it", async () => {
