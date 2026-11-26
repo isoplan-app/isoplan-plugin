@@ -24,6 +24,8 @@ test("the home folder and the user name go wherever they are, a home with a spac
   expect(scrubText("EPERM: /c/Users/adamr/.claude/isoplan/pairing.json", windows)).toBe("EPERM: pairing.json");
   expect(scrubText("the folder C:/Users/ADAMR is locked", windows)).toBe("the folder ~ is locked");
   expect(scrubText("no access for adamr, AdamR or adamr2", windows)).toBe("no access for <user>, <user> or adamr2");
+  // A one-letter user name would take every word it is.
+  expect(scrubText("a file in a folder", whoOf("/home/a"))).toBe("a file in a folder");
 });
 
 test("an email goes, and a URL keeps its origin and path only", () => {
@@ -37,7 +39,11 @@ test("an email goes, and a URL keeps its origin and path only", () => {
 test("a long run like a token is redacted; a long word isn't", () => {
   expect(scrubText("Bearer 3q2+7wAbCdEfGhIjKlMnOpQrStUvWxYz0123456789", mac)).toBe("Bearer <redacted>");
   expect(scrubText("commit 9fceb02d0ae598e95dc970b74767f19372d61af8", mac)).toBe("commit <redacted>");
+  expect(scrubText("card 12345678901234567890123456789012", mac)).toBe("card <redacted>");
   expect(scrubText("in expert-creation-suggestion-model-calls", mac)).toBe("in expert-creation-suggestion-model-calls");
+  // A URL's path is checked a segment at a time.
+  expect(scrubText("GET https://office.example.com/data-layer/weekly/2026-11-26/errors/v2 failed", mac)).toBe("GET https://office.example.com/data-layer/weekly/2026-11-26/errors/v2 failed");
+  expect(scrubText("GET https://office.example.com/s/9fceb02d0ae598e95dc970b74767f19372d61af8/x failed", mac)).toBe("GET https://office.example.com/s/<redacted>/x failed");
 });
 
 test("only the message and the stack's frames are kept, never source lines", () => {

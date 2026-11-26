@@ -14,11 +14,11 @@
 // worker over its pipe (src/pipe), whose address and token it reads with the runner's own code.
 //
 // Its errors go to every office this computer is paired with (error-reports.ts, isoplan-app#375):
-// those of its windows, passed on over their RPC, and any its main process doesn't catch, which also
-// go to app.log, their text checked for secrets as the runner's worker checks its own. Electrobun's
-// own handlers stay: a rejected promise nothing caught is written to stderr and the app goes on; an
-// exception nothing caught is written to stderr and ends the app, now once its report has gone or
-// LAST_REPORT_MS has passed.
+// those of its windows, passed on over their RPC, and any its main process doesn't catch
+// (uncaught-errors.ts), which also go to app.log, their text checked for secrets as the runner's
+// worker checks its own. Electrobun's own handlers stay: a rejected promise nothing caught is written
+// to stderr and the app goes on; an exception nothing caught is written to stderr and ends the app,
+// now once its report has gone or LAST_REPORT_MS has passed.
 
 import { BrowserView, BrowserWindow, Tray, Utils } from "electrobun/main";
 import { existsSync } from "node:fs";
@@ -41,10 +41,11 @@ import { closing, currentStatus, pairingView, trayMenu, type MenuInput } from ".
 import { listProcesses } from "../../../mod/src/runner/processes.js";
 import { endPid } from "../../../mod/src/runner/strays.js";
 import { endChoice, parseClaudeSession, patternsProblemLine, runningView, workTreeFinder, type ClaudeSessionRecord, type RunningView } from "./running.ts";
-import { errorOf, type RawError } from "../shared/error-of.ts";
+import { errorOf, passedError, type RawError } from "../shared/error-of.ts";
 import { reportOffices } from "./error-report-offices.ts";
 import { whoOf } from "./error-report-scrub.ts";
 import { createErrorReports, osOf } from "./error-reports.ts";
+import { onUncaughtErrors, type UncaughtHandler } from "./uncaught-errors.ts";
 import pkg from "../../package.json" with { type: "json" };
 
 const LOG_CAP_BYTES = 256 * 1024;
@@ -78,43 +79,29 @@ const errorReports = createErrorReports({
   log,
 });
 
-// What the main process doesn't catch. A rejection that comes again with the same text is logged once.
-const said = async (err: unknown) => errorText(err, await secretPatterns().catch(() => null));
-let lastRejection = "";
-process.on("unhandledRejection", (reason) => {
-  void errorReports.report(errorOf(reason));
-  void said(reason).then((text) => {
-    if (text !== lastRejection) log(`the app caught a rejected promise nothing else did, and goes on: ${text}`);
-    lastRejection = text;
-  });
-});
-// Electrobun's handlers (electrobun/main registers them as it loads) run once the report has gone;
-// with none, the app exits as Bun would. A second exception while it ends is only reported.
-const onException = process.listeners("uncaughtException");
+// What the main process doesn't catch. Electrobun's exception handlers, registered as electrobun/main
+// loaded (before this module's body runs), are taken off so they run once the report has gone.
+// Electrobun's take an Error, which an exception nothing caught is given.
+const electrobunOnException = process.listeners("uncaughtException") as UncaughtHandler[];
 process.removeAllListeners("uncaughtException");
-let ending = false;
-process.on("uncaughtException", (err, origin) => {
-  const report = errorReports.report(errorOf(err));
-  if (ending) return;
-  ending = true;
-  void (async () => {
-    try {
-      log(`the app caught an error nothing else did, so it ends: ${await said(err)}`);
-      await Promise.race([report, new Promise((r) => setTimeout(r, LAST_REPORT_MS))]);
-      await logging;
-    } finally {
-      if (!onException.length) {
-        console.error(err);
-        process.exit(1);
-      }
-      for (const handler of onException) handler(err, origin);
-    }
-  })();
+onUncaughtErrors({
+  on: (event, handler) => void process.on(event, handler),
+  electrobun: electrobunOnException,
+  report: (err) => errorReports.report(errorOf(err)),
+  said: async (err) => errorText(err, await secretPatterns().catch(() => null)),
+  log,
+  logged: () => logging,
+  end: (err) => {
+    console.error(err);
+    process.exit(1);
+  },
+  lastReportMs: LAST_REPORT_MS,
 });
 
 // A window's error, passed on over its RPC.
-function viewError(error: RawError): void {
-  if (typeof error?.message === "string") void errorReports.report({ message: error.message, ...(typeof error.stack === "string" && { stack: error.stack }) });
+function viewError(payload: RawError): void {
+  const error = passedError(payload);
+  if (error) void errorReports.report(error);
 }
 
 // A menu-bar app: no Dock icon.

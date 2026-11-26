@@ -3,11 +3,14 @@
 // may print around them, with the person and their files taken out. The office server scrubs again
 // whatever arrives, by the same rules:
 //
-// - the home folder becomes ~, and the user name (the home folder's last segment) <user>, wherever they are;
+// - the home folder becomes ~, and the user name (the home folder's last segment, when it is longer
+//   than one character) <user>, wherever they are;
 // - an absolute path (C:\…, \\server\…, /Users/…, ~/…, file://…) becomes its last segment, so
 //   take.ts:120:5 stays readable;
 // - an email address becomes <email>; a URL keeps its origin and path, and loses its query and fragment;
-// - a run of 32 or more base64 or hex characters, with a letter and a digit in it, becomes <redacted>.
+// - a run of 32 or more base64 or hex characters with a digit in it becomes <redacted>: a run of
+//   letters alone is a long name, not a token. A URL's path is checked a segment at a time, so a
+//   long path isn't read as one run.
 //
 // It is pure; the plugin's secret scan runs on what it leaves before anything is sent.
 
@@ -53,7 +56,10 @@ const PATHS = new RegExp(
   ].join("|"),
   "g",
 );
+// A URL (by then without its query), whose path is checked a segment at a time, or a run like a token anywhere else.
+const URL_OR_TOKEN = /(\b[a-z][a-z0-9+.-]*:\/\/[^\s"'()<>]*)|[A-Za-z0-9+/=_-]{32,}/gi;
 const TOKENS = /[A-Za-z0-9+/=_-]{32,}/g;
+const redactTokens = (text: string) => text.replace(TOKENS, (run) => (/\d/.test(run) ? "<redacted>" : run));
 // A stack frame: V8's and Bun's `at …`, and WebKit's `name@url:line:col`.
 const FRAME = /^at\s|@\[native code\]$|:\d+(?::\d+)?\)?$/;
 
@@ -89,8 +95,8 @@ export function scrubText(text: string, who: Who): string {
   const home = homePattern(who.home);
   if (home) out = out.replace(home, "~");
   out = out.replace(PATHS, (m) => lastSegment(m));
-  if (who.user) out = out.replace(new RegExp(`(?<![A-Za-z0-9])${escape(who.user)}(?![A-Za-z0-9])`, "gi"), "<user>");
-  return out.replace(TOKENS, (m) => (/\d/.test(m) && /[A-Za-z]/.test(m) ? "<redacted>" : m));
+  if (who.user.length > 1) out = out.replace(new RegExp(`(?<![A-Za-z0-9])${escape(who.user)}(?![A-Za-z0-9])`, "gi"), "<user>");
+  return out.replace(URL_OR_TOKEN, (m, url?: string) => (url ? url.split("/").map(redactTokens).join("/") : redactTokens(m)));
 }
 
 /** The frames of `stack`, without its first line naming the error, or any line that isn't a frame (a runtime's source excerpt, say). */

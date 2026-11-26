@@ -1,11 +1,11 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, expect, test } from "vitest";
+import { afterAll, expect, test, vi } from "vitest";
 import { loadPatterns } from "../../../mod/src/runner/scan.js";
 import { reportOffices } from "./error-report-offices.ts";
 import { whoOf } from "./error-report-scrub.ts";
-import { createErrorReports, type ErrorReportsOptions, type ReportFetch } from "./error-reports.ts";
+import { createErrorReports, osOf, type ErrorReportsOptions, type ReportFetch, type ReportOffice } from "./error-reports.ts";
 
 const modDir = path.resolve(import.meta.dirname, "..", "..", "..", "mod");
 const A = "wss://a.example.com/data-layer";
@@ -88,4 +88,33 @@ test("a report an office doesn't take is dropped and logged once, never sent aga
   await expect(reports.report({ message: "Error: three" })).resolves.toBeUndefined();
   expect(sent).toHaveLength(3);
   expect(logs.at(-1)).toBe(`couldn't send the app's error report to ${A}, so it is dropped: fetch failed`);
+});
+
+test("an office whose pairing has ended gets nothing, and the log says so once", async () => {
+  const { reports, sent, logs } = reporter({ offices: async () => [{ server: A, token: async () => null }] });
+  await reports.report({ message: "Error: one" });
+  await reports.report({ message: "Error: two" });
+  expect(sent).toHaveLength(0);
+  expect(logs).toEqual([`the app's error reports aren't sent to ${A}: it says this computer's pairing with it has ended`]);
+});
+
+test("errors close together read an office's token once", async () => {
+  let release!: (token: string) => void;
+  const pending = new Promise<string>((r) => (release = r));
+  let reads = 0;
+  let asked = 0;
+  const office: ReportOffice = { server: A, token: () => (reads++, pending) };
+  const { reports, sent } = reporter({ offices: async () => (asked++, [office]) });
+  const both = Promise.all([reports.report({ message: "Error: one" }), reports.report({ message: "Error: two" })]);
+  // Both have asked for the offices, so both are waiting on the token.
+  await vi.waitFor(() => expect(asked).toBe(2));
+  await new Promise((r) => setTimeout(r, 0));
+  release("token-a");
+  await both;
+  expect(reads).toBe(1);
+  expect(sent).toHaveLength(2);
+});
+
+test("the computer's system is named as the office keeps it", () => {
+  expect(["win32", "darwin", "linux"].map(osOf)).toEqual(["windows", "mac", "linux"]);
 });

@@ -8,7 +8,8 @@
 // An error is reported at most once a minute, and at most ten in a minute in all
 // (error-report-pace.ts). A report an office doesn't take (an office older than these reports
 // answers 404) or can't be reached for is dropped, never sent again, and app.log says so once for
-// that office until one reaches it. Nothing here throws.
+// each new reason, until a report reaches that office. Errors close together read an office's token
+// once, so a token near its end is renewed once. Nothing here throws.
 
 import { httpUrl } from "../../../mod/src/data-layer/pairing.js";
 import { cut, type Pattern } from "../../../mod/src/runner/scan.js";
@@ -59,12 +60,21 @@ export function createErrorReports({ release, os, who, patterns, offices, log, f
     if (said.get(key) !== line) log(line);
     said.set(key, line);
   };
+  const reading = new Map<string, Promise<string | null | undefined>>(); // each office's token while it is being read, by its address
+  const tokenOf = (office: ReportOffice) => {
+    let token = reading.get(office.server);
+    if (!token) {
+      token = office.token().finally(() => reading.delete(office.server));
+      reading.set(office.server, token);
+    }
+    return token;
+  };
 
   async function sendTo(office: ReportOffice, body: string): Promise<void> {
     const { server } = office;
     let answer: number | string;
     try {
-      const token = await office.token();
+      const token = await tokenOf(office);
       if (token === undefined) return;
       if (token === null) return tell(server, `the app's error reports aren't sent to ${server}: it says this computer's pairing with it has ended`);
       const response = await send(httpUrl(server, "/errors"), {
