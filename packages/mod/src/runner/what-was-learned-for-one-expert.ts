@@ -76,7 +76,11 @@ export interface WhatWasLearnedForOneExpert {
   catchingUpInPages(): boolean;
   /** Settles once every record tied has had this connection's ask answered in full, or none can, or `ms` passed; not yet bound, it waits. */
   caughtUp(ms: number): Promise<void>;
-  /** A record's sequence was rebuilt: how each generation's pickedUpTo for it maps. */
+  /**
+   * A record's sequence was rebuilt: how each generation's pickedUpTo for it maps. One listener, the
+   * expert that holds the key's state now: a later one replaces it, so an expert stopped when its file
+   * was removed no longer writes its state once the file is back and another expert holds it.
+   */
   onRebuilt(listener: (expertRecordId: string, pickedUpTo: (old: number, inItsTrunk: ReadonlySet<string>) => number) => void): void;
 
   /** The number and chain to ask after: this computer's own. A rebuild under way is dropped, since a new answer starts. */
@@ -117,17 +121,23 @@ export function createWhatWasLearnedForOneExpert(o: WhatWasLearnedForOneExpertOp
   let isLoaded = false;
   let writing: Promise<void> = Promise.resolve();
   const rebuilding = new Map<string, Rebuilding>();
-  const rebuiltListeners: ((expertRecordId: string, pickedUpTo: (old: number, inItsTrunk: ReadonlySet<string>) => number) => void)[] = [];
+  let rebuiltListener: ((expertRecordId: string, pickedUpTo: (old: number, inItsTrunk: ReadonlySet<string>) => number) => void) | null = null;
 
-  const save = () => {
+  // The waiting file first, so a thing going back to waiting is there before it leaves the received
+  // file; after a `kept` answer the received file first, so the thing is there before it leaves the
+  // waiting file. A stop between the two writes never leaves a thing in neither.
+  const save = (receivedFirst = false) => {
     if (forgotten || !isLoaded) return writing;
     const w = structuredClone(waiting);
     const r = structuredClone(received);
+    const writes = [() => writeWaiting(o.dir, w), () => writeJson(receivedPath(o.dir), r)];
+    if (receivedFirst) writes.reverse();
     writing = writing
       .then(async () => {
-        if (forgotten) return;
-        await writeWaiting(o.dir, w);
-        await writeJson(receivedPath(o.dir), r);
+        for (const write of writes) {
+          if (forgotten) return;
+          await write();
+        }
       })
       .catch((err: Error) => o.log(`couldn't write what it learned: ${err.message}`));
     return writing;
@@ -303,7 +313,7 @@ export function createWhatWasLearnedForOneExpert(o: WhatWasLearnedForOneExpertOp
       });
     },
 
-    onRebuilt: (listener) => void rebuiltListeners.push(listener),
+    onRebuilt: (listener) => void (rebuiltListener = listener),
 
     askAfter(expertRecordId) {
       rebuilding.delete(expertRecordId);
@@ -330,7 +340,7 @@ export function createWhatWasLearnedForOneExpert(o: WhatWasLearnedForOneExpertOp
       if (t.rebuilt) {
         const { sequence, oldNumbers } = t.rebuilt;
         o.log(`its record ${expertRecordId} on ${server} started again from its first entry (a restored office server, say), so what it has of it was rebuilt, ${sequence.length} entries`);
-        for (const l of rebuiltListeners) l(expertRecordId, (old, inItsTrunk) => pickedUpToAfterARebuild(sequence, oldNumbers, old, inItsTrunk));
+        rebuiltListener?.(expertRecordId, (old, inItsTrunk) => pickedUpToAfterARebuild(sequence, oldNumbers, old, inItsTrunk));
       }
       prune();
       void save();
@@ -350,7 +360,7 @@ export function createWhatWasLearnedForOneExpert(o: WhatWasLearnedForOneExpertOp
       }
       delete thing.parts[expertRecordId];
       prune();
-      void save();
+      void save(outcome === "kept");
     },
 
     recordGone(expertRecordId) {

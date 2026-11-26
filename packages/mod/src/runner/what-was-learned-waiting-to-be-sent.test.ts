@@ -2,14 +2,16 @@
 // kept before it is added to the junior's trunk, sent until the office answers, checked before it
 // leaves, with this computer's expert stack (expert-stack-fixture.ts) against a stand-in office.
 
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { PROTOCOL_VERSION } from "@isoplan/protocol";
 import { expect, test, vi } from "vitest";
 import { tempRoot } from "../data-layer/fixture.js";
 import { C1, until } from "./expert-fixture.js";
-import { computer, entryOf, installedInstance, OTHER_RECORD, OTHER_SERVER, readJsonFile, RECORD, SERVER, sharingDirectoryOf, writeExpertFile, type Computer, type ComputerOptions } from "./expert-stack-fixture.js";
+import { computer, DEFINITION, entryOf, installedInstance, OTHER_RECORD, OTHER_SERVER, readJsonFile, RECORD, SERVER, sharingDirectoryOf, writeExpertFile, type Computer, type ComputerOptions } from "./expert-stack-fixture.js";
 import { askHere, LEARNED, learns, LEARNING, officeSequence, once, receivedOf, waitingOf } from "./what-was-learned-fixture.js";
+import { MAX_UNANSWERED } from "./what-was-learned-link.js";
 import type { WaitingFile } from "./what-was-learned-waiting-to-be-sent.js";
 
 // The empty folder git runs with as its hooks (handoff/take.ts noHooks) is made in the Claude folder: a temp one, never this machine's.
@@ -70,6 +72,25 @@ test("sent until the office answers, across a restart and offline time: nothing 
     expect(receivedOf(again)!.keptNotYetReceived).toEqual([expect.objectContaining({ id: thing!.id, arrivalNumber: 1, text: LEARNED })]);
   } finally {
     await again.close();
+  }
+});
+
+test("answered kept, it is written to the received file before it leaves the waiting file: a stop between the two writes leaves it in one", async () => {
+  const c = await instance();
+  try {
+    await askHere(c, "x-1");
+    await once(() => learnedSent(c).length === 1 && /question id=x-1 .* learned=added/.test(c.health()));
+    const [thing] = learnedSent(c);
+    // The received file can't be written, as if the runner stopped before it: a folder where its temporary file goes.
+    const blocked = `${c.file("experts", "adr", "what-was-learned-in-the-expert-record.json")}.${process.pid}.tmp`;
+    fs.mkdirSync(blocked);
+    answer(c, thing!.id, { outcome: "kept", arrivalNumber: 1 });
+    await once(() => c.logs.some((l) => l.includes("couldn't write what it learned")));
+    await c.learned().written();
+    expect(waitingOf(c).map((t) => t.id)).toEqual([thing!.id]);
+    fs.rmSync(blocked, { recursive: true });
+  } finally {
+    await c.close();
   }
 });
 
@@ -137,6 +158,39 @@ test("answered removed or record-gone, that record's part goes; refused not-an-i
     expect(new Set(learnedSent(timed).map((m) => m.id)).size).toBe(1);
   } finally {
     await timed.close();
+  }
+});
+
+test("an expert the office keeps refusing as no instance here, with more things waiting than may be unanswered, holds back neither another expert's sends nor its own sending again", async () => {
+  const things = Array.from({ length: MAX_UNANSWERED }, (_, i) => {
+    const text = `Rule or fact: refused ${i}. Files: src/relay.ts`;
+    return { id: randomUUID(), text, files: [{ path: "src/relay.ts", commit: C1 }], learnedAt: new Date(Date.now() - 60000 + i).toISOString(), generation: 1, firstLine: text, parts: { [RECORD]: { server: SERVER } }, added: true };
+  });
+  const c = await computer({
+    rules: LEARNING,
+    checkMs: 300,
+    before: (p) => {
+      installedInstance(SERVER, RECORD)(p);
+      installedInstance(SERVER, OTHER_RECORD, {}, { ...DEFINITION, key: "bdr" })(p);
+      fs.writeFileSync(p.file("experts", "adr", "what-was-learned-waiting-to-be-sent.json"), JSON.stringify({ version: 1, things }));
+    },
+  });
+  // The office lists no instance of adr here: it refuses each of its things.
+  let refused = 0;
+  const office = setInterval(() => {
+    for (const m of learnedSent(c).slice(refused)) if (m.expertRecordId === RECORD) answer(c, m.id, { outcome: "refused", reason: "not-an-instance-here" });
+    refused = learnedSent(c).length;
+  }, 50);
+  try {
+    c.take(sharingDirectoryOf([entryOf(), entryOf({ key: "bdr", expertRecordId: OTHER_RECORD })]));
+    await once(() => ["adr", "bdr"].every((key) => c.of("expert-instance-states").at(-1)?.instances.find((i) => i.key === key)?.state === "ready"), 30000);
+    await once(() => learnedSent(c).length >= MAX_UNANSWERED);
+    await askHere(c, "x-1", "bdr");
+    await once(() => learnedSent(c).some((m) => m.expertRecordId === OTHER_RECORD));
+    await once(() => learnedSent(c).filter((m) => m.expertRecordId === RECORD).length > MAX_UNANSWERED);
+  } finally {
+    clearInterval(office);
+    await c.close();
   }
 });
 

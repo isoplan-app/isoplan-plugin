@@ -24791,15 +24791,18 @@ function createWhatWasLearnedForOneExpert(o) {
 	let isLoaded = false;
 	let writing = Promise.resolve();
 	const rebuilding = /* @__PURE__ */ new Map();
-	const rebuiltListeners = [];
-	const save = () => {
+	let rebuiltListener = null;
+	const save = (receivedFirst = false) => {
 		if (forgotten || !isLoaded) return writing;
 		const w = structuredClone(waiting);
 		const r = structuredClone(received);
+		const writes = [() => writeWaiting(o.dir, w), () => writeJson(receivedPath(o.dir), r)];
+		if (receivedFirst) writes.reverse();
 		writing = writing.then(async () => {
-			if (forgotten) return;
-			await writeWaiting(o.dir, w);
-			await writeJson(receivedPath(o.dir), r);
+			for (const write of writes) {
+				if (forgotten) return;
+				await write();
+			}
 		}).catch((err) => o.log(`couldn't write what it learned: ${err.message}`));
 		return writing;
 	};
@@ -24987,7 +24990,7 @@ function createWhatWasLearnedForOneExpert(o) {
 				look();
 			});
 		},
-		onRebuilt: (listener) => void rebuiltListeners.push(listener),
+		onRebuilt: (listener) => void (rebuiltListener = listener),
 		askAfter(expertRecordId) {
 			rebuilding.delete(expertRecordId);
 			const r = received.records[expertRecordId];
@@ -25016,7 +25019,7 @@ function createWhatWasLearnedForOneExpert(o) {
 			if (t.rebuilt) {
 				const { sequence, oldNumbers } = t.rebuilt;
 				o.log(`its record ${expertRecordId} on ${server} started again from its first entry (a restored office server, say), so what it has of it was rebuilt, ${sequence.length} entries`);
-				for (const l of rebuiltListeners) l(expertRecordId, (old, inItsTrunk) => pickedUpToAfterARebuild(sequence, oldNumbers, old, inItsTrunk));
+				rebuiltListener?.(expertRecordId, (old, inItsTrunk) => pickedUpToAfterARebuild(sequence, oldNumbers, old, inItsTrunk));
 			}
 			prune();
 			save();
@@ -25043,7 +25046,7 @@ function createWhatWasLearnedForOneExpert(o) {
 			}
 			delete thing.parts[expertRecordId];
 			prune();
-			save();
+			save(outcome === "kept");
 		},
 		recordGone(expertRecordId) {
 			if (!received.records[expertRecordId] && !waiting.things.some((t) => Object.hasOwn(t.parts, expertRecordId))) return;
@@ -25932,6 +25935,23 @@ function createExpert(o) {
 			});
 		};
 		if (a.junior.state === "junior" && forkAt(a.junior) === null) await gate.opened();
+		if (a.carries) beforeQuestion();
+		if (a.carries && catchingUp) return {
+			failure: null,
+			why: "",
+			text: "",
+			usage,
+			reads: /* @__PURE__ */ new Set(),
+			explored: false,
+			askedSenior,
+			seniorCommits,
+			carry: {
+				things: [],
+				upTo: {},
+				changed
+			},
+			catchingUp: true
+		};
 		const at = forkAt(a.junior);
 		const carry = a.carries ? carryNow(a.junior, at !== null, changed) : {
 			things: [],
@@ -26195,6 +26215,14 @@ function createExpert(o) {
 						});
 						for (const kid of kids) killTree(kid);
 						freeSlot();
+						if (asked.catchingUp) {
+							await reservation.cancel();
+							say("error", {
+								id: q.id,
+								cause: CATCHING_UP
+							});
+							return deliver(q, notYet(CATCHING_UP));
+						}
 						line.cost = Math.round(weighted(asked.usage, s));
 						line.senior = yesNo(asked.askedSenior);
 						line.explored = yesNo(asked.explored);
@@ -26350,6 +26378,7 @@ function createExpert(o) {
 	async function trusted(g) {
 		const started = appendsStarted;
 		const last = await lastTurn(g.trunk);
+		if (stopped) return true;
 		if (g.last === void 0) {
 			g.last = last;
 			save();
@@ -26396,6 +26425,8 @@ function createExpert(o) {
 		async start() {
 			ledger = await openLedger(path.join(o.dir, "ledger.json"));
 			await whatWasLearned.load();
+			const was = await readState(o.dir);
+			if (stopped) return;
 			whatWasLearned.onRebuilt((expertRecordId, pickedUpTo) => {
 				for (const g of saved.generations) {
 					if (g.state !== "junior" && g.state !== "senior" && g.state !== "grounding") continue;
@@ -26403,7 +26434,6 @@ function createExpert(o) {
 				}
 				save();
 			});
-			const was = await readState(o.dir);
 			if (was && was.repo !== file.repo) {
 				for (const g of was.generations) o.onTrunk?.(g.trunk);
 				changed();
@@ -26422,8 +26452,11 @@ function createExpert(o) {
 					if (g.state === "grounding") failGeneration(g, "the runner stopped during its grounding");
 				}
 				const junior = gen("junior");
-				if (junior && !await transcriptOf(junior.trunk)) failGeneration(junior, "its trunk's transcript is gone");
+				const transcript = junior ? await transcriptOf(junior.trunk) : null;
+				if (stopped) return;
+				if (junior && !transcript) failGeneration(junior, "its trunk's transcript is gone");
 				for (const g of [gen("junior"), gen("senior")]) if (g) await trusted(g);
+				if (stopped) return;
 			}
 			changed();
 			if (migrating) log("its state is from before each computer kept its own instance, so a new generation grounds to take over from its old ones");
@@ -26819,46 +26852,51 @@ function createWhatWasLearnedLink(o) {
 	async function sendNow(again) {
 		const mine = connection;
 		if (stopped || shares !== true || !listed) return;
-		for (const { key, expertRecordId } of tied()) {
-			const w = o.whatWasLearned(key);
-			for (const t of w.waitingFor(expertRecordId)) {
-				if (mine !== connection || stopped) return;
-				if (unanswered.size >= 50) return;
-				const k = `${expertRecordId}\n${t.id}`;
-				if (!sendable(k, again)) continue;
-				const checked = await o.check(t);
-				if (mine !== connection) return;
-				if ("unreadable" in checked) {
-					if (!saidUnreadable.has(key)) o.log(`expert ${key}: the secret or personal-data patterns can't be read, so nothing it learned goes to ${server} until they can`);
-					saidUnreadable.add(key);
-					break;
-				}
-				saidUnreadable.delete(key);
-				if ("matched" in checked) {
-					const why = `it matches the ${checked.matched} pattern "${checked.pattern}"`;
-					w.staysOnThisComputer(t.id, checked.pattern);
-					o.health(key).say("learned", {
-						id: t.id,
-						kept: "on this computer only",
-						why
-					});
-					o.log(`expert ${key}: what it learned, ${t.id}, stays on this computer: ${why}`);
-					continue;
-				}
-				if (!sendFor(key, {
-					type: "expert-instance-learned",
-					v: 1,
-					key,
-					expertRecordId,
-					id: t.id,
-					text: t.text,
-					files: t.files,
-					learnedAt: t.learnedAt
-				})) return;
-				sentAt.set(k, now());
-				unanswered.add(k);
-				refusedHere.delete(k);
+		const due = tied().flatMap(({ key, expertRecordId }) => o.whatWasLearned(key).waitingFor(expertRecordId).map((t) => ({
+			key,
+			expertRecordId,
+			t,
+			k: `${expertRecordId}\n${t.id}`
+		})));
+		due.sort((a, b) => Number(refusedHere.has(a.k)) - Number(refusedHere.has(b.k)));
+		const unreadable = /* @__PURE__ */ new Set();
+		for (const { key, expertRecordId, t, k } of due) {
+			if (mine !== connection || stopped) return;
+			if (unreadable.has(key) || !sendable(k, again)) continue;
+			if (unanswered.size >= 50) return;
+			const checked = await o.check(t);
+			if (mine !== connection) return;
+			if ("unreadable" in checked) {
+				if (!saidUnreadable.has(key)) o.log(`expert ${key}: the secret or personal-data patterns can't be read, so nothing it learned goes to ${server} until they can`);
+				saidUnreadable.add(key);
+				unreadable.add(key);
+				continue;
 			}
+			saidUnreadable.delete(key);
+			if ("matched" in checked) {
+				const why = `it matches the ${checked.matched} pattern "${checked.pattern}"`;
+				o.whatWasLearned(key).staysOnThisComputer(t.id, checked.pattern);
+				o.health(key).say("learned", {
+					id: t.id,
+					kept: "on this computer only",
+					why
+				});
+				o.log(`expert ${key}: what it learned, ${t.id}, stays on this computer: ${why}`);
+				continue;
+			}
+			if (!sendFor(key, {
+				type: "expert-instance-learned",
+				v: 1,
+				key,
+				expertRecordId,
+				id: t.id,
+				text: t.text,
+				files: t.files,
+				learnedAt: t.learnedAt
+			})) return;
+			sentAt.set(k, now());
+			unanswered.add(k);
+			refusedHere.delete(k);
 		}
 	}
 	const sendWaiting = (again = false) => {
@@ -26952,7 +26990,7 @@ function createWhatWasLearnedLink(o) {
 			const k = `${m.expertRecordId}\n${m.id}`;
 			const outcome = m.outcome === "refused" ? m.reason : m.outcome;
 			if (outcome === "not-an-instance-here") refusedHere.add(k);
-			else unanswered.delete(k);
+			unanswered.delete(k);
 			o.whatWasLearned(m.key).answered(m.expertRecordId, m.id, outcome, m.outcome === "kept" ? m.arrivalNumber : void 0);
 			if (outcome !== "not-an-instance-here") sendWaiting();
 		},

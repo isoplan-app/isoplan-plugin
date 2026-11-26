@@ -288,12 +288,13 @@ export function writeExpertFile(c: Computer, o: Record<string, unknown> = {}) {
 
 export const readJsonFile = <T = Record<string, unknown>>(file: string): T => JSON.parse(fs.readFileSync(file, "utf8")) as T;
 
-/** An instance of `id` from `server`, someone else's record (DEFINITION, unless given), as its set-up wrote it in an earlier run, with this computer's fields given: for `before`. */
+/** An instance of `id` from `server`, someone else's record (DEFINITION, unless given; its key the definition's), as its set-up wrote it in an earlier run, with this computer's fields given: for `before`. */
 export const installedInstance =
   (server: string, id: string, local: Record<string, unknown> = {}, definition: ExpertDefinition = DEFINITION) =>
   (p: { file: (...parts: string[]) => string; checkout: string | null }) => {
-    fs.mkdirSync(p.file("experts", "adr"), { recursive: true });
-    fs.writeFileSync(p.file("experts", "adr", "expert-records.json"), JSON.stringify({ version: 1, servers: { [server]: { record: { expertRecordId: id, revision: 1, owner: ADA, yours: false, definition } } } }));
+    const { key } = definition;
+    fs.mkdirSync(p.file("experts", key), { recursive: true });
+    fs.writeFileSync(p.file("experts", key, "expert-records.json"), JSON.stringify({ version: 1, servers: { [server]: { record: { expertRecordId: id, revision: 1, owner: ADA, yours: false, definition } } } }));
     fs.mkdirSync(p.file("expert-instances"), { recursive: true });
-    fs.writeFileSync(p.file("expert-instances", "adr.json"), JSON.stringify({ version: 1, key: "adr", server, repo: p.checkout, ...local }));
+    fs.writeFileSync(p.file("expert-instances", `${key}.json`), JSON.stringify({ version: 1, key, server, repo: p.checkout, ...local }));
   };

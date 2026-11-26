@@ -275,6 +275,8 @@ interface Asked {
   seniorCommits: Record<string, string>;
   /** What its question carried of what was learned elsewhere, for the addition after its answer. */
   carry: Carry;
+  /** Not asked: what came since the question did is more than it carries, and questions wait for a new generation (D17). */
+  catchingUp?: true;
 }
 
 interface Question {
@@ -995,6 +997,9 @@ export function createExpert(o: ExpertOptions): Expert {
     // A fork that can't read the trunk as it was waits for an addition running to end, so the addition is in its trunk.
     if (a.junior.state === "junior" && forkAt(a.junior) === null) await gate.opened();
     // From here to the fork's question, no await: where it reads the trunk from and what it carries are one moment's.
+    // D17 is judged again in it, so a catch-up that came in one message since the question did isn't cut to fit.
+    if (a.carries) beforeQuestion();
+    if (a.carries && catchingUp) return { failure: null, why: "", text: "", usage, reads: new Set(), explored: false, askedSenior, seniorCommits, carry: { things: [], upTo: {}, changed }, catchingUp: true };
     const at = forkAt(a.junior);
     const carry = a.carries ? carryNow(a.junior, at !== null, changed) : { things: [], upTo: {}, changed };
     const learnedElsewhere = carry.things.length ? fill(p.learnedElsewhere, { items: thingsText(carry.things, (t) => filesChangedSince(t, changed)) }) + "\n\n" : "";
@@ -1170,6 +1175,11 @@ export function createExpert(o: ExpertOptions): Expert {
             const asked = await askFork({ junior, senior, question: q.text, id: q.id, deadline, commit, kids, onSenior: () => q.onSenior?.(), carries: true });
             for (const kid of kids) killTree(kid);
             freeSlot();
+            if (asked.catchingUp) {
+              await reservation.cancel();
+              say("error", { id: q.id, cause: CATCHING_UP });
+              return deliver(q, notYet(CATCHING_UP));
+            }
             line.cost = Math.round(weighted(asked.usage, s));
             line.senior = yesNo(asked.askedSenior);
             line.explored = yesNo(asked.explored);
@@ -1336,6 +1346,8 @@ export function createExpert(o: ExpertOptions): Expert {
   async function trusted(g: SavedGeneration): Promise<boolean> {
     const started = appendsStarted;
     const last = await lastTurn(g.trunk);
+    // Stopped meanwhile: it changes nothing (an expert started after it may hold its folder), and its callers stop on their own.
+    if (stopped) return true;
     // A generation from before the runner recorded this: its transcript as it is now is taken as its own.
     if (g.last === undefined) {
       g.last = last;
@@ -1386,7 +1398,13 @@ export function createExpert(o: ExpertOptions): Expert {
     async start() {
       ledger = await openLedger(path.join(o.dir, "ledger.json"));
       await whatWasLearned.load();
-      // A record's sequence rebuilt (a restored office server): each generation carries only what is new to it.
+      const was = await readState(o.dir);
+      // Stopped while it started (its file removed again at once): it does nothing more, so an expert
+      // started after it is the only one that writes its folder.
+      if (stopped) return;
+      // A record's sequence rebuilt (a restored office server): each generation carries only what is
+      // new to it. Told from the moment its state is read, with no await before `saved` holds it, in
+      // place of an expert stopped before it on this key, so two never write state.json.
       whatWasLearned.onRebuilt((expertRecordId, pickedUpTo) => {
         for (const g of saved.generations) {
           if (g.state !== "junior" && g.state !== "senior" && g.state !== "grounding") continue;
@@ -1394,7 +1412,6 @@ export function createExpert(o: ExpertOptions): Expert {
         }
         void save();
       });
-      const was = await readState(o.dir);
       if (was && was.repo !== file.repo) {
         for (const g of was.generations) o.onTrunk?.(g.trunk);
         changed();
@@ -1410,8 +1427,11 @@ export function createExpert(o: ExpertOptions): Expert {
           if (g.state === "grounding") failGeneration(g, "the runner stopped during its grounding");
         }
         const junior = gen("junior");
-        if (junior && !(await transcriptOf(junior.trunk))) failGeneration(junior, "its trunk's transcript is gone");
+        const transcript = junior ? await transcriptOf(junior.trunk) : null;
+        if (stopped) return;
+        if (junior && !transcript) failGeneration(junior, "its trunk's transcript is gone");
         for (const g of [gen("junior"), gen("senior")]) if (g) await trusted(g);
+        if (stopped) return;
       }
       changed();
       // A junior from before answers at once; the checkout is prepared beside it, so its questions fetch.

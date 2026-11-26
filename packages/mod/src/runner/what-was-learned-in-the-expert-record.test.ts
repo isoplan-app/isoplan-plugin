@@ -3,11 +3,13 @@
 // kept per record. This computer's expert stack (expert-stack-fixture.ts) against a stand-in office
 // (what-was-learned-fixture.ts) that keeps the sequence as the office server does.
 
+import fs from "node:fs";
 import path from "node:path";
 import { PROTOCOL_VERSION, type ExpertLearnedSinceMessage } from "@isoplan/protocol";
 import { expect, test, vi } from "vitest";
 import { tempRoot } from "../data-layer/fixture.js";
-import { C1, until } from "./expert-fixture.js";
+import { C1, until, type Rule } from "./expert-fixture.js";
+import type { SavedExpert } from "./expert-state.js";
 import { computer, entryOf, installedInstance, OTHER_RECORD, RECORD, SERVER, sharingDirectoryOf, writeExpertFile, type Computer, type ComputerOptions } from "./expert-stack-fixture.js";
 import { askHere, learns, LEARNING, officeSequence, once, receivedOf, waitingOf } from "./what-was-learned-fixture.js";
 import { chainOver } from "./what-was-learned-in-the-expert-record.js";
@@ -28,6 +30,14 @@ const asks = (c: Computer) => c.of("expert-learned-wanted-after");
 const learnedSent = (c: Computer) => c.of("expert-instance-learned");
 const questionOf = (c: Computer, id: string) => c.claude().find((l) => l.kind === "fork" && l.turn === 1 && l.text?.includes(`(${id})`))?.text ?? "";
 const reconnect = (c: Computer) => (c.reconnect(), c.take(sharingDirectoryOf([entryOf()])));
+// The key's junior as state.json has it, once it is there.
+const juniorOf = (c: Computer) => {
+  try {
+    return (JSON.parse(fs.readFileSync(c.file("experts", "adr", "state.json"), "utf8")) as SavedExpert).generations.find((g) => g.state === "junior");
+  } catch {
+    return undefined;
+  }
+};
 
 test("taken only continuing from its last number; its number and chain are kept across a restart, and asked after on the next connection", async () => {
   const c = await instance();
@@ -45,6 +55,11 @@ test("taken only continuing from its last number; its number and chain are kept 
     await once(() => asks(c).length === 2);
     expect(asks(c)[1]).toMatchObject({ afterArrivalNumber: 2, chain: chainOver("", seq.entries.slice(0, 2)) });
     expect(receivedOf(c)!.lastArrivalNumberReceived).toBe(2);
+    // A push repeating what it has, from before its last number: left, nothing taken twice, and asked for again.
+    c.take(seq.after(1));
+    await once(() => asks(c).length === 3);
+    expect(asks(c)[2]).toMatchObject({ afterArrivalNumber: 2 });
+    expect(receivedOf(c)!.entries.map((e) => e.arrivalNumber)).toEqual([1, 2]);
   } finally {
     await c.close();
   }
@@ -58,7 +73,25 @@ test("taken only continuing from its last number; its number and chain are kept 
   }
 });
 
-test("a restored office whose last is below this computer's: answered from 0 in pages and rebuilt; its own things the office no longer names are sent again, removed ones not; its junior carries only what is new to it, with no new generation", async () => {
+test("its own thing, pushed back by the office with its number, isn't carried in its own junior's next question: its trunk holds it", async () => {
+  const c = await instance({ rules: [learns("x-1", "Rule or fact: its own one. Files: src/relay.ts"), ...LEARNING] });
+  const seq = officeSequence();
+  try {
+    await once(() => asks(c).length === 1);
+    const serve = seq.serving(c);
+    serve();
+    await askHere(c, "x-1");
+    await once(() => learnedSent(c).length === 1 && /question id=x-1 .* learned=added/.test(c.health()));
+    serve();
+    await once(() => receivedOf(c)?.entries.some((e) => e.learnedHere) === true);
+    await askHere(c, "x-2");
+    expect(questionOf(c, "x-2")).not.toContain("its own one");
+  } finally {
+    await c.close();
+  }
+});
+
+test("a restored office whose last is below this computer's: answered from 0 in pages and rebuilt; its own things the office no longer names are sent again, removed ones not; its junior's pickedUpTo is mapped by id, so it carries what is new to it", async () => {
   const own = "Rule or fact: its own one. Files: src/relay.ts";
   const removed = "Rule or fact: its own, removed. Files: src/relay.ts";
   const c = await instance({ rules: [learns("x-1", own), learns("x-2", removed), ...LEARNING] });
@@ -97,12 +130,48 @@ test("a restored office whose last is below this computer's: answered from 0 in 
     expect(learnedSent(c)[2]!.id).toBe(ownId);
     expect(waitingOf(c).map((t) => t.id)).toEqual([ownId]);
 
-    const trunks = c.claude().filter((l) => l.kind === "trunk" && l.argv).length;
+    // Its junior had taken the sequence into account up to 2; of the rebuilt one, only "one", at 1, was before.
+    await once(() => juniorOf(c)?.pickedUpTo[RECORD] === 1);
     await askHere(c, "x-3");
     expect(questionOf(c, "x-3")).toContain("new two");
     expect(questionOf(c, "x-3")).toContain("new three");
-    expect(questionOf(c, "x-3")).not.toContain("Rule or fact: one.");
-    expect(c.claude().filter((l) => l.kind === "trunk" && l.argv)).toHaveLength(trunks);
+  } finally {
+    await c.close();
+  }
+});
+
+test("its instance file removed and put back in one runner's life: a restored office's rebuild is written to its state by the expert running now, never by one stopped before", async () => {
+  const c = await instance({ rules: [learns("x-1", "Rule or fact: its own one. Files: src/relay.ts"), ...LEARNING] });
+  const seq = officeSequence();
+  seq.learned(elsewhere("one"));
+  try {
+    seq.serving(c)();
+    await once(() => receivedOf(c)?.lastArrivalNumberReceived === 1);
+    const file = c.file("expert-instances", "adr.json");
+    const text = fs.readFileSync(file, "utf8");
+    for (let n = 0; n < 3; n++) {
+      fs.rmSync(file);
+      await c.experts.refresh("adr");
+      fs.writeFileSync(file, text);
+      await c.experts.refresh("adr");
+    }
+    await once(() => c.experts.running("adr")?.expert.hosted().state === "ready");
+    // What this question adds to the junior's trunk only the expert running now holds.
+    await askHere(c, "x-1");
+    await once(() => juniorOf(c)?.addedToItsTrunk.length === 2);
+
+    // Restored with another thing at 1: rebuilt, and the junior has taken none of it into account.
+    const restored = officeSequence();
+    restored.learned(elsewhere("another one"));
+    const asked = asks(c).length;
+    const serveRestored = restored.serving(c, { fromNow: true });
+    reconnect(c);
+    await once(() => asks(c).length === asked + 1);
+    serveRestored();
+    await once(() => juniorOf(c)?.pickedUpTo[RECORD] === 0);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(juniorOf(c)!.addedToItsTrunk).toHaveLength(2);
+    expect(c.logs.filter((l) => l.includes("couldn't write its state"))).toEqual([]);
   } finally {
     await c.close();
   }
@@ -215,6 +284,29 @@ test("kept per record: the same key's file tied to a new record on the same offi
     await once(() => receivedOf(c) === undefined && waitingOf(c).every((t) => !t.parts[RECORD]));
     await once(() => asks(c).some((m) => m.expertRecordId === OTHER_RECORD));
     expect(asks(c).find((m) => m.expertRecordId === OTHER_RECORD)).toMatchObject({ afterArrivalNumber: 0, chain: "" });
+  } finally {
+    await c.close();
+  }
+});
+
+test("a first instance's grounding waits for its record's catch-up, still coming in pages, before its third turn carries what it brought", async () => {
+  const third: Rule = { kind: "trunk", text: "Before you, this expert's instances learned", reply: "ready", context: 52000 };
+  const c = await computer({ rules: [third, ...LEARNING], before: installedInstance(SERVER, RECORD) });
+  const seq = officeSequence();
+  seq.learned(elsewhere("one"));
+  seq.learned(elsewhere("two"));
+  try {
+    await once(() => c.claude().some((l) => l.kind === "trunk" && l.turn === 2));
+    c.take(sharingDirectoryOf([entryOf()]));
+    await once(() => asks(c).length === 1);
+    const [first, second] = seq.answer(asks(c)[0]!, 1);
+    c.take(first!);
+    await new Promise((r) => setTimeout(r, 300));
+    c.take(second!);
+    await once(() => c.experts.running("adr")?.expert.hosted().state === "ready", 30000);
+    const turn = c.claude().find((l) => l.kind === "trunk" && l.text?.includes("Before you, this expert's instances learned"))?.text ?? "";
+    expect(turn).toContain(elsewhere("one").text);
+    expect(turn).toContain(elsewhere("two").text);
   } finally {
     await c.close();
   }

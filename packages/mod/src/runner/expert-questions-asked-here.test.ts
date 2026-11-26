@@ -359,9 +359,11 @@ test("this computer's own expert whose key another expert has: the rights of ses
   }
 });
 
+const third: Rule = { kind: "trunk", text: "Before you, this expert's instances learned", reply: "ready", context: 52000 };
+// A thing learned of about 120 estimated tokens.
+const sized = (i: number, commit = C1, file = "src/relay.ts") => ({ text: `Rule or fact: thing ${i} ${"x".repeat(320)}. Files: ${file}`, files: [{ path: file, commit }] });
+
 test("past what one question carries of what other instances learned (the definition's own limit): EXPERT_STARTING at once, its listing stays ready, the old junior takes no fork, and a new generation grounded with the newest things whose files haven't changed answers it", async () => {
-  const third: Rule = { kind: "trunk", text: "Before you, this expert's instances learned", reply: "ready", context: 52000 };
-  const sized = (i: number, commit = C1, file = "src/relay.ts") => ({ text: `Rule or fact: thing ${i} ${"x".repeat(320)}. Files: ${file}`, files: [{ path: file, commit }] });
   const c = await computer({ rules: [third, ...ANSWERS], before: installedInstance(SERVER, RECORD, {}, { ...DEFINITION, learnedElsewhereTokensPerQuestion: 300 }) });
   try {
     c.take(sharingDirectoryOf([entryOf()]));
@@ -387,6 +389,31 @@ test("past what one question carries of what other instances learned (the defini
     const forks = c.claude().filter((l) => l.kind === "fork" && l.turn === 1 && l.text?.includes("Question toolu_1"));
     expect(forks.map((l) => l.trunk)).toEqual([third3.trunk]);
     expect(c.of("expert-instance-states").slice(mark).map((m) => m.instances[0]!.state)).toEqual(c.of("expert-instance-states").slice(mark).map(() => "ready"));
+  } finally {
+    await c.close();
+  }
+});
+
+test("a catch-up still coming in pages as a question comes is waited for before what it brings is judged against the limit: past it, the new generation that carries it answers, not the old junior", async () => {
+  const c = await computer({ rules: [third, ...ANSWERS], before: installedInstance(SERVER, RECORD, {}, { ...DEFINITION, learnedElsewhereTokensPerQuestion: 300 }) });
+  try {
+    c.take(sharingDirectoryOf([entryOf()]));
+    await until(() => c.of("expert-instance-states").at(-1)?.instances[0]?.state === "ready" && c.of("expert-learned-wanted-after").length === 1, 30000);
+    await session(c);
+    const seq = officeSequence();
+    for (const i of [1, 2, 3, 4]) seq.learned(sized(i));
+    // The connection's ask is answered in two pages; the first is within the limit.
+    const [first, second] = seq.answer(c.of("expert-learned-wanted-after")[0]!, 2);
+    c.take(first!);
+    await until(() => receivedOf(c)?.lastArrivalNumberReceived === 2);
+    await ask(c, "toolu_1", { blocking: false });
+    await settle(500);
+    expect(forks(c, "toolu_1")).toEqual([]);
+    c.take(second!);
+    await until(() => asked(c).some((l) => l.question === "toolu_1"), 30000);
+    expect(asked(c).find((l) => l.question === "toolu_1")).toMatchObject({ state: "answered", answer: ANSWERED });
+    const grounded = c.claude().find((l) => l.kind === "trunk" && l.text?.includes("Before you, this expert's instances learned"))!;
+    expect(forks(c, "toolu_1").map((l) => l.trunk)).toEqual([grounded.trunk]);
   } finally {
     await c.close();
   }

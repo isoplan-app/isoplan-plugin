@@ -769,27 +769,27 @@ test("D17, offline a week within the limit: 30 things learned elsewhere, under 2
   expect(starts(t, "trunk")).toHaveLength(0);
 });
 
-test("D17: a catch-up still coming in pages is waited for before the limit is judged, and past it the question waits for the new generation, not the old junior", async () => {
-  const t = await setUp({ tied: true, file: expertFile({ learnedElsewhereTokensPerQuestion: 300 }), restored: { generations: [gen(1, T1, "junior")] }, rules: [THIRD_TURN, ...BASE] });
-  t.catching.state = "in-pages";
-  t.elsewhere([sized(1)], true);
+test("D17: a catch-up past the limit that comes in one message after a question came, while it waits for a fork slot, isn't cut to fit: the old junior isn't forked, the question is asked again later, and a new generation grounds", async () => {
+  const release = path.join(tempRoot(), "release-x-1");
+  const t = await setUp({ tied: true, file: expertFile({ maxForks: 1, learnedElsewhereTokensPerQuestion: 300 }), restored: { generations: [gen(1, T1, "junior")] }, rules: [{ kind: "fork", text: "(x-1)", reply: ANSWER, until: release }, THIRD_TURN, ...BASE] });
   t.ask("x-1");
-  await new Promise((r) => setTimeout(r, 500));
-  expect(turns(t, "fork")).toHaveLength(0);
-  t.elsewhere([sized(2), sized(3), sized(4)]);
-  t.catching.state = "answered";
-  expect(await t.reply("x-1")).toMatchObject({ kind: "answered" });
-  const g2 = t.state().generations.find((g) => g.n === 2)!;
-  expect(starts(t, "fork").filter((s) => s.trunk === T1 && turns(t, "fork", T1).some((l) => l.text?.includes("(x-1)")))).toHaveLength(0);
-  expect(starts(t, "fork").at(-1)!.trunk).toBe(g2.trunk);
+  await until(() => starts(t, "fork").length === 1);
+  t.ask("x-2");
+  await new Promise((r) => setTimeout(r, 300));
+  t.elsewhere([1, 2, 3, 4].map((i) => sized(i)));
+  fs.writeFileSync(release, "");
+  expect(await t.reply("x-2")).toEqual(notYet("the expert is catching up on what its other instances learned"));
+  expect(forkOf(t, "x-2")).toBe("");
   expect(t.logs).toContainEqual(expect.stringContaining("are more than one question carries (300)"));
+  await until(() => /ready generation=2/.test(t.health()));
 });
 
 test("a first instance's grounding carries its record's newest things whose files haven't changed, within the limit, in its trunk list and index; a third turn that leaves less room than estimated doesn't fail it", async () => {
   const entries = [relay("oldest"), relay("older"), relay("changed", C0, "src/other.ts"), relay("newest", C1, "docs/adr/0004-x.md")].map((x, i) => ({ kind: "learned" as const, arrivalNumber: i + 1, id: randomUUID(), ...x, learnedAt: new Date(Date.now() - 4000 + i * 1000).toISOString() }));
   const received = { version: 1, records: { [RECORD]: { server: SERVER, lastArrivalNumberReceived: 4, chain: chainOver("", entries), serverLastArrivalNumber: 4, entries, removed: [], keptNotYetReceived: [] } } };
   const t = await setUp({ tied: true, file: expertFile({ learnedElsewhereTokensPerQuestion: 60 }), changed: ["src/other.ts"], learnedFiles: { "what-was-learned-in-the-expert-record.json": received }, rules: [{ ...THIRD_TURN, context: 195000 }, ...BASE] });
-  await until(() => t.expert.hosted().state === "ready");
+  // Said once its state is written.
+  await until(() => /ready generation=1/.test(t.health()));
   const third = turns(t, "trunk").find((l) => l.text?.includes("Before you, this expert's instances learned"))!.text!;
   expect(third).toContain("Rule or fact: older.");
   expect(third).toContain("Rule or fact: newest.");
@@ -803,7 +803,10 @@ test("a first instance's grounding carries its record's newest things whose file
 });
 
 test("removed on the card: a new generation grounds before the next fork while the old junior answers, its fork and its senior's told not to rely on it; the new generation's grounding doesn't carry it; a thing removed while a fork ran isn't added after its answer", async () => {
-  const t = await setUp({ ...withSenior([{ kind: "trunk", text: "Now read", reply: "grounded", context: 50000, delayMs: 2000 }, ...JUNIOR_ASKS]), tied: true, restored: { generations: [gen(1, T1, "senior", holding), gen(2, T2, "junior", holding)], indexes: { 1: { "src/relay.ts": C0 } } } });
+  // This computer's own, kept by the office with its answer lost, so still waiting: a grounding would carry it but for its removal.
+  const text = "Rule or fact: the relay holds it for a day. Files: src/relay.ts";
+  const stillWaiting = { version: 1, things: [{ id: HELD, text, files: [{ path: "src/relay.ts", commit: C1 }], learnedAt: new Date().toISOString(), generation: 2, firstLine: text, parts: { [RECORD]: { server: SERVER } }, added: true }] };
+  const t = await setUp({ ...withSenior([{ kind: "trunk", text: "Now read", reply: "grounded", context: 50000, delayMs: 2000 }, THIRD_TURN, ...JUNIOR_ASKS]), tied: true, restored: { generations: [gen(1, T1, "senior", holding), gen(2, T2, "junior", holding)], indexes: { 1: { "src/relay.ts": C0 } } }, learnedFiles: { "what-was-learned-waiting-to-be-sent.json": stillWaiting } });
   t.removed(HELD);
   t.expert.beforeQuestion();
   await until(() => starts(t, "trunk").length === 1);
@@ -882,6 +885,10 @@ test("D18: a fork that starts during an addition reads the trunk at the uuid bef
   expect(starts(t, "fork").at(-1)!.argv).toEqual(expect.arrayContaining(["--resume-session-at", "u-2"]));
   expect(forkOf(t, "x-2")).toContain("one being added");
   fs.writeFileSync(release, "");
+  // x-2's own addition, after x-1's, finds it in the trunk: it is added once.
+  await until(() => /question id=x-2/.test(t.health()));
+  expect(turns(t, "append")).toHaveLength(1);
+  expect(t.state().generations[0]!.addedToItsTrunk.filter((x) => x.firstLine.includes("one being added"))).toHaveLength(1);
 
   const held = path.join(tempRoot(), "release-addition-2");
   const f = await setUp({ tied: true, restored, rules: [{ refuseResumeAt: true }, learnsOne, { kind: "append", until: held, reply: "added", context: 60000 }, ...BASE] });

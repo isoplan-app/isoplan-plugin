@@ -15,8 +15,8 @@
 //   most three times per record per connection; past that, not again until the next connection.
 // - Sending: after each listing, when a thing is kept, and on the timer, each thing waiting for a
 //   record of this office, oldest first, not sent on this connection in the last 2 minutes (one
-//   refused `not-an-instance-here` again after a listing and on the timer), at most 50 unanswered at
-//   once, each checked first (what-was-learned-before-it-leaves.ts): a match is never sent and stays
+//   refused `not-an-instance-here` again after a listing and on the timer, after the rest), at most
+//   50 unanswered at once (a refusal is an answer), each checked first (what-was-learned-before-it-leaves.ts): a match is never sent and stays
 //   on this computer, the health log naming the pattern; patterns that can't be read send nothing of
 //   that expert. It counts as sent only when the link took it.
 // - What comes back goes to the key's WhatWasLearnedForOneExpert, the only writer of its files.
@@ -117,33 +117,35 @@ export function createWhatWasLearnedLink(o: WhatWasLearnedLinkOptions): WhatWasL
   async function sendNow(again: boolean) {
     const mine = connection;
     if (stopped || shares !== true || !listed) return;
-    for (const { key, expertRecordId } of tied()) {
-      const w = o.whatWasLearned(key);
-      for (const t of w.waitingFor(expertRecordId)) {
-        if (mine !== connection || stopped) return;
-        if (unanswered.size >= MAX_UNANSWERED) return;
-        const k = `${expertRecordId}\n${t.id}`;
-        if (!sendable(k, again)) continue;
-        const checked = await o.check(t);
-        if (mine !== connection) return;
-        if ("unreadable" in checked) {
-          if (!saidUnreadable.has(key)) o.log(`expert ${key}: the secret or personal-data patterns can't be read, so nothing it learned goes to ${server} until they can`);
-          saidUnreadable.add(key);
-          break;
-        }
-        saidUnreadable.delete(key);
-        if ("matched" in checked) {
-          const why = `it matches the ${checked.matched} pattern "${checked.pattern}"`;
-          w.staysOnThisComputer(t.id, checked.pattern);
-          o.health(key).say("learned", { id: t.id, kept: "on this computer only", why });
-          o.log(`expert ${key}: what it learned, ${t.id}, stays on this computer: ${why}`);
-          continue;
-        }
-        if (!sendFor(key, { type: "expert-instance-learned", v: PROTOCOL_VERSION, key, expertRecordId, id: t.id, text: t.text, files: t.files, learnedAt: t.learnedAt })) return;
-        sentAt.set(k, now());
-        unanswered.add(k);
-        refusedHere.delete(k);
+    // Oldest first per record, and what was refused as no instance here after the rest, so an expert
+    // the office keeps refusing never holds back another's.
+    const due = tied().flatMap(({ key, expertRecordId }) => o.whatWasLearned(key).waitingFor(expertRecordId).map((t) => ({ key, expertRecordId, t, k: `${expertRecordId}\n${t.id}` })));
+    due.sort((a, b) => Number(refusedHere.has(a.k)) - Number(refusedHere.has(b.k)));
+    const unreadable = new Set<string>();
+    for (const { key, expertRecordId, t, k } of due) {
+      if (mine !== connection || stopped) return;
+      if (unreadable.has(key) || !sendable(k, again)) continue;
+      if (unanswered.size >= MAX_UNANSWERED) return;
+      const checked = await o.check(t);
+      if (mine !== connection) return;
+      if ("unreadable" in checked) {
+        if (!saidUnreadable.has(key)) o.log(`expert ${key}: the secret or personal-data patterns can't be read, so nothing it learned goes to ${server} until they can`);
+        saidUnreadable.add(key);
+        unreadable.add(key);
+        continue;
       }
+      saidUnreadable.delete(key);
+      if ("matched" in checked) {
+        const why = `it matches the ${checked.matched} pattern "${checked.pattern}"`;
+        o.whatWasLearned(key).staysOnThisComputer(t.id, checked.pattern);
+        o.health(key).say("learned", { id: t.id, kept: "on this computer only", why });
+        o.log(`expert ${key}: what it learned, ${t.id}, stays on this computer: ${why}`);
+        continue;
+      }
+      if (!sendFor(key, { type: "expert-instance-learned", v: PROTOCOL_VERSION, key, expertRecordId, id: t.id, text: t.text, files: t.files, learnedAt: t.learnedAt })) return;
+      sentAt.set(k, now());
+      unanswered.add(k);
+      refusedHere.delete(k);
     }
   }
 
@@ -234,9 +236,10 @@ export function createWhatWasLearnedLink(o: WhatWasLearnedLinkOptions): WhatWasL
       }
       const k = `${m.expertRecordId}\n${m.id}`;
       const outcome = m.outcome === "refused" ? m.reason : m.outcome;
-      // Refused as no instance here, it still counts as unanswered: sent again after a listing and on the timer.
+      // Refused as no instance here, it is sent again after a listing and on the timer, its place among
+      // the unanswered freed meanwhile.
       if (outcome === "not-an-instance-here") refusedHere.add(k);
-      else unanswered.delete(k);
+      unanswered.delete(k);
       o.whatWasLearned(m.key).answered(m.expertRecordId, m.id, outcome, m.outcome === "kept" ? m.arrivalNumber : undefined);
       if (outcome !== "not-an-instance-here") sendWaiting();
     },
