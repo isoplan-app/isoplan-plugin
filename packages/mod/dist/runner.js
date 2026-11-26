@@ -22582,14 +22582,15 @@ function stateOf(h, expertRecordId) {
 	};
 }
 function createExpertInstances(o) {
-	const now = o.now ?? Date.now;
 	const records = /* @__PURE__ */ new Map();
 	const outs = /* @__PURE__ */ new Map();
 	const listeners = [];
+	const deletedListeners = [];
 	const setting = /* @__PURE__ */ new Map();
 	const saidKeyTaken = /* @__PURE__ */ new Set();
 	let saving = Promise.resolve();
 	const changed = () => listeners.forEach((l) => l());
+	const wasDeleted = (key) => deletedListeners.forEach((l) => l(key));
 	const log = (key, text) => o.log(`expert ${key}: ${text}`);
 	const recordsOf = (key) => records.get(key) ?? {
 		version: 1,
@@ -22609,7 +22610,7 @@ function createExpertInstances(o) {
 		await fs.mkdir(path.dirname(file), { recursive: true });
 		const temp = `${file}.${process.pid}.tmp`;
 		await fs.writeFile(temp, text);
-		await fs.rename(temp, file);
+		await renamed(temp, file);
 	};
 	async function failSetUp(server, key, expertRecordId, why, detail) {
 		setting.delete(key);
@@ -22617,7 +22618,7 @@ function createExpertInstances(o) {
 			...s[server],
 			setUp: {
 				expertRecordId,
-				startedAt: s[server]?.setUp?.startedAt ?? now(),
+				startedAt: s[server]?.setUp?.startedAt ?? Date.now(),
 				failed: {
 					why,
 					detail: detail.slice(0, MAX_DETAIL_LENGTH)
@@ -22694,24 +22695,29 @@ function createExpertInstances(o) {
 	}
 	async function handOverAway(server, running, owner) {
 		const key = running.key;
-		await save(key, (s) => {
-			const r = s[server]?.record;
-			if (r) s[server] = {
-				...s[server],
-				record: {
-					...r,
-					yours: false,
-					...owner && { owner }
-				}
-			};
-			delete s[server].lastResult;
-		});
-		o.experts.health(key).say("owner", {
-			server,
-			owner: owner ? owner.name || owner.id : "another person",
-			yours: "no"
-		});
-		if (yoursElsewhere(key, server)) return log(key, `its record on ${server} is someone else's now; its record on another office server is still this person's, so its expert file stays`);
+		const away = async () => {
+			await save(key, (s) => {
+				const r = s[server]?.record;
+				if (r) s[server] = {
+					...s[server],
+					record: {
+						...r,
+						yours: false,
+						...owner && { owner }
+					}
+				};
+				delete s[server].lastResult;
+			});
+			o.experts.health(key).say("owner", {
+				server,
+				owner: owner ? owner.name || owner.id : "another person",
+				yours: "no"
+			});
+		};
+		if (yoursElsewhere(key, server)) {
+			await away();
+			return log(key, `its record on ${server} is someone else's now; its record on another office server is still this person's, so its expert file stays`);
+		}
 		await write(o.experts.instanceFilePath(key), expertInstanceFileText({
 			version: 1,
 			key,
@@ -22720,7 +22726,8 @@ function createExpertInstances(o) {
 		}));
 		const aside = path.join(o.experts.dir(key), "expert-file-before-the-owner-changed.json");
 		await fs.mkdir(path.dirname(aside), { recursive: true });
-		await fs.rename(o.experts.expertFilePath(key), aside);
+		await renamed(o.experts.expertFilePath(key), aside);
+		await away();
 		log(key, `its owner is someone else now, so it runs from an instance file; its expert file was moved to ${aside}`);
 		await o.experts.refresh(key);
 	}
@@ -22728,10 +22735,11 @@ function createExpertInstances(o) {
 	async function deleteInstance(server, key, why) {
 		const running = o.experts.running(key);
 		setting.delete(key);
+		wasDeleted(key);
 		if (running?.from === "expert-file") {
-			const aside = path.join(o.isoplanDir, "deleted-experts", `${key}-${now()}.json`);
+			const aside = path.join(o.isoplanDir, "deleted-experts", `${key}-${Date.now()}.json`);
 			await fs.mkdir(path.dirname(aside), { recursive: true });
-			await fs.rename(o.experts.expertFilePath(key), aside).catch((err) => log(key, `couldn't move its expert file aside: ${err.message}`));
+			await renamed(o.experts.expertFilePath(key), aside).catch((err) => log(key, `couldn't move its expert file aside: ${err.message}`));
 			log(key, `${why}: it stops and its folder goes; its expert file was moved to ${aside}`);
 		} else {
 			await fs.rm(o.experts.instanceFilePath(key), { force: true });
@@ -22799,6 +22807,7 @@ function createExpertInstances(o) {
 		},
 		attach: (server, out) => void outs.set(server, out),
 		onChange: (listener) => void listeners.push(listener),
+		onDeleted: (listener) => void deletedListeners.push(listener),
 		heldOn,
 		async setUp(server, entry, again = false) {
 			const { key, expertRecordId: id } = entry;
@@ -22824,7 +22833,7 @@ function createExpertInstances(o) {
 				...s[server],
 				setUp: {
 					expertRecordId: id,
-					startedAt: now()
+					startedAt: Date.now()
 				}
 			}));
 			changed();
@@ -22881,6 +22890,7 @@ function createExpertInstances(o) {
 				if (r?.setUp && !byId.has(r.setUp.expertRecordId)) {
 					setting.delete(key);
 					await save(key, (s) => void delete s[server].setUp);
+					wasDeleted(key);
 					changed();
 				}
 				if (!r?.record || !running) continue;
@@ -22896,7 +22906,7 @@ function createExpertInstances(o) {
 					if (r.lastResult === "published") await save(key, (s) => void delete s[server].lastResult);
 					continue;
 				}
-				if (!entry.yours && r.record.yours) await handOverAway(server, running, entry.owner);
+				if (!entry.yours && r.record.yours) await handOverAway(server, running, entry.owner).catch((err) => log(key, `couldn't hand it over, so it is tried again at the next directory: ${err.message}`));
 				else if (entry.revision > r.record.revision) outs.get(server)?.want(key, entry.expertRecordId);
 			}
 			changed();
@@ -22909,6 +22919,7 @@ function createExpertInstances(o) {
 			if (!running) {
 				setting.delete(m.key);
 				await save(m.key, (x) => void delete x[server].setUp);
+				wasDeleted(m.key);
 				return changed();
 			}
 			await deleteInstance(server, m.key, `deleted on the floor of ${server} by ${m.by.name || m.by.id}`);
@@ -22941,7 +22952,7 @@ function createExpertInstances(o) {
 				return changed();
 			}
 			if (m.reason === "edited-elsewhere") {
-				const aside = path.join(o.experts.dir(key), `definition-replaced-${now()}.json`);
+				const aside = path.join(o.experts.dir(key), `definition-replaced-${Date.now()}.json`);
 				await write(aside, JSON.stringify(sent, null, 2) + "\n");
 				if (!await rewriteOwnerFile(server, running, m.definition, sent)) return;
 				await save(key, (s) => void (s[server] = {
@@ -23109,7 +23120,6 @@ function expertSetUpUrl(server, key) {
 	return url.toString();
 }
 function createExpertInstanceSetUpOffers(o) {
-	const now = o.now ?? Date.now;
 	let offers = [];
 	let writing = Promise.resolve();
 	const save = () => {
@@ -23167,7 +23177,7 @@ function createExpertInstanceSetUpOffers(o) {
 				server,
 				key: entry.key,
 				expertRecordId: entry.expertRecordId,
-				at: now(),
+				at: Date.now(),
 				sent: false,
 				session
 			};
@@ -23198,12 +23208,11 @@ function createExpertInstanceSetUpOffers(o) {
 //#endregion
 //#region src/runner/expert-questions-asked-here.ts
 const DAY_MS$1 = 864e5;
+const ASKED_AGAIN_AFTER_MS = 12e4;
+const LATE_END_SENT_AGAIN_EVERY_MS = 18e4;
 /** What a question to an instance whose set-up failed is told. */
 const SET_UP_FAILED_WORDS = "its set-up on this computer failed; the floor says why and offers to try again";
 function createExpertQuestionsAskedHere(o) {
-	const now = o.now ?? Date.now;
-	const retryMs = o.retryMs ?? 12e4;
-	const resendMs = o.resendMs ?? 18e4;
 	const kept = /* @__PURE__ */ new Map();
 	const waiters = /* @__PURE__ */ new Map();
 	const given = /* @__PURE__ */ new Set();
@@ -23278,7 +23287,7 @@ function createExpertQuestionsAskedHere(o) {
 		Object.assign(q, {
 			state,
 			...more,
-			endedAt: now()
+			endedAt: Date.now()
 		});
 		if (code) q.code = code;
 		else delete q.code;
@@ -23296,11 +23305,11 @@ function createExpertQuestionsAskedHere(o) {
 	function later(q) {
 		if (closed || q.state !== "asking" || retries.has(k(q))) return;
 		const hours = maxAgeMs(q.server) / 36e5;
-		if (now() - q.askedAt > maxAgeMs(q.server)) return end(q, "dropped", "EXPERT_FORK_FAILED", { endWords: `the expert couldn't answer within ${hours} hours` });
+		if (Date.now() - q.askedAt > maxAgeMs(q.server)) return end(q, "dropped", "EXPERT_FORK_FAILED", { endWords: `the expert couldn't answer within ${hours} hours` });
 		const timer = setTimeout(() => {
 			retries.delete(k(q));
 			give(q);
-		}, retryMs);
+		}, ASKED_AGAIN_AFTER_MS);
 		timer.unref?.();
 		retries.set(k(q), timer);
 	}
@@ -23371,7 +23380,7 @@ function createExpertQuestionsAskedHere(o) {
 			text: expertText("EXPERT_STARTING", about(q)),
 			code: "EXPERT_STARTING"
 		};
-		const left = deadline - now();
+		const left = deadline - Date.now();
 		if (q.state === "asking" && q.blocking && left > 0) await new Promise((resolve) => {
 			const done = () => (clearTimeout(timer), resolve());
 			const timer = setTimeout(() => {
@@ -23387,7 +23396,7 @@ function createExpertQuestionsAskedHere(o) {
 		const here = [...kept.values()].filter((q) => q.counts && q.server === server);
 		const open = here.filter((q) => q.state === "asking" && q.key === key).length + (others?.open.find((x) => x.key === key)?.count ?? 0);
 		if (open >= asking.openPerPersonPerExpert) return `You have ${open} questions waiting for expert ${key} already, which is as many as this office allows; carry on: their answers reach you as notes.`;
-		const since = now() - DAY_MS$1;
+		const since = Date.now() - DAY_MS$1;
 		const times = [...here.map((q) => q.askedAt), ...(others?.askedAtInTheLastDay ?? []).map((t) => Date.parse(t))].filter((t) => t > since).sort((a, b) => a - b);
 		if (times.length >= asking.perPersonPerDay) return `You have asked ${times.length} expert questions in the last day, which is as many as this office allows; it frees at ${new Date(times[0] + DAY_MS$1).toISOString()}, or an admin can raise perAskerPerDay in asks.json.`;
 		return null;
@@ -23395,7 +23404,7 @@ function createExpertQuestionsAskedHere(o) {
 	async function prune() {
 		const keep = (await o.settings()).expertInstances.questionsKeptHours * 36e5;
 		let changed = false;
-		for (const [id, q] of kept) if (now() - q.askedAt > keep || q.shown && q.endedAt !== void 0 && now() - q.endedAt > DAY_MS$1) {
+		for (const [id, q] of kept) if (Date.now() - q.askedAt > keep || q.shown && q.endedAt !== void 0 && Date.now() - q.endedAt > DAY_MS$1) {
 			kept.delete(id);
 			changed = true;
 		}
@@ -23420,14 +23429,17 @@ function createExpertQuestionsAskedHere(o) {
 			}
 			await save();
 			o.instances.onChange(giveWaiting);
+			o.instances.onDeleted((key) => {
+				for (const q of kept.values()) if (q.state === "asking" && q.key === key) end(q, "dropped", "EXPERT_UNKNOWN", { endWords: `the ${expertDisplayName(key)} was deleted` });
+			});
 			for (const [server, link] of o.links) link.onDirectory(() => [...kept.values()].filter((q) => q.server === server).forEach(record));
-			const resend = setInterval(() => [...kept.values()].forEach(late), resendMs);
+			const resend = setInterval(() => [...kept.values()].forEach(late), LATE_END_SENT_AGAIN_EVERY_MS);
 			const tidy = setInterval(() => void prune().catch(() => {}), 36e5);
 			for (const t of [resend, tidy]) t.unref?.();
 			timers.push(resend, tidy);
 		},
 		async ask(r) {
-			const received = now();
+			const received = Date.now();
 			const a = {
 				expert: r.expert,
 				id: r.key,
@@ -23839,7 +23851,6 @@ function createExpertRecordLink(o) {
 //#region src/runner/expert-records-per-office.ts
 const expertRecordsPerOfficePath = (isoplanDir) => path.join(isoplanDir, "runner", "expert-records-per-office.json");
 function createExpertRecordsPerOffice(o) {
-	const now = o.now ?? Date.now;
 	let offices = {};
 	let writing = Promise.resolve();
 	let due = null;
@@ -23850,7 +23861,7 @@ function createExpertRecordsPerOffice(o) {
 			due = null;
 			writing = writing.then(async () => {
 				const keep = await o.keptHours() * 36e5;
-				for (const each of Object.values(offices)) for (const [session, r] of Object.entries(each.rights ?? {})) if (now() - r.at > keep) delete each.rights[session];
+				for (const each of Object.values(offices)) for (const [session, r] of Object.entries(each.rights ?? {})) if (Date.now() - r.at > keep) delete each.rights[session];
 				await writeJson(o.file, {
 					version: 1,
 					offices
@@ -23871,13 +23882,13 @@ function createExpertRecordsPerOffice(o) {
 			const each = office(server);
 			if (m) each.directory = m;
 			else delete each.directory;
-			each.savedAt = now();
+			each.savedAt = Date.now();
 			save();
 		},
 		setOtherComputers(server, m) {
 			Object.assign(office(server), {
 				otherComputers: m,
-				savedAt: now()
+				savedAt: Date.now()
 			});
 			save();
 		},
@@ -23885,9 +23896,9 @@ function createExpertRecordsPerOffice(o) {
 			const each = office(server);
 			(each.rights ??= {})[session] = {
 				rights,
-				at: now()
+				at: Date.now()
 			};
-			each.savedAt = now();
+			each.savedAt = Date.now();
 			save();
 		},
 		async written() {

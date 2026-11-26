@@ -31,8 +31,7 @@ export interface ExpertRecordsPerOffice {
 
 export const expertRecordsPerOfficePath = (isoplanDir: string) => path.join(isoplanDir, "runner", "expert-records-per-office.json");
 
-export function createExpertRecordsPerOffice(o: { file: string; keptHours: () => Promise<number>; log: (text: string) => void; now?: () => number }): ExpertRecordsPerOffice {
-  const now = o.now ?? Date.now;
+export function createExpertRecordsPerOffice(o: { file: string; keptHours: () => Promise<number>; log: (text: string) => void }): ExpertRecordsPerOffice {
   let offices: Record<string, OneOffice> = {};
   let writing: Promise<void> = Promise.resolve();
   let due: ReturnType<typeof setTimeout> | null = null;
@@ -45,7 +44,7 @@ export function createExpertRecordsPerOffice(o: { file: string; keptHours: () =>
       writing = writing
         .then(async () => {
           const keep = (await o.keptHours()) * 3600000;
-          for (const each of Object.values(offices)) for (const [session, r] of Object.entries(each.rights ?? {})) if (now() - r.at > keep) delete each.rights![session];
+          for (const each of Object.values(offices)) for (const [session, r] of Object.entries(each.rights ?? {})) if (Date.now() - r.at > keep) delete each.rights![session];
           await writeJson(o.file, { version: 1, offices });
         })
         .catch((err: Error) => o.log(`couldn't write ${o.file}: ${err.message}`));
@@ -65,17 +64,17 @@ export function createExpertRecordsPerOffice(o: { file: string; keptHours: () =>
       const each = office(server);
       if (m) each.directory = m;
       else delete each.directory;
-      each.savedAt = now();
+      each.savedAt = Date.now();
       save();
     },
     setOtherComputers(server, m) {
-      Object.assign(office(server), { otherComputers: m, savedAt: now() });
+      Object.assign(office(server), { otherComputers: m, savedAt: Date.now() });
       save();
     },
     setRights(server, session, rights) {
       const each = office(server);
-      (each.rights ??= {})[session] = { rights, at: now() };
-      each.savedAt = now();
+      (each.rights ??= {})[session] = { rights, at: Date.now() };
+      each.savedAt = Date.now();
       save();
     },
     async written() {

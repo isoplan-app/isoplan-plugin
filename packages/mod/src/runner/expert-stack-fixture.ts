@@ -1,6 +1,6 @@
-// One computer's expert stack in the tests, put together as the runner's worker puts it (main.ts):
-// its experts (experts.ts, with the fake `claude` and git of expert-fixture.ts), their instances,
-// the set-up offers, what each session may ask, the asking module, and a record link per office,
+// One computer's expert stack in the tests, a copy of how the runner's worker puts it together
+// (main.ts, which expert-two-computers.e2e.test.ts runs itself): its experts (experts.ts, with the
+// fake `claude` and git of expert-fixture.ts), their instances, the set-up offers, what each session may ask, the asking module, and a record link per office,
 // whose live sends go to a stand-in office's list while it is up. Real files in a temp Claude folder;
 // a session folder that is a real git repo with an origin, for the asking module's office pick.
 
@@ -51,7 +51,6 @@ export interface ComputerOptions {
   setUpWithoutAsking?: boolean;
   expertWaitSeconds?: number;
   questionsKeptHours?: number;
-  retryMs?: number;
   /** Folders in the project, besides the checkout, the session's folder and the clones. */
   inProject?: string[];
   /** Writes files into the Claude folder before the stack starts, as an earlier run of the runner left them. */
@@ -194,7 +193,6 @@ export async function computer(o: ComputerOptions = {}) {
     rights: (session, server) => rights.rights(session, server),
     hooked,
     log,
-    ...(o.retryMs !== undefined && { retryMs: o.retryMs }),
   });
   await experts.start();
   await instances.start();

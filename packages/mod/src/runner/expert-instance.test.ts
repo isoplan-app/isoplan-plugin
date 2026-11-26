@@ -8,7 +8,6 @@ import { PROTOCOL_VERSION, type ExpertRecordMessage, type SetUpExpertInstanceMes
 import { expect, test, vi } from "vitest";
 import { tempRoot } from "../data-layer/fixture.js";
 import { BASE, until, type Rule } from "./expert-fixture.js";
-import { KEY_TAKEN_WORDS } from "./expert-instance.js";
 import { ADA, computer, DEFINITION, directoryOf, entryOf, installedInstance, OTHER_RECORD, OTHER_SERVER, readJsonFile, RECORD, SAM, SERVER, writeExpertFile, type Computer } from "./expert-stack-fixture.js";
 
 // The empty folder git runs with as its hooks (handoff/take.ts noHooks) is made in the Claude folder: a temp one, never this machine's.
@@ -145,19 +144,24 @@ test("the owner's edit is published on the record it last had; refused `edited-e
   }
 });
 
-test("a hand-over (D13) both ways: the files swap, and the same expert keeps running with no new generation", async () => {
+test("a hand-over (D13) both ways: the files swap, and the same expert keeps running with no new generation; an expert file that couldn't be moved aside is tried again at the next directory", async () => {
   const c = await computer();
   try {
     await setUpInstance(c);
     const expert = c.experts.running("adr")!.expert;
     c.take(directoryOf([entryOf({ owner: SAM, yours: true })]));
-    await until(() => fs.existsSync(c.file("experts", "adr.json")) && !fs.existsSync(c.file("expert-instances", "adr.json")));
-    expect(c.experts.running("adr")).toMatchObject({ from: "expert-file" });
+    await until(() => fs.existsSync(c.file("experts", "adr.json")) && !fs.existsSync(c.file("expert-instances", "adr.json")) && c.experts.running("adr")?.from === "expert-file");
     expect(readJsonFile(c.file("experts", "adr.json"))).toMatchObject({ name: "adr", repo: c.checkout, subject: DEFINITION.subject });
+    // A folder in the way of the move aside: the expert file stays, and the next directory tries again.
+    const aside = c.file("experts", "adr", "expert-file-before-the-owner-changed.json");
+    fs.mkdirSync(path.join(aside, "in-the-way"), { recursive: true });
     c.take(directoryOf([entryOf({ owner: ADA })]));
-    await until(() => fs.existsSync(c.file("expert-instances", "adr.json")) && !fs.existsSync(c.file("experts", "adr.json")));
-    expect(fs.existsSync(c.file("experts", "adr", "expert-file-before-the-owner-changed.json"))).toBe(true);
-    expect(c.experts.running("adr")).toMatchObject({ from: "instance-file" });
+    await until(() => c.logs.some((l) => l.includes("couldn't hand it over, so it is tried again at the next directory")));
+    expect(fs.existsSync(c.file("experts", "adr.json"))).toBe(true);
+    fs.rmSync(aside, { recursive: true });
+    c.take(directoryOf([entryOf({ owner: ADA })]));
+    await until(() => fs.existsSync(c.file("expert-instances", "adr.json")) && !fs.existsSync(c.file("experts", "adr.json")) && c.experts.running("adr")?.from === "instance-file");
+    expect(fs.statSync(aside).isFile()).toBe(true);
     expect(c.experts.running("adr")!.expert).toBe(expert);
     await new Promise((r) => setTimeout(r, 300));
     expect(trunkStarts(c)).toHaveLength(1);
@@ -241,7 +245,7 @@ test("a key another person's expert has: the health log says so; the expert file
     c.take(directoryOf([entryOf({ expertRecordId: OTHER_RECORD })]));
     await until(() => c.of("expert-definition").length === 1);
     c.take({ type: "expert-definition-result", v: PROTOCOL_VERSION, key: "adr", outcome: "refused", reason: "key-taken" });
-    await until(() => c.health().includes(KEY_TAKEN_WORDS));
+    await until(() => c.health().includes("Another expert has this name, so this one can't be asked. Use unique names."));
     await until(() => listed(c)?.length === 1);
     expect(listed(c)).toEqual([{ key: "adr", expertRecordId: OTHER_RECORD, state: "failed", failure: { why: "key-used-here" } }]);
     c.take({ type: "expert-deleted", v: PROTOCOL_VERSION, key: "adr", expertRecordId: OTHER_RECORD, by: ADA });

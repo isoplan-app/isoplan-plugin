@@ -28,11 +28,12 @@
 // runner.json's expertWaitSeconds from when the runner was asked, then is told to explore meanwhile;
 // any other is told it was asked. An end told in the call is shown once its line was written to the
 // script; any other goes to the session's hooks module as an `asked` line, now if it is connected,
-// else when one registers for the session, and again every `resendMs` until it is acked (the hooks
+// else when one registers for the session, and again every three minutes until it is acked (the hooks
 // module acks through dist/ask.js --ack, which main.ts routes here): its question and answer are then
 // deleted, and a record with no words is kept a day, for the caps. An answer not yet possible
-// (`not-yet`) is asked again every `retryMs`, and ends EXPERT_FORK_FAILED once older than the office's
-// `maxAgeHours`.
+// (`not-yet`) is asked again every two minutes, and ends EXPERT_FORK_FAILED once older than the office's
+// `maxAgeHours`. Every question still open to an expert deleted here, or waiting for its set-up,
+// ends EXPERT_UNKNOWN, "the <Name> was deleted".
 //
 // What it keeps is in ~/.claude/isoplan/runner/expert-questions-asked-here.json: each question's id,
 // session, expert, office, words, state, answer, code, commit, branch, when it was asked and ended,
@@ -61,9 +62,13 @@ import type { InstanceOutcome } from "./expert.js";
 import { readJson, writeJson } from "./expert-state.js";
 
 const DAY_MS = 24 * 3600000;
+// How long a question its instance can't take yet waits before it is asked again.
+const ASKED_AGAIN_AFTER_MS = 2 * 60000;
+// How often an end its session hasn't shown yet is sent to it again.
+const LATE_END_SENT_AGAIN_EVERY_MS = 3 * 60000;
 
 /** What a question to an instance whose set-up failed is told. */
-export const SET_UP_FAILED_WORDS = "its set-up on this computer failed; the floor says why and offers to try again";
+const SET_UP_FAILED_WORDS = "its set-up on this computer failed; the floor says why and offers to try again";
 
 /** runner.json, as asking reads it. */
 export interface ExpertQuestionsAskedHereSettings {
@@ -79,17 +84,12 @@ export interface ExpertQuestionsAskedHereOptions {
   settings: () => Promise<ExpertQuestionsAskedHereSettings>;
   /** Each office's record link, by its data-layer address. */
   links: ReadonlyMap<string, Pick<ExpertRecordLink, "directory" | "showedOld" | "otherComputers" | "sendNow" | "onDirectory">>;
-  instances: Pick<ExpertInstances, "lookUp" | "beforeQuestion" | "onChange">;
+  instances: Pick<ExpertInstances, "lookUp" | "beforeQuestion" | "onChange" | "onDeleted">;
   offers: Pick<ExpertInstanceSetUpOffers, "offerOrSetUp">;
   /** The experts the session may ask through the office, as this computer has them; null when it has none. */
   rights: (session: string, server: string) => ExpertRight[] | null;
   hooked: (session: string) => { send(line: DataLayerLine): void } | null;
   log: (text: string) => void;
-  now?: () => number;
-  /** How long a question its instance couldn't answer yet waits before it is asked again. */
-  retryMs?: number;
-  /** How often an end not shown goes to its session again. */
-  resendMs?: number;
 }
 
 export interface ExpertQuestionsAskedHere {
@@ -135,9 +135,6 @@ interface Kept {
 }
 
 export function createExpertQuestionsAskedHere(o: ExpertQuestionsAskedHereOptions): ExpertQuestionsAskedHere {
-  const now = o.now ?? Date.now;
-  const retryMs = o.retryMs ?? 120000;
-  const resendMs = o.resendMs ?? 180000;
   const kept = new Map<string, Kept>(); // by session and id
   const waiters = new Map<string, () => void>(); // a blocking call waiting for its end
   const given = new Set<string>(); // handed to an expert in this run and not back yet
@@ -209,7 +206,7 @@ export function createExpertQuestionsAskedHere(o: ExpertQuestionsAskedHereOption
 
   function end(q: Kept, state: "answered" | "dropped", code: ExpertCode | undefined, more: { answer?: string; commit?: string; branch?: string; endWords?: string } = {}) {
     if (q.state !== "asking") return;
-    Object.assign(q, { state, ...more, endedAt: now() });
+    Object.assign(q, { state, ...more, endedAt: Date.now() });
     if (code) q.code = code;
     else delete q.code;
     given.delete(k(q));
@@ -224,15 +221,15 @@ export function createExpertQuestionsAskedHere(o: ExpertQuestionsAskedHereOption
     } else late(q);
   }
 
-  // Asked again after `retryMs`, unless it is past the office's maxAgeHours.
+  // Asked again in two minutes, unless it is past the office's maxAgeHours.
   function later(q: Kept) {
     if (closed || q.state !== "asking" || retries.has(k(q))) return;
     const hours = maxAgeMs(q.server) / 3600000;
-    if (now() - q.askedAt > maxAgeMs(q.server)) return end(q, "dropped", "EXPERT_FORK_FAILED", { endWords: `the expert couldn't answer within ${hours} hours` });
+    if (Date.now() - q.askedAt > maxAgeMs(q.server)) return end(q, "dropped", "EXPERT_FORK_FAILED", { endWords: `the expert couldn't answer within ${hours} hours` });
     const timer = setTimeout(() => {
       retries.delete(k(q));
       void give(q);
-    }, retryMs);
+    }, ASKED_AGAIN_AFTER_MS);
     timer.unref?.();
     retries.set(k(q), timer);
   }
@@ -287,7 +284,7 @@ export function createExpertQuestionsAskedHere(o: ExpertQuestionsAskedHereOption
   // Waits, when blocking, until its end or the deadline; with no junior yet, says it is starting.
   async function answerFor(q: Kept, deadline: number, starting: boolean): Promise<ExpertTold> {
     if (q.state === "asking" && starting) return { text: expertText("EXPERT_STARTING", about(q)), code: "EXPERT_STARTING" };
-    const left = deadline - now();
+    const left = deadline - Date.now();
     if (q.state === "asking" && q.blocking && left > 0) {
       await new Promise<void>((resolve) => {
         const done = () => (clearTimeout(timer), resolve());
@@ -307,7 +304,7 @@ export function createExpertQuestionsAskedHere(o: ExpertQuestionsAskedHereOption
     const here = [...kept.values()].filter((q) => q.counts && q.server === server);
     const open = here.filter((q) => q.state === "asking" && q.key === key).length + (others?.open.find((x) => x.key === key)?.count ?? 0);
     if (open >= asking.openPerPersonPerExpert) return `You have ${open} questions waiting for expert ${key} already, which is as many as this office allows; carry on: their answers reach you as notes.`;
-    const since = now() - DAY_MS;
+    const since = Date.now() - DAY_MS;
     const times = [...here.map((q) => q.askedAt), ...(others?.askedAtInTheLastDay ?? []).map((t) => Date.parse(t))].filter((t) => t > since).sort((a, b) => a - b);
     if (times.length >= asking.perPersonPerDay) return `You have asked ${times.length} expert questions in the last day, which is as many as this office allows; it frees at ${new Date(times[0]! + DAY_MS).toISOString()}, or an admin can raise perAskerPerDay in asks.json.`;
     return null;
@@ -318,7 +315,7 @@ export function createExpertQuestionsAskedHere(o: ExpertQuestionsAskedHereOption
     const keep = (await o.settings()).expertInstances.questionsKeptHours * 3600000;
     let changed = false;
     for (const [id, q] of kept) {
-      if (now() - q.askedAt > keep || (q.shown && q.endedAt !== undefined && now() - q.endedAt > DAY_MS)) {
+      if (Date.now() - q.askedAt > keep || (q.shown && q.endedAt !== undefined && Date.now() - q.endedAt > DAY_MS)) {
         kept.delete(id);
         changed = true;
       }
@@ -346,15 +343,19 @@ export function createExpertQuestionsAskedHere(o: ExpertQuestionsAskedHereOption
       }
       await save();
       o.instances.onChange(giveWaiting);
+      // Its expert deleted here: every question to it still open ends, those its set-up was waiting for too.
+      o.instances.onDeleted((key) => {
+        for (const q of kept.values()) if (q.state === "asking" && q.key === key) end(q, "dropped", "EXPERT_UNKNOWN", { endWords: `the ${expertDisplayName(key)} was deleted` });
+      });
       for (const [server, link] of o.links) link.onDirectory(() => [...kept.values()].filter((q) => q.server === server).forEach(record));
-      const resend = setInterval(() => [...kept.values()].forEach(late), resendMs);
+      const resend = setInterval(() => [...kept.values()].forEach(late), LATE_END_SENT_AGAIN_EVERY_MS);
       const tidy = setInterval(() => void prune().catch(() => {}), 3600000);
       for (const t of [resend, tidy]) t.unref?.();
       timers.push(resend, tidy);
     },
 
     async ask(r) {
-      const received = now();
+      const received = Date.now();
       const a: ExpertAbout = { expert: r.expert, id: r.key, name: expertDisplayName(r.expert) };
       const unreachable = (words: string): ExpertTold => ({ text: expertText("EXPERT_RUNNER_UNREACHABLE", { ...a, words }), failed: true, code: "EXPERT_RUNNER_UNREACHABLE" });
       const question = r.question.trim();

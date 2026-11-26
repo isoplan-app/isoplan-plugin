@@ -37,7 +37,6 @@ export interface ExpertInstanceSetUpOffersOptions {
   /** Whether this computer has an instance of the record now, or is setting one up. */
   hasInstance: (server: string, key: string, expertRecordId: string) => boolean;
   log: (text: string) => void;
-  now?: () => number;
 }
 
 export interface ExpertInstanceSetUpOffers {
@@ -65,7 +64,6 @@ export function expertSetUpUrl(server: string, key: string): string {
 }
 
 export function createExpertInstanceSetUpOffers(o: ExpertInstanceSetUpOffersOptions): ExpertInstanceSetUpOffers {
-  const now = o.now ?? Date.now;
   let offers: Offer[] = [];
   let writing: Promise<void> = Promise.resolve();
 
@@ -103,7 +101,7 @@ export function createExpertInstanceSetUpOffers(o: ExpertInstanceSetUpOffersOpti
         return "set-up";
       }
       if (find(server, entry.expertRecordId)) return "offered";
-      const x: Offer = { server, key: entry.key, expertRecordId: entry.expertRecordId, at: now(), sent: false, session };
+      const x: Offer = { server, key: entry.key, expertRecordId: entry.expertRecordId, at: Date.now(), sent: false, session };
       offers.push(x);
       await save();
       o.log(`expert ${entry.key} isn't set up on this computer and its agent asked it, so its set-up is offered on the floor of ${server}`);

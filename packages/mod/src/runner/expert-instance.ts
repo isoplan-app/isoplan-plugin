@@ -44,6 +44,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { MAX_DETAIL_LENGTH, MAX_EXPERT_ANSWER_LENGTH, type ExpertDefinition, type ExpertDefinitionResultMessage, type ExpertDeletedMessage, type ExpertDirectoryEntry, type ExpertDirectoryMessage, type ExpertInstanceState, type ExpertProofFailedMessage, type ExpertRecordMessage, type Project } from "@isoplan/protocol";
+import { renamed } from "./expert-checkout.js";
 import { defaultLocalFields, expertInstanceFileText, fileSaysDefinition, localFieldsOf, ownerExpertFileText, type ExpertLocalFields } from "./expert-instance-file.js";
 import { readExpertRecords, writeExpertRecords, type ExpertRecordOnOneServer, type ExpertRecordsFile, type HeldExpertRecord } from "./expert-records-file.js";
 import type { HostedExpert } from "./expert.js";
@@ -53,7 +54,7 @@ import { findOrCloneProjectCheckoutForExpert } from "./project-checkout-for-expe
 /** What git said when a clone failed, in place of its words, when they matched a secret pattern. */
 export const CLONE_WORDS_HELD = "git's words matched a secret pattern, so they aren't shown; this computer's runner log has them";
 /** The health log's line for an expert whose publish was refused `key-taken`. */
-export const KEY_TAKEN_WORDS = "Another expert has this name, so this one can't be asked. Use unique names.";
+const KEY_TAKEN_WORDS = "Another expert has this name, so this one can't be asked. Use unique names.";
 
 export interface ExpertInstancesOptions {
   experts: Experts;
@@ -61,7 +62,6 @@ export interface ExpertInstancesOptions {
   isoplanDir: string;
   scan: (text: string) => Promise<string | null>;
   log: (text: string) => void;
-  now?: () => number;
   /** This computer's checkout of `project`, as the office `server` takes it; null when it has none. */
   checkoutOf: (server: string, project: Project) => Promise<string | null>;
   /** Isoplan's own hidden clone of a project (isoplan-clone.ts). */
@@ -88,6 +88,8 @@ export interface ExpertInstances {
   attach(server: string, out: ExpertInstanceOutbound): void;
   /** Told when a set-up moves on, or what this module keeps of a record changes. */
   onChange(listener: () => void): void;
+  /** Told when the key's instance, or its set-up, is deleted here: before its expert stops. */
+  onDeleted(listener: (key: string) => void): void;
   setUp(server: string, entry: ExpertDirectoryEntry, again?: boolean): Promise<void>;
   record(server: string, m: ExpertRecordMessage): Promise<void>;
   directory(server: string, m: ExpertDirectoryMessage): Promise<void>;
@@ -127,16 +129,17 @@ function stateOf(h: HostedExpert, expertRecordId: string): ExpertInstanceState {
 }
 
 export function createExpertInstances(o: ExpertInstancesOptions): ExpertInstances {
-  const now = o.now ?? Date.now;
   const records = new Map<string, ExpertRecordsFile>();
   const outs = new Map<string, ExpertInstanceOutbound>();
   const listeners: (() => void)[] = [];
+  const deletedListeners: ((key: string) => void)[] = [];
   // Set-ups under way, by key, before the file is written: the folder, once it is found or cloned.
   const setting = new Map<string, { server: string; expertRecordId: string; folder?: string }>();
   const saidKeyTaken = new Set<string>();
   let saving: Promise<void> = Promise.resolve();
 
   const changed = () => listeners.forEach((l) => l());
+  const wasDeleted = (key: string) => deletedListeners.forEach((l) => l(key));
   const log = (key: string, text: string) => o.log(`expert ${key}: ${text}`);
   const recordsOf = (key: string) => records.get(key) ?? { version: 1 as const, servers: {} };
   const heldOn = (server: string, key: string) => records.get(key)?.servers[server];
@@ -156,13 +159,13 @@ export function createExpertInstances(o: ExpertInstancesOptions): ExpertInstance
     await fs.mkdir(path.dirname(file), { recursive: true });
     const temp = `${file}.${process.pid}.tmp`;
     await fs.writeFile(temp, text);
-    await fs.rename(temp, file);
+    await renamed(temp, file);
   };
 
   // A set-up's failure, kept in expert-records.json, so the listing says it after a restart too.
   async function failSetUp(server: string, key: string, expertRecordId: string, why: "clone" | "other", detail: string) {
     setting.delete(key);
-    await save(key, (s) => void (s[server] = { ...s[server], setUp: { expertRecordId, startedAt: s[server]?.setUp?.startedAt ?? now(), failed: { why, detail: detail.slice(0, MAX_DETAIL_LENGTH) } } }));
+    await save(key, (s) => void (s[server] = { ...s[server], setUp: { expertRecordId, startedAt: s[server]?.setUp?.startedAt ?? Date.now(), failed: { why, detail: detail.slice(0, MAX_DETAIL_LENGTH) } } }));
     changed();
   }
 
@@ -212,19 +215,26 @@ export function createExpertInstances(o: ExpertInstancesOptions): ExpertInstance
     await o.experts.refresh(key);
   }
 
+  // Its record here says it isn't this person's only once the expert file has moved aside, so a move that fails is tried again at the next directory.
   async function handOverAway(server: string, running: RunningExpert, owner: { id: string; name: string } | null) {
     const key = running.key;
-    await save(key, (s) => {
-      const r = s[server]?.record;
-      if (r) s[server] = { ...s[server], record: { ...r, yours: false, ...(owner && { owner }) } };
-      delete s[server]!.lastResult;
-    });
-    o.experts.health(key).say("owner", { server, owner: owner ? owner.name || owner.id : "another person", yours: "no" });
-    if (yoursElsewhere(key, server)) return log(key, `its record on ${server} is someone else's now; its record on another office server is still this person's, so its expert file stays`);
+    const away = async () => {
+      await save(key, (s) => {
+        const r = s[server]?.record;
+        if (r) s[server] = { ...s[server], record: { ...r, yours: false, ...(owner && { owner }) } };
+        delete s[server]!.lastResult;
+      });
+      o.experts.health(key).say("owner", { server, owner: owner ? owner.name || owner.id : "another person", yours: "no" });
+    };
+    if (yoursElsewhere(key, server)) {
+      await away();
+      return log(key, `its record on ${server} is someone else's now; its record on another office server is still this person's, so its expert file stays`);
+    }
     await write(o.experts.instanceFilePath(key), expertInstanceFileText({ version: 1, key, server, ...localFieldsOf(running.file) }));
     const aside = path.join(o.experts.dir(key), "expert-file-before-the-owner-changed.json");
     await fs.mkdir(path.dirname(aside), { recursive: true });
-    await fs.rename(o.experts.expertFilePath(key), aside);
+    await renamed(o.experts.expertFilePath(key), aside);
+    await away();
     log(key, `its owner is someone else now, so it runs from an instance file; its expert file was moved to ${aside}`);
     await o.experts.refresh(key);
   }
@@ -233,10 +243,11 @@ export function createExpertInstances(o: ExpertInstancesOptions): ExpertInstance
   async function deleteInstance(server: string, key: string, why: string) {
     const running = o.experts.running(key);
     setting.delete(key);
+    wasDeleted(key);
     if (running?.from === "expert-file") {
-      const aside = path.join(o.isoplanDir, "deleted-experts", `${key}-${now()}.json`);
+      const aside = path.join(o.isoplanDir, "deleted-experts", `${key}-${Date.now()}.json`);
       await fs.mkdir(path.dirname(aside), { recursive: true });
-      await fs.rename(o.experts.expertFilePath(key), aside).catch((err: Error) => log(key, `couldn't move its expert file aside: ${err.message}`));
+      await renamed(o.experts.expertFilePath(key), aside).catch((err: Error) => log(key, `couldn't move its expert file aside: ${err.message}`));
       log(key, `${why}: it stops and its folder goes; its expert file was moved to ${aside}`);
     } else {
       await fs.rm(o.experts.instanceFilePath(key), { force: true });
@@ -298,6 +309,7 @@ export function createExpertInstances(o: ExpertInstancesOptions): ExpertInstance
     },
     attach: (server, out) => void outs.set(server, out),
     onChange: (listener) => void listeners.push(listener),
+    onDeleted: (listener) => void deletedListeners.push(listener),
     heldOn,
 
     async setUp(server, entry, again = false) {
@@ -317,7 +329,7 @@ export function createExpertInstances(o: ExpertInstancesOptions): ExpertInstance
         return;
       }
       setting.set(key, { server, expertRecordId: id });
-      await save(key, (s) => void (s[server] = { ...s[server], setUp: { expertRecordId: id, startedAt: now() } }));
+      await save(key, (s) => void (s[server] = { ...s[server], setUp: { expertRecordId: id, startedAt: Date.now() } }));
       changed();
       log(key, `${again ? "set up again" : "set up"} from its record on ${server}: finding this computer's checkout of ${entry.project.name}, or cloning it`);
       const found = await folderFor(server, entry.project);
@@ -363,6 +375,7 @@ export function createExpertInstances(o: ExpertInstancesOptions): ExpertInstance
         if (r?.setUp && !byId.has(r.setUp.expertRecordId)) {
           setting.delete(key);
           await save(key, (s) => void delete s[server]!.setUp);
+          wasDeleted(key);
           changed();
         }
         if (!r?.record || !running) continue;
@@ -380,7 +393,7 @@ export function createExpertInstances(o: ExpertInstancesOptions): ExpertInstance
           if (r.lastResult === "published") await save(key, (s) => void delete s[server]!.lastResult);
           continue;
         }
-        if (!entry.yours && r.record.yours) await handOverAway(server, running, entry.owner);
+        if (!entry.yours && r.record.yours) await handOverAway(server, running, entry.owner).catch((err: Error) => log(key, `couldn't hand it over, so it is tried again at the next directory: ${err.message}`));
         else if (entry.revision > r.record.revision) outs.get(server)?.want(key, entry.expertRecordId);
       }
       changed();
@@ -394,6 +407,7 @@ export function createExpertInstances(o: ExpertInstancesOptions): ExpertInstance
       if (!running) {
         setting.delete(m.key);
         await save(m.key, (x) => void delete x[server]!.setUp);
+        wasDeleted(m.key);
         return changed();
       }
       await deleteInstance(server, m.key, `deleted on the floor of ${server} by ${m.by.name || m.by.id}`);
@@ -410,7 +424,7 @@ export function createExpertInstances(o: ExpertInstancesOptions): ExpertInstance
         return changed();
       }
       if (m.reason === "edited-elsewhere") {
-        const aside = path.join(o.experts.dir(key), `definition-replaced-${now()}.json`);
+        const aside = path.join(o.experts.dir(key), `definition-replaced-${Date.now()}.json`);
         await write(aside, JSON.stringify(sent, null, 2) + "\n");
         if (!(await rewriteOwnerFile(server, running, m.definition, sent))) return;
         await save(key, (s) => void (s[server] = { ...s[server], record: { expertRecordId: m.expertRecordId, revision: m.revision, owner, yours: true, definition: m.definition }, lastResult: "published" }));

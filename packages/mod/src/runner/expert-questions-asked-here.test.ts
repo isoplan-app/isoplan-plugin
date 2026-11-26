@@ -9,7 +9,6 @@ import { answeredText, askedText, expertText, exploreMeanwhileText, lateExpertTe
 import { tempRoot } from "../data-layer/fixture.js";
 import type { FromOffice } from "../lines.js";
 import { ANSWER, BASE, C1, until, type Rule } from "./expert-fixture.js";
-import { SET_UP_FAILED_WORDS } from "./expert-questions-asked-here.js";
 import { ADA, ASKING, computer, DEFINITION, directoryOf, entryOf, installedInstance, OTHER_RECORD, readJsonFile, RECORD, SERVER, writeExpertFile, type Computer, type ComputerOptions } from "./expert-stack-fixture.js";
 
 // The empty folder git runs with as its hooks (handoff/take.ts noHooks) is made in the Claude folder: a temp one, never this machine's.
@@ -71,6 +70,43 @@ test("blocking past expertWaitSeconds: explore meanwhile; the answer then comes 
     expect(kept).toMatchObject({ id: "toolu_1", text: null, shown: true, state: "answered" });
     expect(kept).not.toHaveProperty("answer");
   } finally {
+    await c.close();
+  }
+});
+
+test("a late end its session hasn't shown is sent to it again every three minutes, until it is acked", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  const c = await ready({ rules: slow(500) });
+  try {
+    await ask(c, "toolu_1", { blocking: false });
+    await until(() => asked(c).length === 1);
+    vi.advanceTimersByTime(3 * 60000);
+    expect(asked(c).map((l) => l.question)).toEqual(["toolu_1", "toolu_1"]);
+    await c.asking.ack("s1", "toolu_1");
+    vi.advanceTimersByTime(3 * 60000);
+    expect(asked(c)).toHaveLength(2);
+  } finally {
+    vi.useRealTimers();
+    await c.close();
+  }
+});
+
+test("a question its instance can't take yet keeps being tried again, and ends EXPERT_FORK_FAILED at the first try past the office's maxAgeHours", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"], shouldAdvanceTime: true });
+  const c = await computer({ setUpWithoutAsking: true });
+  try {
+    c.take(directoryOf([entryOf()], { ...ASKING, maxAgeHours: 1 }));
+    await session(c);
+    // Its set-up waits for the record, which the office never sends.
+    expect((await ask(c, "toolu_1", { blocking: false })).code).toBe("EXPERT_STARTING");
+    await until(() => c.of("expert-record-wanted").length === 1);
+    await vi.advanceTimersByTimeAsync(59 * 60000);
+    expect(asked(c)).toEqual([]);
+    await vi.advanceTimersByTimeAsync(2 * 60000);
+    await until(() => asked(c).length === 1);
+    expect(lateExpertText({ ...asked(c)[0]!, expert: "adr" })).toContain("Expert adr, question toolu_1: the expert couldn't answer: the expert couldn't answer within 1 hours. Ask a fresh Explore subagent instead (EXPERT_FORK_FAILED)");
+  } finally {
+    vi.useRealTimers();
     await c.close();
   }
 });
@@ -184,9 +220,39 @@ test("EXPERT_FORK_FAILED from a fork that failed, with its words in the late lin
     failed.take({ type: "set-up-expert-instance", v: PROTOCOL_VERSION, request: "r-1", key: "adr", expertRecordId: RECORD, by: { id: "claude:sam", name: "Sam" } });
     await until(() => failed.of("expert-instance-states").at(-1)?.instances[0]?.state === "failed");
     await session(failed);
-    expect(await ask(failed, "toolu_2")).toMatchObject({ text: expertText("EXPERT_FORK_FAILED", { ...about("toolu_2"), words: SET_UP_FAILED_WORDS }), failed: true, code: "EXPERT_FORK_FAILED" });
+    expect(await ask(failed, "toolu_2")).toMatchObject({ text: "Expert adr, question toolu_2: the expert couldn't answer: its set-up on this computer failed; the floor says why and offers to try again. Ask a fresh Explore subagent instead (EXPERT_FORK_FAILED)", failed: true, code: "EXPERT_FORK_FAILED" });
   } finally {
     await failed.close();
+  }
+});
+
+test("its expert deleted: a question its instance is answering, and one waiting for its set-up, end EXPERT_UNKNOWN, saying it was deleted", async () => {
+  const deleted = { type: "expert-deleted", v: PROTOCOL_VERSION, key: "adr", expertRecordId: RECORD, by: ADA } as const;
+  const words = (id: string) => `Expert adr, question ${id}: the Adr Expert was deleted (EXPERT_UNKNOWN)`;
+  const c = await ready({ rules: slow(20000) });
+  try {
+    await ask(c, "toolu_1", { blocking: false });
+    await until(() => forks(c, "toolu_1").length === 1);
+    c.take(deleted);
+    await until(() => asked(c).length === 1);
+    expect(asked(c)[0]).toMatchObject({ question: "toolu_1", state: "dropped", code: "EXPERT_UNKNOWN", note: "the Adr Expert was deleted" });
+    expect(lateExpertText({ ...asked(c)[0]!, expert: "adr" })).toContain(words("toolu_1"));
+    await until(() => c.of("expert-question").some((m) => m.state === "dropped"));
+    expect(c.of("expert-question").at(-1)).toMatchObject({ id: "toolu_1", state: "dropped", code: "EXPERT_UNKNOWN" });
+  } finally {
+    await c.close();
+  }
+  const setting = await computer({ setUpWithoutAsking: true });
+  try {
+    setting.take(directoryOf([entryOf()]));
+    await session(setting);
+    expect((await ask(setting, "toolu_2", { blocking: false })).code).toBe("EXPERT_STARTING");
+    await until(() => setting.of("expert-record-wanted").length === 1);
+    setting.take(deleted);
+    await until(() => asked(setting).length === 1);
+    expect(lateExpertText({ ...asked(setting)[0]!, expert: "adr" })).toContain(words("toolu_2"));
+  } finally {
+    await setting.close();
   }
 });
 

@@ -65,7 +65,7 @@ test("with setUpWithoutAsking on, the set-up starts at once and nothing is offer
   }
 });
 
-test("an offer the link couldn't send goes after the next connection's directory; dismissed on the floor, its line ends, and the session's pipe connecting afresh isn't given it again", async () => {
+test("an offer the link couldn't send goes after the next connection's directory; while open, the session's pipe connecting afresh is given its line again; dismissed on the floor, its line ends, and is never given again", async () => {
   const c = await computer();
   try {
     c.take(directoryOf([entryOf()]));
@@ -78,6 +78,10 @@ test("an offer the link couldn't send goes after the next connection's directory
     c.links.get(SERVER)!.onOpen();
     c.take(directoryOf([entryOf()]));
     await until(() => c.of("expert-set-up-offered").length === 1);
+    c.disconnect("s1");
+    c.lines("s1").length = 0;
+    c.connect("s1");
+    expect(offerLines(c)).toEqual([{ type: "expert-set-up-offer", server: SERVER, key: "adr", name: "Adr Expert", url: "http://127.0.0.1:4799/?expert-set-up=adr" }]);
     c.take({ type: "expert-set-up-offer-ended", v: PROTOCOL_VERSION, key: "adr", expertRecordId: RECORD, why: "dismissed" });
     expect(c.lines("s1").filter((l) => l.type === "expert-set-up-offer-ended")).toEqual([{ type: "expert-set-up-offer-ended", server: SERVER, key: "adr" }]);
     c.disconnect("s1");
