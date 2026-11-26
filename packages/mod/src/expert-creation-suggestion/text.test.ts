@@ -27,7 +27,7 @@ test("the transcript line says what the session spent on the folder, and how oft
 
 test("a session's suggestion says what was done there again: the file read most, how often and in how many sessions, with the files read again with it, or how often the folder was searched; then the share of the context and the corrections that passed", () => {
   const file = "docs/adr/0004-what-leaves-a-machine.md";
-  const read = (more: object) => ({ folder: file, repetition: { readings: 4, sessions: 3, file, files: 1, ...more } });
+  const read = (more: object) => ({ folder: file, repetition: { readings: 4, sessions: 3, files: 1, ...more } });
   expect(expertCreationSuggestionTranscriptText(line({}, read({})))).toBe(`Isoplan: ${file} was read 4 times in 3 sessions. A Parser Expert could answer questions about ${file} without reading it again. Review it: http://127.0.0.1:4747/?expert-creation-suggestion=o1 (or type /isoplan:review-expert-suggestion)`);
   expect(expertCreationSuggestionTranscriptText(line({ share: 0.2 }, read({ sessions: 1, files: 3 })))).toBe(`Isoplan: this session read ${file} 4 times, 20% of its context, and 2 other files were read again with it. A Parser Expert could answer questions about ${file} and the 2 other files without reading them again. Review it: http://127.0.0.1:4747/?expert-creation-suggestion=o1 (or type /isoplan:review-expert-suggestion)`);
   expect(reason(line({ share: 0.2 }, read({ files: 2 })))).toBe(`Isoplan: ${file} was read 4 times in 3 sessions, 20% of this session's context, and 1 other file was read again with it`);

@@ -44,9 +44,9 @@ export function expertCreationSuggestionTranscriptText(line: ExpertCreationSugge
     const more = `${spent.length ? `, ${spent.join(" and ")}` : ""}${corrections > 0 ? `, and you corrected it ${times(corrections)} there` : ""}`;
     if ("searches" in again) return `Isoplan: this session searched ${where} ${times(again.searches)}${more}. ${article(line.name)} ${line.name} could answer questions about ${where} without searching it again. ${review}`;
     const others = again.files - 1;
-    const read = again.sessions > 1 ? `${again.file} was read ${times(again.readings)} in ${again.sessions} sessions` : `this session read ${again.file} ${times(again.readings)}`;
+    const read = again.sessions > 1 ? `${where} was read ${times(again.readings)} in ${again.sessions} sessions` : `this session read ${where} ${times(again.readings)}`;
     const withIt = others ? `, and ${others} other file${others === 1 ? " was" : "s were"} read again with it` : "";
-    const about = others ? `${again.file} and ${others === 1 ? "the other file" : `the ${others} other files`}` : again.file;
+    const about = others ? `${where} and ${others === 1 ? "the other file" : `the ${others} other files`}` : where;
     return `Isoplan: ${read}${more}${withIt}. ${article(line.name)} ${line.name} could answer questions about ${about} without reading ${others ? "them" : "it"} again. ${review}`;
   }
   const m = Math.round(minutes);

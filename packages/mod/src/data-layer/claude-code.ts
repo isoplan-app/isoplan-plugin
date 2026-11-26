@@ -28,14 +28,19 @@
 // doesn't want to proceed with this tool use" is one, never an MCP tool's, whose text is its own. A
 // plain turn-down is followed by an interruption line, which isn't counted again. Counts only: no
 // path's contents, pattern or result is kept. A subagent that leaves the view keeps its counts.
-// Each file Read read is counted too, for the runner alone (SourceRead.readings, never sent): in how
-// many turns it was read, one reading each however often a turn read it (paging through a large
+// A search made again as it was, the same tool with the same input, in the same turn counts once,
+// so its searches are distinct ones; to tell, the turn under way keeps a hash of each.
+// Each file Read read is counted too, for the runner alone (SourceRead.readings, never sent): in
+// which turns it was read, one reading each however often a turn read it (paging through a large
 // file is one reading), and what its reads took, in all and past its first reading, so reading the
-// same files again can be told from reading one large file once (isoplan-app#338).
+// same files again can be told from reading one large file once, and files read together from
+// files read apart (isoplan-app#338). A file the session's agents edited has none: reading what you
+// are changing is no sign an expert would help.
 // What the session said in its latest turns in a folder (its prompts and replies) is kept for the
 // runner's draft of an expert (SourceRead.said), which goes only to the person's own Claude
 // account, never to the office.
 
+import { createHash } from "node:crypto";
 import { AreaPathSchema, type AgentFact, type AreaFact, type Facts, type FileFact, type Project, type QuestionFact, type WorkflowFact } from "@isoplan/protocol";
 import { attributionCache, createAttribution, type Attribution, type Placed } from "./attribution.js";
 import type { Config } from "./config.js";
@@ -142,13 +147,15 @@ export interface SourceRead {
 
 /**
  * A file the session's agents read with Read, `file` relative to its repo's root, `project` as for
- * an area: in how many turns (a lead's or a subagent's) it was read, one reading each, and what its
+ * an area: in how many turns (a lead's or a subagent's) it was read, one reading each, the latest of
+ * those turns (at most MAX_READING_TURNS, each named uniquely within the session), and what its
  * reads' results took, as characters / 4, in all and past its first reading.
  */
 export interface FileReading {
   file: string;
   project?: Project;
   readings: number;
+  turns: string[];
   tokens: number;
   tokensAgain: number;
 }
@@ -759,19 +766,21 @@ interface AreaTally {
   ms: number;
 }
 
-/** A turn: the folders its calls named (pathKey → path), its corrections, and its words, cut short. */
+/** A turn: its number in the transcript, the folders its calls named (pathKey → path), its corrections, and its words, cut short. */
 interface AreaTurn {
+  n: number;
   dirs: Map<string, string>;
   corrections: number;
   prompt: string | null;
   reply: string | null;
 }
 
-/** A file Read read: in how many turns (`last`, the latest, tells a new one), and the characters of its reads' results, in its first turn and in all. */
+/** A file Read read: in how many turns (`last`, the latest, tells a new one), the latest of those turns' numbers, and the characters of its reads' results, in its first turn and in all. */
 interface AreaReading {
   path: string;
   last: AreaTurn | null;
   readings: number;
+  turns: number[];
   firstChars: number;
   chars: number;
 }
@@ -787,8 +796,10 @@ interface AreaAsk {
 
 interface AreaState {
   tallies: Map<string, AreaTally>; // pathKey → its tally; `<pathKey>\n<within's pathKey>` for searches whose results were all below it
-  calls: Map<string, { key: string; at: number; cwd: string | null; search: boolean; file?: string; turn: AreaTurn }>; // each Read, Grep and Glob waiting for its result, by tool_use id, with a Read's file
+  calls: Map<string, { key: string; at: number; cwd: string | null; search: boolean; file?: string; turn: AreaTurn; searched?: string; again?: true }>; // each Read, Grep and Glob waiting for its result, by tool_use id, with a Read's file, and a search's hash, `again` when the turn made it already
   readings: Map<string, AreaReading>; // pathKey of each file Read read → its readings
+  edited: Set<string>; // pathKey of each file an edit named
+  searched: Set<string>; // a hash of each search the turn under way made: its tool and input
   names: Map<string, string>; // the tool of each recent call, by tool_use id
   turn: AreaTurn; // the turn under way
   turns: AreaTurn[]; // ended turns that worked in a folder: the latest with their words, older ones only for their corrections
@@ -901,11 +912,11 @@ function newTranscriptState(): TranscriptState {
     compacted: false,
     asks: new Map(),
     workflows: new Map(),
-    area: { tallies: new Map(), calls: new Map(), readings: new Map(), names: new Map(), turn: newTurn(null), turns: [], rejected: false, asks: [] },
+    area: { tallies: new Map(), calls: new Map(), readings: new Map(), edited: new Set(), searched: new Set(), names: new Map(), turn: newTurn(null, 0), turns: [], rejected: false, asks: [] },
   };
 }
 
-const newTurn = (prompt: string | null): AreaTurn => ({ dirs: new Map(), corrections: 0, prompt, reply: null });
+const newTurn = (prompt: string | null, n: number): AreaTurn => ({ n, dirs: new Map(), corrections: 0, prompt, reply: null });
 
 const MESSAGE_TYPES = new Set(["user", "assistant", "attachment", "system"]);
 
@@ -1258,8 +1269,10 @@ const ASK_CHARS = 2000;
 const SAID_MAX = 8;
 /** The most areas a session's facts carry: those that took the most tokens, then the most time. */
 export const MAX_AREAS = 100;
-/** The most files a transcript's readings are kept for, and a session's readings carry: those read most. */
+/** The most files a transcript's readings are kept for, and a session's readings carry: those read most; and of the files an edit named, the latest kept. */
 export const MAX_READINGS = 500;
+/** The most of a file's turns its reading names: the latest. */
+export const MAX_READING_TURNS = 50;
 // A folder no expert is suggested on, nor anything inside it: what a package manager or git keeps.
 const NOT_AREAS = new Set(["node_modules", ".git"]);
 
@@ -1290,7 +1303,8 @@ function areaPath(name: string, input: Line, cwd: string | null): string | null 
 const absoluteIn = (p: unknown, cwd: string | null) => (typeof p !== "string" || !p ? null : isAbsolute(p) ? normalize(p) : cwd ? join(cwd, p) : null);
 
 // A tool call: a Read, Grep or Glob counts in its folder now, and waits for its result's size and
-// time; it and an edit mark the turn as working in that folder.
+// time; it and an edit mark the turn as working in that folder. A search the turn made already, as
+// it was, counts no search again.
 function areaCall(a: AreaState, c: Line, cwd: string | null, at: number): void {
   if (typeof c.id === "string" && typeof c.name === "string") {
     a.names.set(c.id, c.name);
@@ -1302,14 +1316,22 @@ function areaCall(a: AreaState, c: Line, cwd: string | null, at: number): void {
   if (!kind || !path) return;
   const key = pathKey(path);
   a.turn.dirs.set(key, path);
-  if (kind === "edit") return;
+  if (kind === "edit") {
+    const file = absoluteIn(input.file_path ?? input.notebook_path, cwd);
+    if (file) a.edited.add(pathKey(file));
+    if (a.edited.size > MAX_READINGS) a.edited.delete(a.edited.values().next().value!);
+    return;
+  }
   let t = a.tallies.get(key);
   if (!t) a.tallies.set(key, (t = { path, reads: 0, searches: 0, chars: 0, ms: 0 }));
+  const searched = kind === "search" ? createHash("sha256").update(`${c.name}\n${JSON.stringify(input)}`).digest("base64") : null;
+  const again = !!searched && a.searched.has(searched);
   if (kind === "read") t.reads++;
-  else t.searches++;
+  else if (!again) t.searches++;
+  if (searched) a.searched.add(searched);
   if (typeof c.id === "string") {
     const file = kind === "read" ? absoluteIn(input.file_path, cwd) : null;
-    a.calls.set(c.id, { key, at, cwd, search: kind === "search", ...(file && { file }), turn: a.turn });
+    a.calls.set(c.id, { key, at, cwd, search: kind === "search", ...(file && { file }), turn: a.turn, ...(searched && { searched }), ...(again && { again: true as const }) });
     capped(a.calls, MAX_AREA_CALLS);
   }
 }
@@ -1319,12 +1341,14 @@ function areaReading(a: AreaState, file: string, turn: AreaTurn, chars: number):
   const key = pathKey(file);
   let r = a.readings.get(key);
   if (!r) {
-    a.readings.set(key, (r = { path: file, last: null, readings: 0, firstChars: 0, chars: 0 }));
+    a.readings.set(key, (r = { path: file, last: null, readings: 0, turns: [], firstChars: 0, chars: 0 }));
     capped(a.readings, MAX_READINGS);
   }
   if (r.last !== turn) {
     r.last = turn;
     r.readings++;
+    r.turns.push(turn.n);
+    if (r.turns.length > MAX_READING_TURNS) r.turns.shift();
   }
   if (r.readings === 1) r.firstChars += chars;
   r.chars += chars;
@@ -1371,9 +1395,13 @@ function areaResult(a: AreaState, c: Line, at: number, ran: boolean, used: unkno
   a.calls.delete(c.tool_use_id);
   let t = a.tallies.get(call.key);
   if (!t) return;
+  // A search made again in its turn counted none. One that didn't run takes back its count and its
+  // hash, so the same search made after it counts.
+  const counted = !call.again;
   if (!ran) {
-    if (call.search) t.searches--;
-    else t.reads--;
+    if (!call.search) t.reads--;
+    else if (counted) t.searches--;
+    if (call.searched && counted && a.turn === call.turn) a.searched.delete(call.searched);
     if (!t.reads && !t.searches && !t.chars && !t.ms) a.tallies.delete(call.key);
     return;
   }
@@ -1382,9 +1410,11 @@ function areaResult(a: AreaState, c: Line, at: number, ran: boolean, used: unkno
     const key = `${call.key}\n${pathKey(within)}`;
     const own = a.tallies.get(key) ?? { path: t.path, within, reads: 0, searches: 0, chars: 0, ms: 0 };
     a.tallies.set(key, own);
-    t.searches--;
+    if (counted) {
+      t.searches--;
+      own.searches++;
+    }
     if (!t.reads && !t.searches && !t.chars && !t.ms) a.tallies.delete(call.key);
-    own.searches++;
     t = own;
   }
   const chars = resultText(c.content).length;
@@ -1416,7 +1446,8 @@ function areaPrompt(st: TranscriptState, ev: Line, content: unknown, at: number)
     a.asks.push({ key: typeof ev.uuid === "string" ? ev.uuid : String(at), text: text.slice(0, ASK_CHARS), reply: before.reply, dirs: [...before.dirs.values()], correction: null });
     if (a.asks.length > MAX_AREA_ASKS) a.asks.shift();
   }
-  a.turn = newTurn(person ? text.slice(0, SAID_PROMPT_CHARS) : null);
+  a.turn = newTurn(person ? text.slice(0, SAID_PROMPT_CHARS) : null, before.n + 1);
+  a.searched.clear();
 }
 
 // The turn under way ends with `reply`: kept when it worked in a folder. Only the latest SAID_TURNS
@@ -1510,16 +1541,20 @@ async function areasOf(sources: AreaSource[], place: Attribution, corrected: Rea
     .sort((a, b) => b.tokens - a.tokens || b.ms - a.ms || (a.folder < b.folder ? -1 : a.folder > b.folder ? 1 : 0))
     .slice(0, MAX_AREAS);
 
-  // Each file's readings over every transcript, past its first reading in the first that read it.
+  // Each file's readings over every transcript, past its first reading in the first that read it, a
+  // turn named `<transcript>:<turn>`; none for a file any of them edited.
+  const edited = new Set(sources.flatMap(({ area }) => [...area.edited]));
   const files = new Map<string, FileReading & { chars: number; firstChars: number }>();
-  for (const { area } of sources) {
-    for (const r of area.readings.values()) {
+  for (const [i, { area }] of sources.entries()) {
+    for (const [key, r] of area.readings) {
+      if (edited.has(key)) continue;
       const p = await place.file(r.path).catch(() => null);
       if (!p || p.file.split("/").some((part) => NOT_AREAS.has(part)) || !AreaPathSchema.safeParse(p.file).success) continue;
       const k = `${p.project?.id ?? ""}\n${p.file}`;
       const f = files.get(k);
-      if (f) Object.assign(f, { readings: f.readings + r.readings, chars: f.chars + r.chars });
-      else files.set(k, { file: p.file, ...(p.project && { project: p.project }), readings: r.readings, tokens: 0, tokensAgain: 0, chars: r.chars, firstChars: r.firstChars });
+      const turns = r.turns.map((n) => `${i}:${n}`);
+      if (f) Object.assign(f, { readings: f.readings + r.readings, turns: [...f.turns, ...turns].slice(-MAX_READING_TURNS), chars: f.chars + r.chars });
+      else files.set(k, { file: p.file, ...(p.project && { project: p.project }), readings: r.readings, turns, tokens: 0, tokensAgain: 0, chars: r.chars, firstChars: r.firstChars });
     }
   }
   const readings = [...files.values()]

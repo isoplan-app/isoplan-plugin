@@ -661,3 +661,30 @@ test("the runner hears each pass's areas for every office that takes the repo, w
   expect(await s.said(null, "docs")).toEqual(["Asked: what is in docs?\nAnswered: One page."]);
   expect(asked[0]).toBe("u1");
 });
+
+test("the runner hears a pass's file readings and areas for an office only in the repos that office holds: another repo's never shape a suggestion to it (ADR 0004)", async () => {
+  const o = await office();
+  o.state.repos = ["github.com/team/app"];
+  const root = tempRoot();
+  const claudeDir = path.join(root, "claude");
+  const lib = path.join(root, "lib");
+  fs.mkdirSync(path.join(lib, "src"), { recursive: true });
+  execFileSync("git", ["init", "-q"], { cwd: lib });
+  execFileSync("git", ["remote", "add", "origin", "https://github.com/team/lib.git"], { cwd: lib });
+  const repo = session(claudeDir, root, (repo, now) => {
+    fs.mkdirSync(path.join(repo, "docs"));
+    const at = { cwd: repo, timestamp: now };
+    const read = (id: string, file: string) => [
+      { ...at, type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id, name: "Read", input: { file_path: file } }] } },
+      { ...at, type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: "x".repeat(40) }] } },
+    ];
+    return [{ ...at, type: "user", message: { role: "user", content: "how do these fit?" } }, ...read("r1", path.join(repo, "docs", "a.md")), ...read("r2", path.join(lib, "src", "b.ts"))];
+  });
+  fs.writeFileSync(path.join(claudeDir, "isoplan", "config.json"), JSON.stringify({ server: o.url }));
+  const seen: SessionAreas[] = [];
+  void inRunner(claudeDir, repo, { areas: (s) => void seen.push(s) });
+  await until(() => seen.some((s) => s.readings.length > 0));
+  const s = seen.at(-1)!;
+  expect(s.readings.map((r) => [r.file, r.project?.id ?? null])).toEqual([["docs/a.md", null]]);
+  expect(s.areas.map((a) => [a.folder, a.project?.id ?? null])).toEqual([["docs", null]]);
+});

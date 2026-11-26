@@ -4,7 +4,7 @@
 // anything it sends back goes through a file the line names, which the runner reads. "The data
 // layer" below is the runner reporting the session (src/data-layer/report-session.ts).
 
-import type { AskedMessage, AskRightsMessage, ConflictMessage, ErrorMessage, ExpertCreationSuggestionMessage, ExpertRightsMessage } from "@isoplan/protocol";
+import type { AskedMessage, AskRightsMessage, ConflictMessage, ErrorMessage, ExpertCreationSuggestionMessage, ExpertCreationSuggestionRepetition, ExpertRightsMessage } from "@isoplan/protocol";
 
 /**
  * The link to the office server. `waiting`: nothing to report yet, so not connected.
@@ -202,13 +202,8 @@ export interface ExpertCreationSuggestionLine {
   repetition?: ExpertCreationSuggestionRepetition;
 }
 
-/**
- * What was done in an expert creation suggestion's area again, which suggested it (isoplan-app#338):
- * its `file` read most was read `readings` times, one reading a turn, over `sessions` sessions
- * (this one among them), with `files` - 1 other files of its area read again too; or its folder was
- * searched `searches` times.
- */
-export type ExpertCreationSuggestionRepetition = { readings: number; sessions: number; file: string; files: number } | { searches: number };
+/** What was done in an expert creation suggestion's area again, which suggested it (isoplan-app#338): the protocol's, its file read most being its folder. */
+export type { ExpertCreationSuggestionRepetition };
 
 /** Why an office-wide suggestion was made: how many sessions in the office, on any machine, searched its folder within the last `searchWindowDays` days. */
 export interface OfficeWideReason {

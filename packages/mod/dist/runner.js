@@ -6509,10 +6509,18 @@ const Area = array(AreaPathSchema).min(1).max(20);
 * and `proof`, as the runner's local model wrote them and the secret check passed them. `why`, the
 * signals that passed their thresholds, each other one 0: `share`, the share of the session's context
 * spent reading and searching the folder (0 to 1), and `tokens`, those tokens, which are one signal;
-* `minutes`, the time spent there; `corrections`, the person's corrections there. `at`: when it was
-* suggested. Of its text, only these leave the machine, under ADR 0004's case for an expert creation
-* suggestion's draft.
+* `minutes`, the time spent there; `corrections`, the person's corrections there. `repetition`
+* (from 0.16.0, a session's suggestion only), what was done in its area again, which suggested it:
+* its `folder`, the file read most, was read in `readings` turns over `sessions` sessions, the
+* area's `files` read again with it; or its folder was searched `searches` times. An older runner
+* sends none, and an older side ignores it. `at`: when it was suggested. Of its text, only these
+* leave the machine, under ADR 0004's case for an expert creation suggestion's draft.
 */
+const ExpertCreationSuggestionRepetitionSchema = union([object({
+	readings: number().int().min(2),
+	sessions: number().int().positive(),
+	files: number().int().positive()
+}), object({ searches: number().int().positive() })]);
 const ExpertCreationSuggestionMessageSchema = object({
 	type: literal$1("expert-creation-suggestion"),
 	v: Version,
@@ -6531,6 +6539,7 @@ const ExpertCreationSuggestionMessageSchema = object({
 		minutes: number().nonnegative(),
 		corrections: number().int().nonnegative()
 	}),
+	repetition: ExpertCreationSuggestionRepetitionSchema.optional(),
 	at: datetime({ offset: true })
 });
 /**
@@ -10784,7 +10793,7 @@ function createClaudeCode(io) {
 				now
 			});
 			const checkouts = {};
-			const { facts, answered, said } = await sessionFacts(c, main, where, workspace, now, config, resolve, place, fail, checkouts, corrected);
+			const { facts, answered, said, readings } = await sessionFacts(c, main, where, workspace, now, config, resolve, place, fail, checkouts, corrected);
 			return {
 				facts,
 				status: null,
@@ -10792,7 +10801,8 @@ function createClaudeCode(io) {
 				workspace,
 				checkouts,
 				answered,
-				said
+				said,
+				readings
 			};
 		} finally {
 			for (const cache of [transcripts, metas]) for (const key of cache.keys()) if (!used.has(key)) cache.delete(key);
@@ -11121,7 +11131,7 @@ function createClaudeCode(io) {
 			lastText: a.t.lastText
 		});
 		const own = [...areaStates].filter(([p]) => p !== c.path && pathKey(p).startsWith(pathKey(sessionDir) + "/")).map(([, s]) => s);
-		const { areas, said } = await areasOf([areaStates.get(c.path), ...own], place, corrected);
+		const { areas, said, readings } = await areasOf([areaStates.get(c.path), ...own], place, corrected);
 		if (areas.length) facts.areas = areas;
 		const answered = (id) => {
 			const r = results.get(id);
@@ -11130,7 +11140,8 @@ function createClaudeCode(io) {
 		return {
 			facts,
 			answered,
-			said
+			said,
+			readings
 		};
 	}
 	async function readMeta(p) {
@@ -11303,15 +11314,19 @@ function newTranscriptState() {
 		area: {
 			tallies: /* @__PURE__ */ new Map(),
 			calls: /* @__PURE__ */ new Map(),
+			readings: /* @__PURE__ */ new Map(),
+			edited: /* @__PURE__ */ new Set(),
+			searched: /* @__PURE__ */ new Set(),
 			names: /* @__PURE__ */ new Map(),
-			turn: newTurn(null),
+			turn: newTurn(null, 0),
 			turns: [],
 			rejected: false,
 			asks: []
 		}
 	};
 }
-const newTurn = (prompt) => ({
+const newTurn = (prompt, n) => ({
+	n,
 	dirs: /* @__PURE__ */ new Map(),
 	corrections: 0,
 	prompt,
@@ -11662,7 +11677,7 @@ const capped = (map, max) => {
 	if (map.size > max) map.delete(map.keys().next().value);
 };
 function areaPath(name, input, cwd) {
-	const absolute = (p) => typeof p !== "string" || !p ? null : isAbsolute(p) ? normalize(p) : cwd ? join(cwd, p) : null;
+	const absolute = (p) => absoluteIn(p, cwd);
 	const here = cwd ? normalize(cwd) : null;
 	if (name === "Grep") return absolute(input.path) ?? here;
 	if (name === "Glob") {
@@ -11676,17 +11691,24 @@ function areaPath(name, input, cwd) {
 	const file = absolute(input.file_path ?? input.notebook_path);
 	return file && dirname(file);
 }
+const absoluteIn = (p, cwd) => typeof p !== "string" || !p ? null : isAbsolute(p) ? normalize(p) : cwd ? join(cwd, p) : null;
 function areaCall(a, c, cwd, at) {
 	if (typeof c.id === "string" && typeof c.name === "string") {
 		a.names.set(c.id, c.name);
 		capped(a.names, MAX_AREA_NAMES);
 	}
 	const kind = Object.hasOwn(AREA_TOOLS, c.name) ? AREA_TOOLS[c.name] : AREA_EDITS.has(c.name) ? "edit" : null;
-	const path = kind && areaPath(c.name, c.input && typeof c.input === "object" ? c.input : {}, cwd);
+	const input = c.input && typeof c.input === "object" ? c.input : {};
+	const path = kind && areaPath(c.name, input, cwd);
 	if (!kind || !path) return;
 	const key = pathKey(path);
 	a.turn.dirs.set(key, path);
-	if (kind === "edit") return;
+	if (kind === "edit") {
+		const file = absoluteIn(input.file_path ?? input.notebook_path, cwd);
+		if (file) a.edited.add(pathKey(file));
+		if (a.edited.size > 500) a.edited.delete(a.edited.values().next().value);
+		return;
+	}
 	let t = a.tallies.get(key);
 	if (!t) a.tallies.set(key, t = {
 		path,
@@ -11695,17 +11717,48 @@ function areaCall(a, c, cwd, at) {
 		chars: 0,
 		ms: 0
 	});
+	const searched = kind === "search" ? createHash("sha256").update(`${c.name}\n${JSON.stringify(input)}`).digest("base64") : null;
+	const again = !!searched && a.searched.has(searched);
 	if (kind === "read") t.reads++;
-	else t.searches++;
+	else if (!again) t.searches++;
+	if (searched) a.searched.add(searched);
 	if (typeof c.id === "string") {
+		const file = kind === "read" ? absoluteIn(input.file_path, cwd) : null;
 		a.calls.set(c.id, {
 			key,
 			at,
 			cwd,
-			search: kind === "search"
+			search: kind === "search",
+			...file && { file },
+			turn: a.turn,
+			...searched && { searched },
+			...again && { again: true }
 		});
 		capped(a.calls, MAX_AREA_CALLS);
 	}
+}
+function areaReading(a, file, turn, chars) {
+	const key = pathKey(file);
+	let r = a.readings.get(key);
+	if (!r) {
+		a.readings.set(key, r = {
+			path: file,
+			last: null,
+			readings: 0,
+			turns: [],
+			firstChars: 0,
+			chars: 0
+		});
+		capped(a.readings, 500);
+	}
+	if (r.last !== turn) {
+		r.last = turn;
+		r.readings++;
+		r.turns.push(turn.n);
+		if (r.turns.length > 50) r.turns.shift();
+	}
+	if (r.readings === 1) r.firstChars += chars;
+	r.chars += chars;
 }
 function resultText$1(content) {
 	if (typeof content === "string") return content;
@@ -11735,9 +11788,11 @@ function areaResult(a, c, at, ran, used) {
 	a.calls.delete(c.tool_use_id);
 	let t = a.tallies.get(call.key);
 	if (!t) return;
+	const counted = !call.again;
 	if (!ran) {
-		if (call.search) t.searches--;
-		else t.reads--;
+		if (!call.search) t.reads--;
+		else if (counted) t.searches--;
+		if (call.searched && counted && a.turn === call.turn) a.searched.delete(call.searched);
 		if (!t.reads && !t.searches && !t.chars && !t.ms) a.tallies.delete(call.key);
 		return;
 	}
@@ -11753,13 +11808,17 @@ function areaResult(a, c, at, ran, used) {
 			ms: 0
 		};
 		a.tallies.set(key, own);
-		t.searches--;
+		if (counted) {
+			t.searches--;
+			own.searches++;
+		}
 		if (!t.reads && !t.searches && !t.chars && !t.ms) a.tallies.delete(call.key);
-		own.searches++;
 		t = own;
 	}
-	t.chars += resultText$1(c.content).length;
+	const chars = resultText$1(c.content).length;
+	t.chars += chars;
 	if (at > call.at) t.ms += at - call.at;
+	if (call.file && c.is_error !== true) areaReading(a, call.file, call.turn, chars);
 }
 const refused = (c, names) => c.is_error === true && resultText$1(c.content).includes(TURNED_DOWN) && !(names.get(c.tool_use_id) ?? "").startsWith("mcp__");
 function turnedDown(ev, content, names) {
@@ -11783,7 +11842,8 @@ function areaPrompt(st, ev, content, at) {
 		});
 		if (a.asks.length > MAX_AREA_ASKS) a.asks.shift();
 	}
-	a.turn = newTurn(person ? text.slice(0, SAID_PROMPT_CHARS) : null);
+	a.turn = newTurn(person ? text.slice(0, SAID_PROMPT_CHARS) : null, before.n + 1);
+	a.searched.clear();
 }
 function endTurn(a, reply) {
 	const t = a.turn;
@@ -11806,8 +11866,8 @@ function ancestors(folder) {
 	return out;
 }
 /**
-* The session's areas from its transcripts' area states, the lead's first, at most MAX_AREAS, and
-* what it said in each. A path is placed as a folder (attribution.ts): its nearest folder that
+* The session's areas from its transcripts' area states, the lead's first, at most MAX_AREAS, what
+* it said in each, and its files' readings (never in a package manager's or git's own folder). A path is placed as a folder (attribution.ts): its nearest folder that
 * exists, in a repo or the workspace. A message `corrected` has judged is settled for good, and its
 * words dropped.
 */
@@ -11878,6 +11938,36 @@ async function areasOf(sources, place, corrected) {
 		...f,
 		tokens: Math.round(chars / 4)
 	})).sort((a, b) => b.tokens - a.tokens || b.ms - a.ms || (a.folder < b.folder ? -1 : a.folder > b.folder ? 1 : 0)).slice(0, 100);
+	const edited = new Set(sources.flatMap(({ area }) => [...area.edited]));
+	const files = /* @__PURE__ */ new Map();
+	for (const [i, { area }] of sources.entries()) for (const [key, r] of area.readings) {
+		if (edited.has(key)) continue;
+		const p = await place.file(r.path).catch(() => null);
+		if (!p || p.file.split("/").some((part) => NOT_AREAS.has(part)) || !AreaPathSchema.safeParse(p.file).success) continue;
+		const k = `${p.project?.id ?? ""}\n${p.file}`;
+		const f = files.get(k);
+		const turns = r.turns.map((n) => `${i}:${n}`);
+		if (f) Object.assign(f, {
+			readings: f.readings + r.readings,
+			turns: [...f.turns, ...turns].slice(-50),
+			chars: f.chars + r.chars
+		});
+		else files.set(k, {
+			file: p.file,
+			...p.project && { project: p.project },
+			readings: r.readings,
+			turns,
+			tokens: 0,
+			tokensAgain: 0,
+			chars: r.chars,
+			firstChars: r.firstChars
+		});
+	}
+	const readings = [...files.values()].map(({ chars, firstChars, ...f }) => ({
+		...f,
+		tokens: Math.round(chars / 4),
+		tokensAgain: Math.round((chars - firstChars) / 4)
+	})).sort((a, b) => b.readings - a.readings || b.tokens - a.tokens || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0)).slice(0, 500);
 	const said = async (project, folder) => {
 		const out = [];
 		for (const { area, lastText } of sources) for (const turn of [...area.turns, {
@@ -11896,7 +11986,8 @@ async function areasOf(sources, place, corrected) {
 	};
 	return {
 		areas,
-		said
+		said,
+		readings
 	};
 }
 //#endregion
@@ -17284,11 +17375,15 @@ function signalsOf(area, window) {
 		corrections: area.corrections
 	};
 }
-/** Whether a folder's signals pass any of their thresholds. */
-const passes = (why, t) => why.share >= t.contextShare || why.tokens >= t.tokens || why.minutes >= t.minutes || why.corrections >= t.corrections;
+/**
+* Whether what was done in an area again passes its thresholds (isoplan-app#338): its file read most
+* was read again `readAgain` times, or reading its files again took `contextShare` of the context
+* window (`why.share`, from reading again alone); or the folder was searched `searches` times.
+*/
+const repeated = (r, why, t) => "searches" in r ? r.searches >= t.searches : r.readings - 1 >= t.readAgain || why.share >= t.contextShare;
 /** The signals a suggestion gives (ADR 0004): those that passed their thresholds, each other one 0. Share and tokens are one signal, what reading and searching there took. */
 function passed(why, t) {
-	const spent = why.share >= t.contextShare || why.tokens >= t.tokens;
+	const spent = why.share >= t.contextShare;
 	return {
 		share: spent ? why.share : 0,
 		tokens: spent ? why.tokens : 0,
@@ -17296,8 +17391,47 @@ function passed(why, t) {
 		corrections: why.corrections >= t.corrections ? why.corrections : 0
 	};
 }
+/** A folder's searches in itself: a search counts in every folder above its own too (the session's area facts), so those of the folders just inside it are taken off. */
+function ownSearches(areas, area) {
+	const project = area.project?.id.toLowerCase();
+	const inside = areas.filter((a) => a.project?.id.toLowerCase() === project && a.folder.startsWith(area.folder + "/") && !a.folder.slice(area.folder.length + 1).includes("/"));
+	return Math.max(0, area.searches - inside.reduce((n, a) => n + a.searches, 0));
+}
+/** The repo's top folder, or a folder or file at its top (docs, src, packages, package.json): never an area of one expert. */
+const topLevel = (folder) => !folder.includes("/");
+const WILD = /[*?[\]{}]/;
+/** An area path's part before its first wildcard part, as the protocol's areaCovers reads it: `.` for one that starts with a wildcard. */
+const areaBase = (area) => {
+	const parts = area.split("/");
+	const wild = parts.findIndex((part) => WILD.test(part));
+	return (wild < 0 ? parts : parts.slice(0, wild)).join("/") || ".";
+};
+/** Why a path can't be one expert's area, or in one, by the path alone; null when it can. */
+function whyNotByPath(p) {
+	if (topLevel(p)) return "it is the repo's top folder, or a folder or file at its top, too broad for one expert";
+	if (WILD.test(p)) return "its path has a character an area reads as a glob ([ ] { } * ?), so its expert would cover more than it";
+	return null;
+}
+/** Whether `areas` (an expert's) cover `p`, or one of them is `p` or inside it. */
+const nearAreas = (areas, p) => areaCovers(areas, p) || areas.some((a) => areaCovers([p], areaBase(a)));
+/** About how many tokens the files of `paths` in `checkout` total (files, and folders whose files count, dot entries and node_modules left out), as bytes / 4; once past `max`, a number past it, without reading on. */
+async function areaTokens(checkout, paths, max) {
+	let bytes = 0;
+	const queue = [...paths];
+	while (queue.length && bytes / 4 <= max) {
+		const rel = queue.shift();
+		const full = path.join(checkout, rel);
+		const st = await fs.stat(full).catch(() => null);
+		if (st?.isFile()) bytes += st.size;
+		else if (st?.isDirectory()) {
+			for (const e of await fs.readdir(full, { withFileTypes: true }).catch(() => [])) if (!e.name.startsWith(".") && e.name !== "node_modules") queue.push(rel === "." ? e.name : `${rel}/${e.name}`);
+		}
+	}
+	return Math.ceil(bytes / 4);
+}
 const within$1 = (folder, other) => other === "." || folder === other || folder.startsWith(other + "/");
 const near = (a, b) => within$1(a, b) || within$1(b, a);
+const parentOf = (p) => p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : ".";
 /** The addresses Isoplan's own clone of a project is made from where this computer has no checkout, in order: https from its id, then ssh; none for a repo with no remote. */
 function cloneUrls(project) {
 	if (project.startsWith("local:")) return [];
@@ -17420,7 +17554,8 @@ function createExpertCreationSuggestions(o) {
 			folder: r.folder,
 			url: reviewUrl(server, r.id),
 			why: r.message.why,
-			...r.officeWideReason && { officeWideReason: r.officeWideReason }
+			...r.officeWideReason && { officeWideReason: r.officeWideReason },
+			...r.message.repetition && { repetition: r.message.repetition }
 		};
 	};
 	const tell = (r, line) => r.bare ? o.hooked(r.bare)?.send(line) : void 0;
@@ -17503,21 +17638,30 @@ function createExpertCreationSuggestions(o) {
 		if (!(st.ready && o.offices[index].send(message))) st.queue.push(message);
 	}
 	const expertProjects = /* @__PURE__ */ new Map();
-	async function coveredHere(project, folder) {
+	async function expertAreasHere(project) {
+		const out = [];
 		for (const e of o.experts()) {
-			if (!e.areas?.length || !areaCovers(e.areas, folder)) continue;
+			if (!e.areas?.length) continue;
 			let hit = expertProjects.get(e.repo);
 			if (!hit || now() - hit.at > PROJECT_MS) expertProjects.set(e.repo, hit = {
 				at: now(),
 				project: o.projectOf(e.repo).catch(() => null)
 			});
-			if (await hit.project === project) return true;
+			if (await hit.project === project) out.push(...e.areas);
 		}
-		return false;
+		return out;
 	}
 	const retryable = (r, at) => !!r?.refusedAt && at - r.refusedAt >= 36e5 && Object.values(r.offices).every((s) => s === "refused");
-	const alreadySuggestedNear = (session, project, folder, at) => saved.foldersAlreadySuggested.some((x) => x.session === session && x.project === project && near(folder, x.folder) && !(x.expertCreationSuggestionId && retryable(saved.expertCreationSuggestions.find((r) => r.id === x.expertCreationSuggestionId), at)));
-	const heldNear = (session, project, folder, at) => (saved.held = saved.held.filter((x) => x.until > at)).some((x) => x.session === session && x.project === project && near(folder, x.folder));
+	const alreadySuggestedNear = (session, project, folder, at) => saved.foldersAlreadySuggested.some((x) => (session === null || x.session === session) && x.project === project && near(folder, x.folder) && !(x.expertCreationSuggestionId && retryable(saved.expertCreationSuggestions.find((r) => r.id === x.expertCreationSuggestionId), at)));
+	const heldNear = (session, project, folder, at) => (saved.held = saved.held.filter((x) => x.until > at)).some((x) => (session === null || x.session === session) && x.project === project && near(folder, x.folder));
+	const free = async (session, project, p, at) => !whyNotByPath(p) && !alreadySuggestedNear(session, project, p, at) && !heldNear(session, project, p, at) && !offices.some((f) => isDismissed(f.dismissals, project, p, at)) && !nearAreas(await expertAreasHere(project), p);
+	async function whyNotOneExpertsArea(project, folder, checkout, t) {
+		const byPath = whyNotByPath(folder);
+		if (byPath) return byPath;
+		if (nearAreas(await expertAreasHere(project), folder)) return "an expert on this computer covers it, or has its area inside it";
+		if (await areaTokens(checkout, [folder], t.groundingBudgetTokens) > t.groundingBudgetTokens) return `its files total more than ${t.groundingBudgetTokens} tokens, more than one expert's grounding reads`;
+		return null;
+	}
 	const names = (s) => new Set([s.project, ...s.areas.map((a) => a.project ?? s.project)].map((p) => p.id.toLowerCase()));
 	const mayTell = (session, project) => [...latest.get(session)?.values() ?? []].filter((p) => names(p).has(project)).map((p) => p.server);
 	const couldBeSuggested = (bare) => [...latest.values()].some((byOffice) => [...byOffice.values()].some((p) => p.bare === bare && !!offices[indexOf(p.server)]?.ready));
@@ -17542,12 +17686,13 @@ function createExpertCreationSuggestions(o) {
 			say(`no expert is suggested on ${where}: this computer has no checkout of the repo to draft it from`);
 			return null;
 		}
-		const named = await o.scan(a.folder);
+		const area = a.area ?? [a.folder];
+		const named = await o.scan([a.folder, ...area].join("\n"));
 		if (named) {
 			say(`no expert is suggested on a folder of ${a.project.name}: its path matches the secret pattern "${named}"`);
 			return null;
 		}
-		const files = await folderFiles(a.checkout, a.folder);
+		const files = a.area ?? await folderFiles(a.checkout, a.folder);
 		const excerpts = await folderExcerpts(a.checkout, files);
 		if (!excerpts.length) {
 			say(`no expert is suggested on ${where}: none of its files could be read to draft it from`);
@@ -17566,6 +17711,7 @@ function createExpertCreationSuggestions(o) {
 		}
 		const matched = await o.scan([
 			a.folder,
+			...area,
 			draft.key,
 			draft.subject,
 			draft.proof.question,
@@ -17588,9 +17734,10 @@ function createExpertCreationSuggestions(o) {
 			scope: a.scope,
 			key: draft.key,
 			subject: draft.subject,
-			area: [a.folder],
+			area,
 			proof: draft.proof,
 			why: passed(a.why, t),
+			...a.repetition && { repetition: a.repetition },
 			at: new Date(now()).toISOString()
 		};
 		const parsed = ExpertCreationSuggestionMessageSchema.safeParse(message);
@@ -17619,62 +17766,137 @@ function createExpertCreationSuggestions(o) {
 		const window = windowOf(s);
 		const at = now();
 		forget(t, at);
-		const passing = s.areas.map((area) => ({
-			area,
-			project: area.project ?? s.project,
-			why: signalsOf(area, window)
-		})).filter((c) => passes(c.why, t));
-		const deepest = passing.filter((c) => !passing.some((d) => d.project.id.toLowerCase() === c.project.id.toLowerCase() && d.area.folder !== c.area.folder && areaCovers([c.area.folder], d.area.folder)));
-		const candidates = [];
-		for (const { area, project, why } of deepest) {
-			const id = project.id.toLowerCase();
-			if (alreadySuggestedNear(s.session, id, area.folder, at) || heldNear(s.session, id, area.folder, at)) continue;
-			if (offices.some((f) => isDismissed(f.dismissals, id, area.folder, at))) continue;
-			if (await coveredHere(id, area.folder)) continue;
-			candidates.push({
-				area,
-				project,
-				why
-			});
-		}
-		const depth = (folder) => folder.split("/").length;
-		const best = candidates.sort((a, b) => depth(b.area.folder) - depth(a.area.folder) || b.area.tokens - a.area.tokens)[0];
+		const best = await readAgain(s, index, window, t, at) ?? await searchedAgain(s, index, window, t, at);
 		if (!best) return;
-		const { area, project, why } = best;
+		const { project, folder, area, why, repetition, checkout } = best;
 		const id = project.id.toLowerCase();
-		const checkout = area.project ? await o.checkout(index, project).catch(() => null) : s.checkout;
-		const said = await s.said(area.project ? area.project.id : null, area.folder).catch(() => []);
+		const own = project === s.project;
+		const said = await s.said(own ? null : project.id, area ? parentOf(folder) : folder).catch(() => []);
 		const message = await drafted({
 			id: randomBytes(12).toString("base64url"),
 			scope: "session",
 			session: s.session,
 			project,
-			folder: area.folder,
+			folder,
 			checkout,
 			said,
-			why
+			why,
+			repetition,
+			...area && { area }
 		}, t);
 		if (closed) return;
+		const paths = [.../* @__PURE__ */ new Set([folder, ...area ?? []])];
 		if (!message) {
-			saved.held.push({
+			for (const p of paths) saved.held.push({
 				session: s.session,
 				project: id,
-				folder: area.folder,
+				folder: p,
 				until: now() + RETRY_MS
 			});
 			save();
 			return;
 		}
-		saved.foldersAlreadySuggested.push({
+		for (const p of paths) saved.foldersAlreadySuggested.push({
 			session: s.session,
 			project: id,
-			folder: area.folder,
+			folder: p,
 			at,
 			expertCreationSuggestionId: message.id
 		});
 		saved.expertCreationSuggestions.push(record(message, s.bare, /* @__PURE__ */ new Set([s.server, ...mayTell(s.session, id)])));
 		await save();
 		o.offices.forEach((_, i) => flush(i));
+	}
+	async function readAgain(s, index, window, t, at) {
+		const sessionPasses = [s, ...[...latest.values()].map((byOffice) => byOffice.get(s.server)).filter((x) => !!x && x.session !== s.session)];
+		const keyOf = (r, of) => `${(r.project ?? of.project).id.toLowerCase()}\n${r.file}`;
+		const across = /* @__PURE__ */ new Map();
+		for (const p of sessionPasses) for (const r of p.readings) {
+			const x = across.get(keyOf(r, p)) ?? {
+				readings: 0,
+				sessions: 0,
+				turns: /* @__PURE__ */ new Set()
+			};
+			for (const turn of r.turns) x.turns.add(`${p.session}\n${turn}`);
+			across.set(keyOf(r, p), {
+				readings: x.readings + r.readings,
+				sessions: x.sessions + 1,
+				turns: x.turns
+			});
+		}
+		const again = s.readings.map((r) => ({
+			r,
+			project: r.project ?? s.project,
+			...across.get(keyOf(r, s))
+		})).filter((x) => x.readings >= 2);
+		again.sort((a, b) => b.readings - a.readings || b.sessions - a.sessions || b.r.tokensAgain - a.r.tokensAgain);
+		const together = (a, b) => [...a.turns].filter((turn) => b.turns.has(turn)).length;
+		const projects = [...new Map(again.map((x) => [x.project.id.toLowerCase(), x.project])).values()];
+		for (const project of projects) {
+			const id = project.id.toLowerCase();
+			const checkout = project === s.project ? s.checkout : await o.checkout(index, project).catch(() => null);
+			if (!checkout) continue;
+			const files = [];
+			let total = 0;
+			for (const x of again) {
+				if (files.length >= 20) break;
+				if (x.project.id.toLowerCase() !== id || files[0] && together(files[0], x) < 2 || !await free(null, id, x.r.file, at)) continue;
+				const tokens = await areaTokens(checkout, [x.r.file], t.groundingBudgetTokens);
+				if (tokens === 0 || total + tokens > t.groundingBudgetTokens) continue;
+				files.push(x);
+				total += tokens;
+			}
+			const first = files[0];
+			if (!first) continue;
+			const tokensAgain = files.reduce((n, x) => n + x.r.tokensAgain, 0);
+			const why = {
+				share: window ? Math.min(1, tokensAgain / window) : 0,
+				tokens: tokensAgain,
+				minutes: 0,
+				corrections: 0
+			};
+			const repetition = {
+				readings: first.readings,
+				sessions: first.sessions,
+				files: files.length
+			};
+			if (repeated(repetition, why, t)) return {
+				project,
+				folder: first.r.file,
+				area: files.map((x) => x.r.file),
+				why,
+				repetition,
+				checkout
+			};
+		}
+		return null;
+	}
+	async function searchedAgain(s, index, window, t, at) {
+		const depth = (folder) => folder.split("/").length;
+		const passing = s.areas.map((area) => ({
+			area,
+			project: area.project ?? s.project,
+			repetition: { searches: ownSearches(s.areas, area) }
+		})).filter((c) => !topLevel(c.area.folder) && repeated(c.repetition, signalsOf(c.area, window), t)).sort((a, b) => depth(b.area.folder) - depth(a.area.folder) || b.area.tokens - a.area.tokens);
+		for (const { area, project, repetition } of passing) {
+			const id = project.id.toLowerCase();
+			if (!await free(s.session, id, area.folder, at)) continue;
+			const checkout = area.project ? await o.checkout(index, project).catch(() => null) : s.checkout;
+			if (!checkout || await whyNotOneExpertsArea(id, area.folder, checkout, t)) continue;
+			return {
+				project,
+				folder: area.folder,
+				area: null,
+				why: {
+					...signalsOf(area, window),
+					share: 0,
+					tokens: 0
+				},
+				repetition,
+				checkout
+			};
+		}
+		return null;
 	}
 	async function draftOfficeWideExpertCreationSuggestion(index, m) {
 		const server = o.offices[index].server;
@@ -17696,7 +17918,9 @@ function createExpertCreationSuggestions(o) {
 					corrections: 0
 				};
 				const t = await settings();
-				message = await drafted({
+				const unfit = checkout ? await whyNotOneExpertsArea(project, m.folder, checkout, t) : null;
+				if (unfit) say(`no office-wide expert is suggested on ${m.folder} of ${m.project.name} (${m.request}): ${unfit}`);
+				else message = await drafted({
 					id: m.request,
 					scope: "office",
 					session: m.sessions[0],
@@ -21062,14 +21286,16 @@ async function reporting(o, c) {
 				text: `couldn't send this session's facts to ${run.office.server}: ${await c.message(err)}`
 			});
 		}
-		if (o.areas && facts.areas?.length) {
+		if (o.areas && (facts.areas?.length || read.readings?.length)) {
 			const model = facts.agents.find((a) => a.id === facts.session.lead)?.usage?.model ?? null;
 			for (const run of taking) {
 				const link = run.gate.current();
 				if (!run.home || !link) continue;
 				const welcome = link.projects();
-				const areas = facts.areas.filter((a) => a.project ? !!welcome?.has(a.project.id.toLowerCase()) : !workspace);
-				if (!areas.length) continue;
+				const told = (a) => a.project ? !!welcome?.has(a.project.id.toLowerCase()) : !workspace;
+				const areas = (facts.areas ?? []).filter(told);
+				const readings = (read.readings ?? []).filter(told);
+				if (!areas.length && !readings.length) continue;
 				try {
 					o.areas({
 						server: run.office.server,
@@ -21080,7 +21306,8 @@ async function reporting(o, c) {
 						window: contextWindow,
 						model,
 						areas,
-						said: read.said ?? (async () => [])
+						said: read.said ?? (async () => []),
+						readings
 					});
 				} catch (err) {
 					emit({

@@ -1161,6 +1161,17 @@ describe("expert creation suggestions", () => {
     }
   });
 
+  test("an expert creation suggestion may say what was done in its area again (0.16.0): a file read again in whole counts of readings, sessions and files, or a folder's searches; one without parses, as an older runner sends it", () => {
+    for (const repetition of [{ readings: 4, sessions: 3, files: 2 }, { searches: 6 }]) {
+      const message = { ...expertCreationSuggestion, repetition };
+      expect(parseDataLayerMessage(message)).toEqual({ ok: true, message });
+    }
+    for (const wrong of [{ readings: 1, sessions: 1, files: 1 }, { readings: 4, sessions: 0, files: 1 }, { readings: 4.5, sessions: 3, files: 1 }, { searches: 0 }, { readings: 4 }]) {
+      expect(parseDataLayerMessage({ ...expertCreationSuggestion, repetition: wrong })).toMatchObject({ ok: false, kind: "invalid" });
+    }
+    expect(parseDataLayerMessage(expertCreationSuggestion)).toMatchObject({ ok: true });
+  });
+
   test("a dismissal lasts until a time, or forever, and exactly one of the two", () => {
     const [snoozed, forever] = valid["expert-creation-suggestion-dismissals"].dismissals;
     const { until: _, ...neither } = snoozed!;

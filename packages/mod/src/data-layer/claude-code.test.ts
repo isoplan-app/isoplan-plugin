@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { MAX_REPORT_LENGTH } from "@isoplan/protocol";
+import { FactsSchema, MAX_REPORT_LENGTH } from "@isoplan/protocol";
 import { expect, test } from "vitest";
 import { loadPatterns } from "../runner/scan.js";
 import { createClaudeCode } from "./claude-code.js";
@@ -1078,7 +1078,7 @@ test("areas: a subagent's calls count to its session's areas, and still do once 
   expect(later.areas).toEqual(expected);
 });
 
-test("readings: each file Read read counts one reading a turn, however often that turn read it, a subagent's too, with what its reads took in all and past its first reading; a read that failed, or one in node_modules, is none", async () => {
+test("readings: each file Read read counts one reading a turn, however often that turn read it, a subagent's too, naming those turns, with what its reads took in all and past its first reading; a read that failed, or one in node_modules, is none", async () => {
   const { home, main } = office();
   const adr = path.join(main, "docs", "adr");
   fs.mkdirSync(path.join(main, "node_modules", "zod"), { recursive: true });
@@ -1103,12 +1103,53 @@ test("readings: each file Read read counts one reading a turn, however often tha
   ]);
   agent(home, "s", "a1", { agentType: "Explore" }, [line.user(main, "read the ADR", 50), call(main, "r7", "Read", { file_path: file }, 40), result(main, "r7", "x".repeat(8000), 39)], { age: 39 });
   const r = await sourceIn(home)("s");
+  // The lead's first and second turns, and the subagent's first.
   expect(r.readings).toEqual([
-    { file: "docs/adr/0004.md", readings: 3, tokens: 6000, tokensAgain: 4000 },
-    { file: "README.md", readings: 1, tokens: 100, tokensAgain: 0 },
+    { file: "docs/adr/0004.md", readings: 3, turns: ["0:1", "0:2", "1:1"], tokens: 6000, tokensAgain: 4000 },
+    { file: "README.md", readings: 1, turns: ["0:1"], tokens: 100, tokensAgain: 0 },
   ]);
-  // Never sent.
-  expect(JSON.stringify(r.facts)).not.toContain("readings");
+  // Never sent: the facts hold only what the protocol's facts define, which has no readings.
+  expect(FactsSchema.parse(r.facts)).toEqual(r.facts);
+});
+
+test("readings: a file the session's agents edited has none, however often they read it", async () => {
+  const { home, main } = office();
+  const src = path.join(main, "src");
+  fs.mkdirSync(src, { recursive: true });
+  const feature = path.join(src, "feature.ts");
+  const notes = path.join(src, "notes.ts");
+  session(home, "s", [
+    ...[0, 1, 2, 3].flatMap((n) => [
+      line.user(main, `change the feature, step ${n}`, 100 - 10 * n),
+      call(main, `r${n}`, "Read", { file_path: feature }, 99 - 10 * n),
+      result(main, `r${n}`, "x".repeat(400), 99 - 10 * n),
+      call(main, `e${n}`, "Edit", { file_path: feature, old_string: "a", new_string: "b" }, 98 - 10 * n),
+      result(main, `e${n}`, "ok", 98 - 10 * n),
+      call(main, `n${n}`, "Read", { file_path: notes }, 97 - 10 * n),
+      result(main, `n${n}`, "y".repeat(400), 97 - 10 * n),
+    ]),
+  ]);
+  expect((await sourceIn(home)("s")).readings!.map((x) => [x.file, x.readings])).toEqual([["src/notes.ts", 4]]);
+});
+
+test("areas: a search made again as it was in the same turn counts once; in another turn, or after it was turned down, it counts again", async () => {
+  const { home, main } = office();
+  const src = path.join(main, "src", "parser");
+  fs.mkdirSync(src, { recursive: true });
+  const grep = (id: string, age: number, pattern = "parse") => [call(main, id, "Grep", { pattern, path: src }, age), result(main, id, "z".repeat(40), age)];
+  session(home, "s", [
+    line.user(main, "where is parsing?", 100),
+    ...grep("g1", 95),
+    ...grep("g2", 94),
+    ...grep("g3", 93),
+    ...grep("g4", 92, "lex"),
+    line.user(main, "and again?", 80),
+    ...grep("g5", 75),
+    call(main, "g6", "Grep", { pattern: "token", path: src }, 70),
+    result(main, "g6", REFUSAL, 70, { isError: true, denial: "user-rejected" }),
+    ...grep("g7", 65, "token"),
+  ]);
+  expect((await factsOf(home, "s")).areas!.find((a) => a.folder === "src/parser")).toMatchObject({ searches: 4 });
 });
 
 test("areas: an interruption, a turned-down call and a message the local model calls a correction each count once in every folder their turn worked in", async () => {

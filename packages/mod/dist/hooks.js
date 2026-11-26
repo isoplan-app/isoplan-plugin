@@ -77,15 +77,28 @@ const expertCreationSuggestionStatusLineText = (line) => `${article(line.name)} 
 /** The one transcript line of a suggestion: why it was made, and where to review it. */
 function expertCreationSuggestionTranscriptText(line) {
 	const where = folderWords(line.folder);
+	const review = `Review it: ${line.url} (or type /isoplan:review-expert-suggestion)`;
 	const wide = line.officeWideReason;
 	if (wide) {
 		const when = wide.searchWindowDays === 7 ? "this week" : `in the last ${wide.searchWindowDays} days`;
-		return `Isoplan: ${wide.searchedBySessions} sessions ${when} searched ${where}. ${article(line.name)} ${line.name} could answer questions about ${where} without searching it again. Review it: ${line.url} (or type /isoplan:review-expert-suggestion)`;
+		return `Isoplan: ${wide.searchedBySessions} sessions ${when} searched ${where}. ${article(line.name)} ${line.name} could answer questions about ${where} without searching it again. ${review}`;
 	}
 	const { minutes, share, tokens: used, corrections } = line.why;
+	const again = line.repetition;
+	if (again) {
+		const m = Math.round(minutes);
+		const spent = [m >= 1 ? `about ${m} minute${m === 1 ? "" : "s"}` : null, share >= .01 ? `${Math.round(share * 100)}% of ${"sessions" in again && again.sessions > 1 ? "this session's" : "its"} context` : null].filter((x) => x !== null);
+		const more = `${spent.length ? `, ${spent.join(" and ")}` : ""}${corrections > 0 ? `, and you corrected it ${times(corrections)} there` : ""}`;
+		if ("searches" in again) return `Isoplan: this session searched ${where} ${times(again.searches)}${more}. ${article(line.name)} ${line.name} could answer questions about ${where} without searching it again. ${review}`;
+		const others = again.files - 1;
+		const read = again.sessions > 1 ? `${where} was read ${times(again.readings)} in ${again.sessions} sessions` : `this session read ${where} ${times(again.readings)}`;
+		const withIt = others ? `, and ${others} other file${others === 1 ? " was" : "s were"} read again with it` : "";
+		const about = others ? `${where} and ${others === 1 ? "the other file" : `the ${others} other files`}` : where;
+		return `Isoplan: ${read}${more}${withIt}. ${article(line.name)} ${line.name} could answer questions about ${about} without reading ${others ? "them" : "it"} again. ${review}`;
+	}
 	const m = Math.round(minutes);
 	const spent = [m >= 1 ? `about ${m} minute${m === 1 ? "" : "s"}` : null, share >= .01 ? `${Math.round(share * 100)}% of its context` : used > 0 ? `about ${tokens(used)} tokens` : null].filter((x) => x !== null);
-	return `Isoplan: ${spent.length ? `this session has spent ${spent.join(" and ")} on ${where}${corrections > 0 ? `, and you corrected it ${times(corrections)} there` : ""}` : corrections > 0 ? `you corrected this session ${times(corrections)} while it worked in ${where}` : `this session has searched ${where}`}. ${article(line.name)} ${line.name} could answer questions about ${where} without searching it again. Review it: ${line.url} (or type /isoplan:review-expert-suggestion)`;
+	return `Isoplan: ${spent.length ? `this session has spent ${spent.join(" and ")} on ${where}${corrections > 0 ? `, and you corrected it ${times(corrections)} there` : ""}` : corrections > 0 ? `you corrected this session ${times(corrections)} while it worked in ${where}` : `this session has searched ${where}`}. ${article(line.name)} ${line.name} could answer questions about ${where} without searching it again. ${review}`;
 }
 /** The note on a later tool result once the expert created from the session's suggestion is ready. */
 const readyNoteText = (line) => `Isoplan: the ${line.name} is ready. Ask it with ask_expert, expert "${line.key}", before you search ${folderWords(line.folder)} again.`;

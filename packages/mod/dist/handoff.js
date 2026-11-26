@@ -6473,10 +6473,18 @@ const Area = array(AreaPathSchema).min(1).max(20);
 * and `proof`, as the runner's local model wrote them and the secret check passed them. `why`, the
 * signals that passed their thresholds, each other one 0: `share`, the share of the session's context
 * spent reading and searching the folder (0 to 1), and `tokens`, those tokens, which are one signal;
-* `minutes`, the time spent there; `corrections`, the person's corrections there. `at`: when it was
-* suggested. Of its text, only these leave the machine, under ADR 0004's case for an expert creation
-* suggestion's draft.
+* `minutes`, the time spent there; `corrections`, the person's corrections there. `repetition`
+* (from 0.16.0, a session's suggestion only), what was done in its area again, which suggested it:
+* its `folder`, the file read most, was read in `readings` turns over `sessions` sessions, the
+* area's `files` read again with it; or its folder was searched `searches` times. An older runner
+* sends none, and an older side ignores it. `at`: when it was suggested. Of its text, only these
+* leave the machine, under ADR 0004's case for an expert creation suggestion's draft.
 */
+const ExpertCreationSuggestionRepetitionSchema = union([object({
+	readings: number().int().min(2),
+	sessions: number().int().positive(),
+	files: number().int().positive()
+}), object({ searches: number().int().positive() })]);
 const ExpertCreationSuggestionMessageSchema = object({
 	type: literal("expert-creation-suggestion"),
 	v: Version,
@@ -6495,6 +6503,7 @@ const ExpertCreationSuggestionMessageSchema = object({
 		minutes: number().nonnegative(),
 		corrections: number().int().nonnegative()
 	}),
+	repetition: ExpertCreationSuggestionRepetitionSchema.optional(),
 	at: datetime({ offset: true })
 });
 /**
