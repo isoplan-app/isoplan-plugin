@@ -4,9 +4,14 @@
 // except the judge, which runs in the expert's folder:
 //
 //   trunk       claude -p --session-id <trunk> --model <m> READ_ONLY STREAM          grounding, two turns
-//   append      claude -p --resume <trunk> --model <m> READ_ONLY STREAM              a learned note, one turn
-//   fork        claude -p --resume <trunk> --fork-session --no-session-persistence --model <m> READ_ONLY STREAM
+//   append      claude -p --resume <trunk> --model <m> READ_ONLY STREAM              what forks learned, one turn
+//   fork        claude -p --resume <trunk> --fork-session --no-session-persistence [--resume-session-at <uuid>] --model <m> READ_ONLY STREAM
 //                                                                                      a question: junior, senior or proof
+//
+// A fork resumes its trunk only up to the uuid the runner recorded after its last turn on it
+// (`--resume-session-at`, a flag Claude Code doesn't document), so it reads the trunk as the runner
+// left it, even while an addition is writing to it (isoplan-app#366, D18; checked by
+// expert-fork-during-addition.e2e.test.ts). With no uuid recorded it resumes the whole trunk.
 //   judge       claude -p --no-session-persistence --tools "" ... --model <judge> STREAM   the proof's judge, no tools
 //
 // - Read-only is enforced, not asked for: only Read, Grep, Glob and Agent (the subagent tool, for
@@ -49,10 +54,13 @@ const EXIT_GRACE_MS = 5000;
 
 /** A new trunk's grounding: it is saved under `trunk`. */
 export const trunkArgs = (trunk: string, model: string) => ["-p", "--session-id", trunk, "--model", model, ...READ_ONLY, ...STREAM];
-/** One turn appended to a trunk: a learned note. */
+/** One turn added to a trunk: what forks learned. */
 export const appendArgs = (trunk: string, model: string) => ["-p", "--resume", trunk, "--model", model, ...READ_ONLY, ...STREAM];
-/** A fork of a trunk for one question, never saved. */
-export const expertForkArgs = (trunk: string, model: string) => ["-p", "--resume", trunk, "--fork-session", "--no-session-persistence", "--model", model, ...READ_ONLY, ...STREAM];
+/** A fork of a trunk for one question, never saved: the trunk up to `at`, its entry's uuid, when it is given. */
+export const expertForkArgs = (trunk: string, model: string, at?: string | null) => ["-p", "--resume", trunk, "--fork-session", "--no-session-persistence", ...(at ? ["--resume-session-at", at] : []), "--model", model, ...READ_ONLY, ...STREAM];
+
+/** Whether a failed fork's words say this Claude Code doesn't take `--resume-session-at`. */
+export const refusedResumeAt = (detail: string) => detail.includes("resume-session-at");
 /** The proof's judge: no tools, never saved. */
 export const judgeArgs = (model: string) => ["-p", "--no-session-persistence", "--tools", "", "--setting-sources", "", ...NO_HOOKS, "--strict-mcp-config", "--permission-mode", "dontAsk", "--model", model, ...STREAM];
 

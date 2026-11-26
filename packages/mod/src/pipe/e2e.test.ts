@@ -24,7 +24,7 @@ import { reportSession, sessionLog } from "../data-layer/report-session.js";
 import type { DataLayerLine } from "../lines.js";
 import { watchSessions } from "../runner/reporting.js";
 import { loadPatterns } from "../runner/scan.js";
-import { BASE, C1, FAKE_CLAUDE, fakeGit, type Rule } from "../runner/expert-fixture.js";
+import { BASE, C1, FAKE_CLAUDE, fakeGit, NOTHING_TIED, type Rule } from "../runner/expert-fixture.js";
 import { createExpertInstanceSetUpOffers } from "../runner/expert-instance-set-up-offer.js";
 import { createExpertInstances } from "../runner/expert-instance.js";
 import { createExpertQuestionsAskedHere, type ExpertQuestionsAskedHereSettings } from "../runner/expert-questions-asked-here.js";
@@ -150,6 +150,7 @@ async function expertsHere(claudeDir: string, server: string, repo: string, rule
   const scan = async () => null;
   const account = { id: "claude:sam", name: "Sam" };
   const experts = createExperts({ expertsDir: path.join(isoplanDir, "experts"), instancesDir: path.join(isoplanDir, "expert-instances"), logsDir: path.join(isoplanDir, "logs"), projectsDir: path.join(root, "expert-projects"), appDir: modDir, binary: async () => bin, settings, scan, git: fakeGit(repo).git, gitTimeoutMs: async () => 5000, env: { ...process.env, FAKE_RULES: rulesFile, FAKE_LOG: claudeLog }, log: () => {} });
+  experts.bindWhatWasLearned(() => NOTHING_TIED);
   const instances = createExpertInstances({ experts, isoplanDir, scan, log: () => {}, checkoutOf: async () => repo, clone: async () => ({ problem: "no clone in this test" }) });
   const store = createExpertRecordsPerOffice({ file: expertRecordsPerOfficePath(isoplanDir), keptHours: async () => 144, log: () => {} });
   await store.load();

@@ -35,9 +35,14 @@ export interface ExpertFile {
   window?: number;
   /** Globs of the area it claims: kept for speaking up first, unused in slice 1. */
   areas: string[];
+  /** The most tokens of what other instances learned one fork's question carries, and a new generation's grounding (isoplan-app#366, D17); absent is the protocol's default. */
+  learnedElsewhereTokensPerQuestion?: number;
 }
 
 export type ParsedExpert = { ok: true; expert: ExpertFile; unknown: string[] } | { ok: false; field: string; reason: string };
+
+/** The most `learnedElsewhereTokensPerQuestion` may be, as the protocol takes it. */
+const MAX_LEARNED_ELSEWHERE_TOKENS = 1_000_000;
 
 /** What an expert file leaves out. */
 export const EXPERT_DEFAULTS = {
@@ -48,7 +53,7 @@ export const EXPERT_DEFAULTS = {
   caps: { perAskerPerDay: 30, openPerAsker: 3, tokenBudgetPerDay: 2_000_000 },
 } as const;
 
-const KNOWN = ["version", "name", "repo", "subject", "model", "promoteAtTokens", "forkTimeLimitMinutes", "groundingTimeLimitMinutes", "fetchSeconds", "maxForks", "caps", "proof", "window", "areas"];
+const KNOWN = ["version", "name", "repo", "subject", "model", "promoteAtTokens", "forkTimeLimitMinutes", "groundingTimeLimitMinutes", "fetchSeconds", "maxForks", "caps", "proof", "window", "areas", "learnedElsewhereTokensPerQuestion"];
 const KNOWN_CAPS = ["perAskerPerDay", "openPerAsker", "tokenBudgetPerDay"];
 const KNOWN_PROOF = ["question", "answer"];
 
@@ -136,7 +141,9 @@ function parse(value: unknown, base: string): ParsedExpert {
     proof: { question: words("proof.question", o.proof.question), answer: words("proof.answer", o.proof.answer) },
     ...(o.window !== undefined && { window: whole("window", o.window, 100_000) }),
     areas: (o.areas as string[] | undefined) ?? [],
+    ...(o.learnedElsewhereTokensPerQuestion !== undefined && { learnedElsewhereTokensPerQuestion: whole("learnedElsewhereTokensPerQuestion", o.learnedElsewhereTokensPerQuestion, 1) }),
   };
+  if ((expert.learnedElsewhereTokensPerQuestion ?? 0) > MAX_LEARNED_ELSEWHERE_TOKENS) throw new Bad("learnedElsewhereTokensPerQuestion", `must be at most ${MAX_LEARNED_ELSEWHERE_TOKENS.toLocaleString("en")}`);
   const unknown = [
     ...Object.keys(o).filter((k) => !KNOWN.includes(k)),
     ...Object.keys(caps).filter((k) => !KNOWN_CAPS.includes(k)).map((k) => `caps.${k}`),

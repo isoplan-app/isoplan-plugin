@@ -23,7 +23,9 @@
 // - Its listing (A9): this server's instances alone, worked out after each directory, on every change
 //   and every `checkMs`; the first on each connection always goes, then only one that differs. Each
 //   working-out runs after the one before, so they go out in order. While git can't read an expert
-//   repo's remote (`home` rejects), neither its listing nor that expert's definition changes.
+//   repo's remote (`home` rejects), neither its listing nor that expert's definition changes. Each
+//   listing sent is told to `onListingSent`, after which what instances learn may go
+//   (what-was-learned-link.ts, protocol 0.18.0), whose messages from the office are passed on to it.
 
 import { ExpertDefinitionSchema, ExpertInstanceStatesMessageSchema, PROTOCOL_VERSION, type ExpertDefinition, type ExpertDirectoryEntry, type ExpertDirectoryMessage, type ExpertInstanceStatesMessage, type ExpertQuestionsAskedOnYourOtherComputersMessage, type ExpertSetUpOfferEndedMessage, type Project } from "@isoplan/protocol";
 import type { Approved } from "../data-layer/approved.js";
@@ -33,6 +35,7 @@ import type { ExpertInstances } from "./expert-instance.js";
 import type { ExpertRecordsPerOffice } from "./expert-records-per-office.js";
 import type { Experts, RunningExpert } from "./experts.js";
 import { UNREADABLE } from "./scan.js";
+import type { WhatWasLearnedServerMessage } from "./what-was-learned-link.js";
 
 export interface ExpertRecordLinkOptions {
   server: string;
@@ -73,6 +76,10 @@ export interface ExpertRecordLink {
   onDirectory(listener: () => void): void;
   /** Told when the counts of this person's questions on their other computers change. */
   onOtherComputers(listener: () => void): void;
+  /** Told after each listing it sends on a connection: the first on each always goes, later ones when it changed. */
+  onListingSent(listener: () => void): void;
+  /** Given the office's messages of what instances learn (protocol 0.18.0). */
+  onWhatWasLearned(listener: (m: WhatWasLearnedServerMessage) => void): void;
 }
 
 // A definition's fields, each checked for secrets, the first that matches named.
@@ -100,6 +107,8 @@ export function createExpertRecordLink(o: ExpertRecordLinkOptions): ExpertRecord
   const wanted = new Map<string, string>(); // record id → key, until its record comes
   const directoryListeners: (() => void)[] = [];
   const othersListeners: (() => void)[] = [];
+  const listingListeners: (() => void)[] = [];
+  const learnedListeners: ((m: WhatWasLearnedServerMessage) => void)[] = [];
   let stopped = false;
   let chain: Promise<void> = Promise.resolve();
   let saidNoList = false;
@@ -149,7 +158,10 @@ export function createExpertRecordLink(o: ExpertRecordLinkOptions): ExpertRecord
     const text = JSON.stringify(instances);
     if (text !== lastListing) {
       if (!ExpertInstanceStatesMessageSchema.safeParse(listing).success) o.log(`the expert instance states for ${server} don't fit the protocol, so they aren't sent`);
-      else if (o.send(listing)) lastListing = text;
+      else if (o.send(listing)) {
+        lastListing = text;
+        for (const l of listingListeners) l();
+      }
     }
     await publish(repos, mine);
   }
@@ -292,6 +304,11 @@ export function createExpertRecordLink(o: ExpertRecordLinkOptions): ExpertRecord
         o.store.setOtherComputers(server, m);
         for (const l of othersListeners) l();
         return;
+      case "expert-instance-learned-received":
+      case "expert-learned-since":
+      case "expert-learned-wanted-after-refused":
+        // In the record link's order, after the listing and record messages before it.
+        return queue(async () => void learnedListeners.forEach((l) => l(m)));
     }
   }
 
@@ -318,6 +335,8 @@ export function createExpertRecordLink(o: ExpertRecordLinkOptions): ExpertRecord
     sendNow,
     onDirectory: (listener) => void directoryListeners.push(listener),
     onOtherComputers: (listener) => void othersListeners.push(listener),
+    onListingSent: (listener) => void listingListeners.push(listener),
+    onWhatWasLearned: (listener) => void learnedListeners.push(listener),
   };
 }
 

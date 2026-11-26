@@ -5,7 +5,7 @@
 // app repo), and an expert file's `window` overrides it. The meter is the context of the trunk's
 // last top-level call (`TurnResult.context`), never a result's usage, which sums every call of a
 // turn. A threshold has to stay 100,000 tokens below the compaction point, so the largest fork still
-// fits, and leave room above a new junior's grounding for at least 20 learned notes, so promotion
+// fits, and leave room above a new junior's grounding for at least 20 things learned, so promotion
 // can't loop.
 
 import type { TurnResult } from "./expert-claude.js";
@@ -44,9 +44,9 @@ export const EXPERT_WINDOWS: Record<string, ContextWindow> = {
 
 /** How far below the compaction point a threshold has to stay. */
 export const THRESHOLD_MARGIN = 100_000;
-/** How many learned notes a new junior needs room for, at about this many tokens each. */
-export const NOTES_ROOM = 20;
-export const NOTE_TOKENS = 500;
+/** How many things learned a new junior needs room for, at about this many tokens each. */
+export const ROOM_FOR_THINGS_LEARNED = 20;
+export const TOKENS_PER_THING_LEARNED = 500;
 
 /**
  * The window of the model the trunk resolved to: the expert file's `window` when it sets one (with
@@ -72,8 +72,8 @@ export function thresholdProblem(promoteAt: number, compactAt: number): string |
   return `promoteAtTokens ${promoteAt} is within ${THRESHOLD_MARGIN.toLocaleString("en")} tokens of the compaction point at ${compactAt}; set it lower in the expert file`;
 }
 
-/** Why a junior grounded at `grounded` tokens leaves too little room below `promoteAt` for learned notes, or null. */
-export function notesRoomProblem(promoteAt: number, grounded: number): string | null {
-  if (promoteAt - grounded >= NOTES_ROOM * NOTE_TOKENS) return null;
-  return `room for fewer than ${NOTES_ROOM} learned notes: grounded at ${grounded} tokens, promoteAtTokens ${promoteAt}; raise promoteAtTokens in the expert file`;
+/** Why a junior grounded at `grounded` tokens leaves too little room below `promoteAt` for things learned, or null. */
+export function roomForWhatWasLearnedProblem(promoteAt: number, grounded: number): string | null {
+  if (promoteAt - grounded >= ROOM_FOR_THINGS_LEARNED * TOKENS_PER_THING_LEARNED) return null;
+  return `room for fewer than ${ROOM_FOR_THINGS_LEARNED} things learned: grounded at ${grounded} tokens, promoteAtTokens ${promoteAt}; raise promoteAtTokens in the expert file`;
 }
