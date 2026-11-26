@@ -16,6 +16,7 @@ import type { RunnerExpertRecordMessage, ServerExpertRecordMessage } from "../da
 import type { DataLayerLine } from "../lines.js";
 import { approvedPath } from "../data-layer/approved.js";
 import { BASE, FAKE_CLAUDE, fakeGit, type Rule } from "./expert-fixture.js";
+import type { EmployeeTies } from "./employee-ties.js";
 import { createExpertInstanceSetUpOffers } from "./expert-instance-set-up-offer.js";
 import { createExpertInstances } from "./expert-instance.js";
 import { createExpertQuestionsAskedHere, type ExpertQuestionsAskedHereSettings } from "./expert-questions-asked-here.js";
@@ -69,6 +70,9 @@ export interface ComputerOptions {
   projectOf?: (folder: string) => Project | null | undefined;
   /** How often the links look again: the record link's listing, and what instances learned waiting. */
   checkMs?: number;
+  /** This computer's employees' ties, given to each record link as the runner gives them (isoplan-app#341). */
+  employeeTies?: EmployeeTies;
+  onEmployeesChange?: (listener: () => void) => void;
 }
 
 export async function computer(o: ComputerOptions = {}) {
@@ -185,6 +189,8 @@ export async function computer(o: ComputerOptions = {}) {
       log,
       send: (m) => (up.get(server) ? (sent.get(server)!.push(m), true) : false),
       checkMs: o.checkMs ?? 3600000,
+      ...(o.employeeTies && { employeeTies: o.employeeTies }),
+      ...(o.onEmployeesChange && { onEmployeesChange: o.onEmployeesChange }),
     });
     link.onDirectory(() => offers.afterDirectory(server));
     links.set(server, link);

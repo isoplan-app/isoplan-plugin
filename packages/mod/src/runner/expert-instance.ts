@@ -483,6 +483,8 @@ export function createExpertInstances(o: ExpertInstancesOptions): ExpertInstance
       }
       // A key this computer's own expert has, named by another record: that one can't be set up here.
       for (const e of directory?.experts ?? []) {
+        // An employee's record has no instance here but its own (employee-ties.ts).
+        if (e.employee) continue;
         const running = o.experts.running(e.key);
         if (running?.from === "expert-file" && heldOn(server, e.key)?.record?.expertRecordId !== e.expertRecordId && !out.has(e.key)) out.set(e.key, { key: e.key, expertRecordId: e.expertRecordId, state: "failed", failure: { why: "key-used-here" } });
       }

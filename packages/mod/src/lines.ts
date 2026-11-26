@@ -263,6 +263,29 @@ export interface ExpertSetUpOfferEndedLine {
   key: string;
 }
 
+/**
+ * The runner offers to make an employee from a job this session's person started by hand on a
+ * rhythm (isoplan-app#341, runner/offers-to-make-an-employee.ts): `skill`, when the job was started
+ * with one, and `url`, which opens the offer on the floor of `server`, the office the employee would
+ * be published to. Sent by the runner itself to the newest matching session, and again when its
+ * pipe's end connects afresh, while the offer is open. The hooks module shows it in the status line
+ * until an OfferToMakeAnEmployeeEndedLine for the same `server` and `id` comes.
+ */
+export interface OfferToMakeAnEmployeeLine {
+  type: "offer-to-make-an-employee";
+  server: string;
+  id: string;
+  skill?: string;
+  url: string;
+}
+
+/** The offer to make an employee `id` on `server` ended. */
+export interface OfferToMakeAnEmployeeEndedLine {
+  type: "offer-to-make-an-employee-ended";
+  server: string;
+  id: string;
+}
+
 /** A problem worth a line in the debug log. */
 export interface LogLine {
   type: "log";
@@ -284,7 +307,7 @@ export interface TitleReply {
  * computer's instance of the expert (isoplan-app#340): `text` the question, `note` the end's
  * words; and `expert-rights` the experts the session may ask through that office (protocol 0.13.0).
  */
-export type DataLayerLine = StatusLine | TitleAskLine | PairLine | WaitsLine | WindowLine | OwnerAnswerLine | UpdatedLine | SupersededLine | RunnerLine | OwnerMessageLine | LogLine | ExpertCreationSuggestionLine | ExpertCreationSuggestionEndedLine | ExpertReadyLine | ExpertSetUpOfferLine | ExpertSetUpOfferEndedLine | ConflictMessage | ErrorMessage | FromOffice<AskedMessage> | FromOffice<AskRightsMessage> | FromOffice<ExpertRightsMessage>;
+export type DataLayerLine = StatusLine | TitleAskLine | PairLine | WaitsLine | WindowLine | OwnerAnswerLine | UpdatedLine | SupersededLine | RunnerLine | OwnerMessageLine | LogLine | ExpertCreationSuggestionLine | ExpertCreationSuggestionEndedLine | ExpertReadyLine | ExpertSetUpOfferLine | ExpertSetUpOfferEndedLine | OfferToMakeAnEmployeeLine | OfferToMakeAnEmployeeEndedLine | ConflictMessage | ErrorMessage | FromOffice<AskedMessage> | FromOffice<AskRightsMessage> | FromOffice<ExpertRightsMessage>;
 
 /** A server's message, with the data-layer address of the office server that sent it; none from a data layer before #105. */
 export type FromOffice<M> = M & { server?: string };

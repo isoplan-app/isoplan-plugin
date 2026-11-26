@@ -337,6 +337,70 @@ In Claude Code, while a suggestion is open, Isoplan's status line carries `A Par
 
 What leaves the machine, under ADR 0004's case for an expert creation suggestion's draft: the draft (key, subject, folder and proof question with its answer), after the secret check, with the suggestion's id, session, repo and the numbers that passed their thresholds. The office deletes it once the expert is made, the suggestion is dismissed, or after 7 days. The folder's files, the start of a few of them and what the session said there, which the draft is written from, go only to your own Claude account, for the draft, never to the office.
 
+## Employees
+
+An employee is an agent with one job, done on a schedule on its owner's computer; each run ends with drafts left for its owner, who approves, rejects with a correction, or skips each one on the floor. Nothing an employee does is sent: you send what you approve yourself. It has an expert record as an expert does, whose definition is its job, and it runs on one computer of yours, the one it was first published from; another computer of yours is refused (`runs-elsewhere`) and doesn't run it. Its trunk is grounded in its job once, in a clone of its project of its own, and each run is a fork of it, so nothing a run does stays but what it learns from your corrections. Its trunks and runs are never reported to the floor.
+
+### The job file
+
+You make an employee on the floor (Make employee, or from an offer, below), which writes its job file for you, or by writing `~/.claude/isoplan/employees/<name>.json` yourself:
+
+```json
+{
+  "version": 1,
+  "name": "adams-outreach",
+  "repo": "C:/Users/adamr/Projects/isoplan-docs",
+  "subject": "Drafts cold emails to agencies in Adam's voice",
+  "model": "sonnet",
+  "brief": "Each run, find agencies that qualify and draft one email to one person at each.",
+  "rules": ["One email per agency.", "Never guess what tools they use."],
+  "documents": ["outreach/who-qualifies.md"],
+  "examples": ["outreach/approved/adam/"],
+  "schedule": { "every": "weekday", "at": "09:00" },
+  "tools": ["Read", "Grep", "Glob", "Agent", "WebSearch", "WebFetch"],
+  "experts": ["adams-writing", "lead-generation"]
+}
+```
+
+| Field | Required | What |
+|---|---|---|
+| `version`, `name`, `repo`, `subject`, `model` | yes | As an expert file's. `repo` is this computer's checkout of the employee's project, which must have a remote; it never leaves the computer. |
+| `promoteAtTokens` | no | `employees.promoteAtTokens` (80,000): its trunk's size at which a new generation grounds, lower than an expert's so a run has room on top. |
+| `brief`, `rules` | `brief` | What each run does, and the rules every draft follows. They are published, so a signature or an address belongs in one of its documents, which never leave the computer. |
+| `documents`, `examples` | no | Paths in its project it reads while grounding: what its job rests on, and drafts you were glad of. |
+| `schedule` | yes | `every` `day`, `weekday` (Monday to Friday) or `week` (with `on`, a day), `at` a 24-hour HH:MM, and `timeZone` (an IANA zone; else this computer's). |
+| `missedRunWindowMinutes` | no | How late a missed run still runs: half the gap to the next scheduled time when unset (12 hours for a daily job). |
+| `tools` | yes | Only `Read` (always), `Grep`, `Glob`, `Agent`, `WebSearch` and `WebFetch`: nothing it does may send, post, merge or pay. Isoplan's own `ask_expert` and `leave_draft` come with every job. |
+| `experts` | no | The experts it may ask, each once. |
+| `draftsWaitHours` | no | `employees.draftsWaitHours` (48): how long its drafts wait for you before they expire. |
+| `limits` | no | `runMinutes`, `dayMinutes`, `runTokens`, `dayTokens` and `draftsPerRun`; each unset is `runner.json`'s. |
+| `whoWasContacted` | no | `employees.whoWasContacted` (`who-was-contacted.csv`): the file of who was contacted in its project (below). None of its documents or examples may cover it. |
+
+The defaults are in `runner.json`'s `employees` block, which `~/.claude/isoplan/runner.json` overrides per key. A change to its model, brief, rules, documents, examples, tools or experts grounds a new generation before its next run; its schedule, window, wait, limits and file of who was contacted apply at once, and a new schedule passes over every time before the change. Its job is checked before it is published, against the secret patterns and the personal-data patterns: a match publishes nothing, and its health log, `~/.claude/isoplan/logs/employee-<name>.log`, names the field. A key an expert here has doesn't run. Removing the job file stops its runs on this computer and nothing else: its drafts still wait for you, and putting the file back carries on. Deleting it on the floor releases its claims, moves its job file to `~/.claude/isoplan/deleted-employees/`, and deletes its folder.
+
+### Runs
+
+- **When.** Every minute the runner looks at the clock: the latest scheduled time that hasn't run runs once, inside its missed-run window; past it, it is missed, and only the latest missed time runs. An employee runs only while the runner runs: one tied to a published record keeps the runner up, and with `startAtLogin` off a run due while the runner was down waits for its next start, inside its window. A time due while a run is under way waits for it. While more drafts wait for you than one run leaves, a run is held back until your decisions bring them down, inside its window.
+- **What runs.** A fork of its newest generation, hidden, in its own clone fetched at the run's start, with only its job's tools, no setting, plugin, skill, hook or MCP server of yours (`--setting-sources ""`, `--strict-mcp-config`), and Isoplan's two tools, which this computer's runner serves itself on 127.0.0.1, with a token for that process alone: nothing is installed or started for them. A run whose Isoplan tools don't connect fails at once.
+- **Limits.** Its minutes and tokens per run and per rolling 24 hours (weighted as the runner's caps weigh them; groundings, learning from corrections and additions count too), and its context, ended near the model's window (`employees.runContextTokens`, 180,000, which must stay below the window). A run stopped at a limit keeps the drafts it left and isn't tried again; one that failed is tried again once, `tryAgainAfterMinutes` (10) later, inside its window.
+- **Asking experts.** `ask_expert` asks this computer's own instance, as a session's question is asked, and waits for the answer up to `expertAnswerWaitMinutes` (5); an expert not set up here offers its set-up on the floor. The office is told only a record of each question with no words, naming the employee.
+
+### Drafts and decisions
+
+`leave_draft` keeps each draft in `employees/<name>/drafts-waiting.json` before it answers, and refuses a recipient a draft of the employee already waits for, one another person's employee claimed or contacted, and one you skipped. As the run ends each draft is checked for secrets (one that matches never leaves, and is only counted), its recipient is claimed in the file of who was contacted, and the drafts go to the office, again after each connection until it has them; a run the runner died in gets its end at the next start. Your decision comes back to this computer: an approval is checked against the newest file of who was contacted first (the floor tells you if someone else already contacted them) and marks them contacted; a skip marks them skipped, which stops only your employee; a rejection keeps them claimed, and its next run drafts them again first, with your correction in its prompt. A draft expires after `draftsWaitHours`, which releases its claim; a decision made in time is still applied after that.
+
+### The file of who was contacted
+
+A CSV in the employee's project, one row per prospect and sender: `prospect,state,sender,employee,since,name,organisation`, `state` being `claimed`, `contacted` or `skipped`. Columns you add are kept. The runner writes it from a clone of its own, `employees/<name>/who-was-contacted/`, made from your checkout's origin, with your own git access and identity, and pushes to the project's default branch, which must take your pushes: commits are unsigned, so no signing program opens a window, and their messages name counts, never a prospect. A push behind the remote is never rebased: the clone is reset to the newest file and the changes applied again. Changes that can't be pushed wait in `who-was-contacted-changes-waiting.json` and go with the next write; the floor says meanwhile whether the remote couldn't be reached or refused the push.
+
+### What it learns
+
+Your rejections are learned from in batches, one fork at a time, inside its day's tokens: the fork writes each thing it now knows as a rule for every draft, never naming a person or an address, which is added to its trunk and goes to its expert record as what an instance of an expert learns does, checked against the secret and personal-data patterns first, with no files. When you reject a draft whose run asked an expert, you can teach that expert too: a fork of this computer's instance of it learns from your correction and what it answered then, resting on the files its answers cited.
+
+### Offers to make an employee
+
+When you start the same job by hand on a rhythm (the same skill, or the very same first prompt, on 4 of the last 7 days or in each of the last 3 weeks: `employees.offerAfter`), the runner writes a job from those sessions on this computer with `claude -p` (`employees.jobFromSessionsModel`), checks it against the secret and personal-data patterns, and offers to make an employee to the one office it would be published to, once per skill or prompt, ever. The offer carries only its rhythm and the skill's name; the job goes to your browser only when you open it, checked again first. The session's status line shows it while it is open. What it counts is kept in `~/.claude/isoplan/runner/jobs-started-by-hand.json`, `employees.rememberStartsDays` (30), and never sent.
+
 ## Answering from the floor
 
 When an agent asks you something (`AskUserQuestion`), the question shows in the terminal and on the floor at once, and the first answer wins: answer it in the agent's details on the floor and the terminal's dialog closes, and the agent gets your answers as if you had picked them in the terminal. Only you can answer your own sessions' questions there, and only you, and an admin with Overview on, can read them; everyone else sees that your agent is waiting on you. The floor offers a question only while the plugin is waiting for it in that session, so one in a session the runner reports, without the plugin, or asked before the plugin loaded, is read-only there: answer it in its terminal. A question is secret-checked before it leaves, as reports are: one that matches, and every one while the patterns can't be read, goes as a placeholder and is answered in the terminal. A report the secret check held is released from the same place.

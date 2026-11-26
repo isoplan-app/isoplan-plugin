@@ -52,7 +52,8 @@
 // key another expert has (the office has no record of it). One the link couldn't send goes after its
 // next connection's first directory.
 
-import { expertDisplayName, MAX_QUESTION_LENGTH, PROTOCOL_VERSION, type ExpertCode, type ExpertDirectoryMessage, type ExpertQuestionMessage, type ExpertRight } from "@isoplan/protocol";
+import { randomUUID } from "node:crypto";
+import { AreaPathSchema, expertDisplayName, MAX_QUESTION_LENGTH, PROTOCOL_VERSION, type ExpertCode, type ExpertDirectoryMessage, type ExpertQuestionMessage, type ExpertRight, type FileWhatWasLearnedRestsOn } from "@isoplan/protocol";
 import type { Config } from "../data-layer/config.js";
 import { askIn } from "../ask/machine.js";
 import { answeredText, askedText, expertText, exploreMeanwhileText, type ExpertAbout } from "../ask/expert-text.js";
@@ -98,6 +99,14 @@ export interface ExpertQuestionsAskedHereOptions {
 export interface ExpertQuestionsAskedHere {
   start(): Promise<void>;
   ask(request: PipeAskExpert): Promise<ExpertTold>;
+  /**
+   * A run's question to one of its job's experts, answered from this computer's instance as a
+   * session's is, with the asker `employee:<key>` for the instance's own caps, and not counted in the
+   * office's per-person caps, which the job's own limits stand in for. It waits for the answer up to
+   * `waitMs`, then is told to explore meanwhile. Its wordless record names the employee, and goes only
+   * to an office whose directory says `employees`.
+   */
+  askForAnEmployeeRun(r: EmployeeRunQuestion): Promise<{ text: string; answer?: { question: string; answer: string; files: FileWhatWasLearnedRestsOn[] } }>;
   /** Whether `question` is one of these, so its ack is this module's. */
   holds(question: string): boolean;
   ack(session: string, question: string): Promise<Told>;
@@ -135,6 +144,31 @@ interface Kept {
   restarts: number;
   /** What the office was last sent of it, `<state>` or `<state>+senior`; null for nothing yet, "never" for one not reported. */
   sent: string | null;
+  /** A run of this computer's employee of this key asked it, not a session (isoplan-app#341): `session` is then `employee:<key>`. */
+  employee?: string;
+}
+
+/** A run's question to one of its job's experts (isoplan-app#341). */
+export interface EmployeeRunQuestion {
+  employee: string;
+  /** The office its employee's record is on. */
+  server: string;
+  run: string;
+  expert: string;
+  question: string;
+  /** How long it waits for the answer: there is no late answer for a run. */
+  waitMs: number;
+}
+
+/** The files an answer's citation block names, each with the commit it was read at where it is the answer's own. */
+export function citedFiles(answer: string, commit: string | undefined): FileWhatWasLearnedRestsOn[] {
+  const files: FileWhatWasLearnedRestsOn[] = [];
+  for (const m of answer.matchAll(/^- (.+?)(?::\d+(?:-\d+)?)? \((?:read at ([0-9a-f]{7})|commit unknown)/gm)) {
+    const path = m[1]!.trim();
+    if (files.some((f) => f.path === path) || !AreaPathSchema.safeParse(path).success) continue;
+    files.push({ path, ...(commit && m[2] && commit.startsWith(m[2]) && { commit }) });
+  }
+  return files;
 }
 
 export function createExpertQuestionsAskedHere(o: ExpertQuestionsAskedHereOptions): ExpertQuestionsAskedHere {
@@ -159,6 +193,8 @@ export function createExpertQuestionsAskedHere(o: ExpertQuestionsAskedHereOption
   // The wordless record of where it stands, to the asking office.
   function record(q: Kept) {
     if (q.sent === "never" || !q.expertRecordId) return;
+    // A run's question goes only to an office that takes employees.
+    if (q.employee && o.links.get(q.server)?.directory()?.employees !== true) return;
     const tag = q.state + (q.senior ? "+senior" : "");
     if (q.sent === tag) return;
     const m: ExpertQuestionMessage = {
@@ -167,7 +203,8 @@ export function createExpertQuestionsAskedHere(o: ExpertQuestionsAskedHereOption
       id: q.id,
       key: q.key,
       expertRecordId: q.expertRecordId,
-      session: `claude-code:${q.session}`,
+      session: q.employee ? q.session : `claude-code:${q.session}`,
+      ...(q.employee && { employee: q.employee }),
       blocking: q.blocking,
       state: q.state,
       ...(q.code && { code: q.code }),
@@ -250,7 +287,7 @@ export function createExpertQuestionsAskedHere(o: ExpertQuestionsAskedHereOption
   // Gives the question to its instance; one with no instance yet waits for it.
   async function give(q: Kept) {
     if (closed || q.state !== "asking" || given.has(k(q))) return;
-    const entry = o.links.get(q.server)?.directory()?.experts.find((e) => e.key === q.key) ?? null;
+    const entry = o.links.get(q.server)?.directory()?.experts.find((e) => e.key === q.key && !e.employee) ?? null;
     const found = o.instances.lookUp(q.server, q.key, entry);
     if (!found || found.kind === "setting-up") return later(q);
     if (found.kind === "set-up-failed") return end(q, "dropped", "EXPERT_FORK_FAILED", { endWords: SET_UP_FAILED_WORDS });
@@ -338,6 +375,11 @@ export function createExpertQuestionsAskedHere(o: ExpertQuestionsAskedHereOption
       await prune();
       for (const q of kept.values()) {
         if (q.state !== "asking") continue;
+        // A run that asked it ended with the runner: no one waits for its answer now.
+        if (q.employee) {
+          end(q, "dropped", "EXPERT_FORK_FAILED", { endWords: "the runner stopped while it was being answered" });
+          continue;
+        }
         if (q.restarts >= 2) {
           end(q, "dropped", "EXPERT_FORK_FAILED", { endWords: "the runner stopped while it was being answered" });
           continue;
@@ -380,11 +422,12 @@ export function createExpertQuestionsAskedHere(o: ExpertQuestionsAskedHereOption
         return unreachable(`this computer's runner hasn't heard from the office at ${server} yet; try again in a minute`);
       }
 
-      const rights = o.rights(r.session, server) ?? directory.experts.map((e) => ({ name: e.key }));
+      // An employee's record is never one a session may ask (protocol 0.19.0).
+      const rights = (o.rights(r.session, server) ?? directory.experts.filter((e) => !e.employee).map((e) => ({ name: e.key }))).filter((x) => !directory.experts.some((e) => e.employee && e.key === x.name));
       const unknown = (): ExpertTold => ({ text: expertText("EXPERT_UNKNOWN", { ...a, words: rights.length ? `No expert named ${r.expert} in this session's office; ask one of: ${rights.map((x) => x.name).join(", ")}.` : "There are no experts in this session's office now." }), failed: true, code: "EXPERT_UNKNOWN" });
       if (!rights.some((x) => x.name === r.expert)) return unknown();
 
-      const entry = directory.experts.find((e) => e.key === r.expert) ?? null;
+      const entry = directory.experts.find((e) => e.key === r.expert && !e.employee) ?? null;
       let instance: FoundInstance | null = o.instances.lookUp(server, r.expert, entry);
       if (!instance) {
         if (!entry) return unknown();
@@ -410,6 +453,53 @@ export function createExpertQuestionsAskedHere(o: ExpertQuestionsAskedHereOption
       record(q);
       void give(q);
       return answerFor(q, deadline, starting);
+    },
+
+    async askForAnEmployeeRun(r) {
+      const askedAt = Date.now();
+      const id = `${r.run.slice(0, 8)}-${randomUUID()}`;
+      const a: ExpertAbout = { expert: r.expert, id, name: expertDisplayName(r.expert) };
+      const question = r.question.trim();
+      if (!question) return { text: "Give the question to ask as `question`." };
+      if (question.length > MAX_QUESTION_LENGTH) return { text: `Expert ${r.expert}, question ${id}: that question is too long to ask: keep it under ${MAX_QUESTION_LENGTH} characters.` };
+      const directory = o.links.get(r.server)?.directory() ?? null;
+      if (!directory) return { text: expertText("EXPERT_RUNNER_UNREACHABLE", { ...a, words: `this computer's runner hasn't heard from the office at ${r.server} yet` }) };
+      const entry = directory.experts.find((e) => e.key === r.expert && !e.employee) ?? null;
+      let instance: FoundInstance | null = o.instances.lookUp(r.server, r.expert, entry);
+      const session = `employee:${r.employee}`;
+      if (!instance) {
+        if (!entry) return { text: expertText("EXPERT_UNKNOWN", { ...a, words: `No expert named ${r.expert} in this employee's office now.` }) };
+        if ((await o.offers.offerOrSetUp(r.server, entry, session)) === "offered") {
+          const q: Kept = { id, session, employee: r.employee, server: r.server, key: r.expert, expertRecordId: entry.expertRecordId, blocking: true, text: null, state: "dropped", code: "EXPERT_NOT_SET_UP", askedAt, endedAt: askedAt, shown: true, counts: false, restarts: 0, sent: null };
+          kept.set(k(q), q);
+          await save();
+          record(q);
+          return { text: expertText("EXPERT_NOT_SET_UP", a) };
+        }
+        instance = o.instances.lookUp(r.server, r.expert, entry) ?? { kind: "setting-up", expertRecordId: entry.expertRecordId };
+      }
+      if (instance.kind === "running") instance.running.expert.beforeQuestion();
+      const q: Kept = { id, session, employee: r.employee, server: r.server, key: r.expert, expertRecordId: instance.expertRecordId, blocking: true, text: question, state: "asking", askedAt, shown: true, counts: false, restarts: 0, sent: instance.expertRecordId ? null : "never" };
+      kept.set(k(q), q);
+      await save();
+      record(q);
+      void give(q);
+      if (q.state === "asking" && r.waitMs > 0) {
+        await new Promise<void>((resolve) => {
+          const done = () => (clearTimeout(timer), resolve());
+          const timer = setTimeout(() => {
+            if (waiters.get(k(q)) === done) waiters.delete(k(q));
+            resolve();
+          }, r.waitMs);
+          waiters.set(k(q), done);
+        });
+      }
+      if (q.state === "asking") return { text: exploreMeanwhileText(a) };
+      if (q.state === "answered") {
+        const answer = q.answer ?? "";
+        return { text: answeredText({ ...a, answer, commit: q.commit, branch: q.branch }), answer: { question, answer, files: citedFiles(answer, q.commit) } };
+      }
+      return { text: expertText(q.code ?? "EXPERT_FORK_FAILED", { ...a, words: q.endWords }) };
     },
 
     holds: (question) => [...kept.values()].some((q) => q.id === question),

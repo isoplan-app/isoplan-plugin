@@ -71,7 +71,8 @@ export interface TurnResult {
   context: number;
 }
 
-export type ConversationFailure = { kind: "timed-out" | "failed" | "compacted" | "disallowed" | "not-set-up" | "no-claude"; detail: string };
+/** `stopped`: `onUsage` asked for it, as a run reaches a limit. */
+export type ConversationFailure = { kind: "timed-out" | "failed" | "compacted" | "disallowed" | "not-set-up" | "no-claude" | "stopped"; detail: string };
 
 export interface Conversation {
   /** Every turn ended, and `next` said there was no more. */
@@ -95,6 +96,16 @@ export interface ConverseOptions {
   platform?: NodeJS.Platform;
   /** Told the model id as soon as the init event names it: a reason ends the conversation at once, failed with it. */
   check?: (model: string) => string | null;
+  /** The tools that end it when offered or used, subagents' included: DISALLOWED_TOOLS unless given (an employee's run, isoplan-app#341). */
+  disallowed?: readonly string[];
+  /**
+   * Told after each assistant message: the conversation's usage so far (every turn before, and this
+   * one's messages, top-level and subagents', each its last event) and the top-level context. Words
+   * end the process tree and fail the conversation `stopped` with them, as a run at a limit does.
+   */
+  onUsage?: (sofar: Usage, context: number) => string | null | void;
+  /** An MCP server the init event must list `connected`, with every one of `tools` offered; otherwise it fails at once. */
+  requireAtInit?: { mcpServer: string; tools: readonly string[]; words: string };
 }
 
 /**
@@ -154,9 +165,19 @@ export function converse(child: ChildProcessWithoutNullStreams, first: string, n
     };
     const timer = setTimeout(() => fail("timed-out", `no reply within ${Math.round(timeoutMs / 1000)} s`), timeoutMs);
 
+    const disallowed = o.disallowed ?? DISALLOWED_TOOLS;
     const onTools = (names: unknown) => {
-      const offered = Array.isArray(names) ? names.find((t) => DISALLOWED_TOOLS.includes(String(t))) : undefined;
+      const offered = Array.isArray(names) ? names.find((t) => disallowed.includes(String(t))) : undefined;
       if (offered !== undefined) fail("disallowed", `a disallowed tool was offered: ${String(offered)}`);
+    };
+    const onInit = (e: Record<string, any>) => {
+      const need = o.requireAtInit;
+      if (!need || isDone) return;
+      const server = (Array.isArray(e.mcp_servers) ? e.mcp_servers : []).find((s: { name?: unknown }) => s?.name === need.mcpServer);
+      const tools = Array.isArray(e.tools) ? e.tools.map(String) : [];
+      if (server?.status !== "connected") return fail("failed", `${need.words}: the ${need.mcpServer} server is ${typeof server?.status === "string" ? server.status : "missing"}`);
+      const missing = need.tools.find((t) => !tools.includes(t));
+      if (missing) fail("failed", `${need.words}: ${missing} isn't offered`);
     };
     const onAssistant = (e: Record<string, any>) => {
       const message = e.message && typeof e.message === "object" ? e.message : {};
@@ -166,7 +187,7 @@ export function converse(child: ChildProcessWithoutNullStreams, first: string, n
       if (top && message.usage) context = u.input + u.cacheRead + u.cacheWrite + u.output;
       for (const block of Array.isArray(message.content) ? message.content : []) {
         if (block?.type !== "tool_use" || typeof block.name !== "string") continue;
-        if (DISALLOWED_TOOLS.includes(block.name)) return fail("disallowed", `a disallowed tool was used: ${block.name}`);
+        if (disallowed.includes(block.name)) return fail("disallowed", `a disallowed tool was used: ${block.name}`);
         if (EXPLORING.has(block.name)) c.explored = true;
         const file = block.input?.file_path;
         if (block.name === "Read" && typeof file === "string" && o.root !== undefined) {
@@ -174,6 +195,10 @@ export function converse(child: ChildProcessWithoutNullStreams, first: string, n
           if (relative) c.reads.add(relative);
         }
       }
+      if (!o.onUsage || isDone) return;
+      const sofar = add(c.usage, [...messages.values()].reduce((sum, m) => add(sum, m.usage), zero()));
+      const stop = o.onUsage(sofar, context);
+      if (typeof stop === "string") fail("stopped", stop);
     };
     const onResult = (e: Record<string, any>) => {
       if (!(typeof e.num_turns === "number" && e.num_turns >= 1)) return;
@@ -215,6 +240,7 @@ export function converse(child: ChildProcessWithoutNullStreams, first: string, n
         if (e.type === "system" && e.subtype === "init") {
           if (typeof e.model === "string" && e.model) c.model = e.model;
           onTools(e.tools);
+          onInit(e);
           const problem = !isDone && c.model && o.check ? o.check(c.model) : null;
           if (problem) fail("failed", problem);
         } else if (e.type === "system" && e.subtype === "compact_boundary") {

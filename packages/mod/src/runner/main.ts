@@ -70,6 +70,7 @@
 // the expert an office's `create-expert-from-suggestion` asks for, writing its file in <claude dir>/isoplan/experts.
 
 import { spawn } from "node:child_process";
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -121,6 +122,16 @@ import { createExpertRightsOnThisComputer, type ExpertRightsOnThisComputer } fro
 import { createExperts, expertIgnored, type Experts } from "./experts.js";
 import { createCheckBeforeItLeaves } from "./what-was-learned-before-it-leaves.js";
 import { createWhatWasLearnedLink, type WhatWasLearnedLink } from "./what-was-learned-link.js";
+import { createEmployeeLink, type EmployeeLink } from "./employee-link.js";
+import { createEmployeeTies } from "./employee-ties.js";
+import { createEmployeeTools } from "./employee-tools.js";
+import type { EmployeesSettings } from "./employee.js";
+import { createEmployees, employeeIgnored, type Employees } from "./employees.js";
+import { createJobFromSessionsModelCall } from "./job-from-sessions-model-call.js";
+import { createJobsStartedByHand, type JobsStartedByHand } from "./jobs-started-by-hand.js";
+import { createMakeAnEmployee } from "./make-an-employee.js";
+import { createOffersToMakeAnEmployee, type OffersToMakeAnEmployee } from "./offers-to-make-an-employee.js";
+import { readJson } from "./expert-state.js";
 import { createPipeServer, type Hooked } from "../pipe/server.js";
 import { createPairLinks } from "./pair-links.js";
 import { createSharedOffices } from "./shared-offices.js";
@@ -218,7 +229,7 @@ async function worker(): Promise<number> {
   });
   const io = nodeIo();
   const config = () => loadConfig(io, path.join(appDir, "config.json"), path.join(isoplanDir, "config.json"));
-  const settings = () => loadSettings<RunnerSettings & TakeSettings & DriveSettings & NamingSettings & ExpertCreationSuggestionsRunnerSettings & ExpertQuestionsAskedHereSettings & { claudeModel: string; repoSearchDepth: number; startAtLogin: boolean; trayRefreshSeconds: number; expertJudgeModel: string; clonesFolder: string }>(io, path.join(appDir, "runner.json"), path.join(isoplanDir, "runner.json"));
+  const settings = () => loadSettings<RunnerSettings & TakeSettings & DriveSettings & NamingSettings & ExpertCreationSuggestionsRunnerSettings & ExpertQuestionsAskedHereSettings & { claudeModel: string; repoSearchDepth: number; startAtLogin: boolean; trayRefreshSeconds: number; expertJudgeModel: string; clonesFolder: string; employees: EmployeesSettings }>(io, path.join(appDir, "runner.json"), path.join(isoplanDir, "runner.json"));
   const first = await config();
   // Plain ws:// to another machine would send the machine's credential unencrypted.
   const offices = officesOf(first);
@@ -278,7 +289,7 @@ async function worker(): Promise<number> {
   const pipe = await createPipeServer({
     claudeDir,
     log,
-    onChange: (session) => (rehook(session), expertCreationSuggestionsOnceStarted?.rehooked(session), expertQuestionsOnceStarted?.rehooked(session), rehookOffers(session)),
+    onChange: (session) => (rehook(session), expertCreationSuggestionsOnceStarted?.rehooked(session), expertQuestionsOnceStarted?.rehooked(session), rehookOffers(session), offersToMakeAnEmployeeOnceStarted?.rehooked(session)),
     // An ack of an expert question's end is the asking module's; every other ask goes to the office.
     ask: (request) => (request.ack && expertQuestionsOnceStarted?.holds(request.ack) ? expertQuestionsOnceStarted.ack(request.session, request.ack) : askFromMachine({ ...request, appDir, scan: scanText })),
     askExpert: async (request) => expertQuestionsOnceStarted?.ask(request) ?? { text: expertText("EXPERT_RUNNER_UNREACHABLE", { expert: request.expert, id: request.key, words: "Isoplan's runner is still starting; try again in a minute" }), failed: true, code: "EXPERT_RUNNER_UNREACHABLE" },
@@ -293,6 +304,11 @@ async function worker(): Promise<number> {
   // named, which keeps them out from the first look.
   const expertsDir = path.join(isoplanDir, "experts");
   let experts: Experts | null = null;
+  // This computer's employees (employees.ts, isoplan-app#341), made once the experts are: their trunks and runs are never reported either.
+  const employeesDir = path.join(isoplanDir, "employees");
+  let employees: Employees | null = null;
+  let jobsStartedByHandOnceStarted: JobsStartedByHand | null = null;
+  let offersToMakeAnEmployeeOnceStarted: OffersToMakeAnEmployee | null = null;
   const reporting = watchSessions<Hooked>({
     claudeDir,
     io,
@@ -300,7 +316,7 @@ async function worker(): Promise<number> {
     isOff,
     log,
     patterns: errorPatterns,
-    ignored: expertIgnored(expertsDir, () => experts, clones.folders),
+    ignored: (id, cwd) => expertIgnored(expertsDir, () => experts, clones.folders)(id, cwd) || employeeIgnored(employeesDir, () => employees, clones.folder)(id, cwd),
     hooked: (id) => pipe?.hooked(id) ?? null,
     removedFile: path.join(isoplanDir, "runner", "removed.json"),
     held: (id, hooks) => {
@@ -312,7 +328,12 @@ async function worker(): Promise<number> {
       said.say(hooks ? `the runner reports this session for its hooks module, in ${cwd}` : `the runner reports this session, in ${cwd}`);
       const titled = (title: string) => void titles.set(sessionId, title);
       // Each pass's areas, and the local model's word on which messages corrected the agent (expert-creation-suggestions.ts).
-      const expertCreationSuggestionSignals = { areas: (s: Parameters<ExpertCreationSuggestions["seen"]>[0]) => expertCreationSuggestionsOnceStarted?.seen(s), corrected: (key: string, text: string, reply: string | null) => expertCreationSuggestionsOnceStarted?.corrected(sessionId, key, text, reply) ?? null };
+      const expertCreationSuggestionSignals = {
+        areas: (s: Parameters<ExpertCreationSuggestions["seen"]>[0]) => expertCreationSuggestionsOnceStarted?.seen(s),
+        corrected: (key: string, text: string, reply: string | null) => expertCreationSuggestionsOnceStarted?.corrected(sessionId, key, text, reply) ?? null,
+        // How the session started, for the offers to make an employee (jobs-started-by-hand.ts).
+        startedByHand: (s: Parameters<JobsStartedByHand["seen"]>[0]) => void jobsStartedByHandOnceStarted?.seen(s).catch((err: Error) => log(`couldn't count how a session started: ${err.message}`)),
+      };
       try {
         if (hooks)
           return await reportSession({
@@ -374,6 +395,8 @@ async function worker(): Promise<number> {
   const namer = createNamer({ binary, settings, system: () => fs.readFile(path.join(appDir, "prompts", "naming.md"), "utf8"), log });
   // An expert creation suggestion's draft and the correction check, local model calls as naming is (expert-creation-suggestion-model-calls.ts).
   const expertCreationSuggestionModelCalls = createExpertCreationSuggestionModelCalls({ binary, prompt: (name) => fs.readFile(path.join(appDir, "prompts", name), "utf8"), log });
+  // The job an offer to make an employee writes from its sessions, a local model call as those are (job-from-sessions-model-call.ts).
+  const jobFromSessions = createJobFromSessionsModelCall({ binary, prompt: () => fs.readFile(path.join(appDir, "prompts", "employee-job-from-sessions.md"), "utf8"), log });
   let driver: Driver | null = null;
   // However the worker ends, its forks, naming calls, expert creation suggestions' model calls and driven sessions end with it.
   process.on("exit", () => {
@@ -383,6 +406,8 @@ async function worker(): Promise<number> {
     expertCreationSuggestionsOnceStarted?.close();
     driver?.close();
     experts?.close();
+    employees?.close();
+    jobFromSessions.close();
   });
   const git = createRunGit();
   const gitMs = async () => (await settings()).gitTimeoutSeconds * 1000;
@@ -533,7 +558,7 @@ async function worker(): Promise<number> {
       // would report it. Never an expert's trunk, which isn't reported at all.
       isReported: async (session, lead) => {
         const id = forkableId(session);
-        if (!id || reporting.heldOff(id) || hosted.isExpertSession(id)) return false;
+        if (!id || reporting.heldOff(id) || hosted.isExpertSession(id) || employees?.isEmployeeSession(id)) return false;
         if (Date.now() - lead.lastActive > askableMs(await config().catch(() => first))) return false;
         await approved.refresh();
         return (await approvedHome(lead.cwd, homeIo, approved.repos())) !== null;
@@ -616,6 +641,60 @@ async function worker(): Promise<number> {
   });
   await instances.start();
   const recordLinks = new Map<string, ExpertRecordLink>();
+  // What instances learn and employees' jobs, checked for secrets and personal data before they leave, the patterns read again each time.
+  const checkBeforeItLeaves = createCheckBeforeItLeaves({
+    secretPatterns: () => loadPatterns(path.join(appDir, "secret-patterns.json"), path.join(isoplanDir, "secret-patterns.json"), log),
+    personalDataPatterns: () => loadPatterns(path.join(appDir, "personal-data-patterns.json"), path.join(isoplanDir, "personal-data-patterns.json"), log),
+  });
+
+  // This computer's employees (isoplan-app#341): Isoplan's two tools served here on 127.0.0.1, the
+  // job files and their runs (employees.ts), and each one's tie to its record on one office.
+  const employeeTools = createEmployeeTools({ log });
+  await employeeTools.start();
+  const servers = answering.map((office) => office.server);
+  // Set below, once the asking module is made: a run's question to one of its job's experts.
+  let askForARun: ((r: Parameters<ExpertQuestionsAskedHere["askForAnEmployeeRun"]>[0]) => ReturnType<ExpertQuestionsAskedHere["askForAnEmployeeRun"]>) | null = null;
+  const expertHasKey = (key: string) => hosted.running(key) !== null || [hosted.expertFilePath(key), hosted.instanceFilePath(key)].some((p) => fsSync.existsSync(p));
+  const hired = createEmployees({
+    employeesDir,
+    clonesFolder: clones.folder,
+    logsDir: path.join(isoplanDir, "logs"),
+    projectsDir: path.join(claudeDir, "projects"),
+    appDir,
+    binary,
+    settings,
+    scan: scanText,
+    git,
+    gitTimeoutMs: gitMs,
+    tools: employeeTools,
+    account,
+    expertHasKey,
+    // The subjects of the job's experts, as this computer's instances of them have them.
+    expertsOf: (key) => (hired.get(key)?.file?.job.experts ?? []).map((k) => ({ key: k, subject: hosted.running(k)?.file.subject ?? "not set up on this computer yet" })),
+    ask: async (key, run, expert, question, deadline) => {
+      const server = employeeTies.serverOf(key);
+      if (!server || !askForARun) return { text: `Expert ${expert}: Isoplan's runner can't ask it now. Carry on without it.` };
+      const waitMs = Math.min((await settings()).employees.expertAnswerWaitMinutes * 60000, deadline - Date.now() - 120000);
+      return askForARun({ employee: key, server, run, expert, question, waitMs });
+    },
+    teach: async (expert, corrections) => (await hosted.running(expert)?.expert.learnFromCorrections(corrections)) ?? "waiting",
+    track: registry.track,
+    log,
+  });
+  employees = hired;
+  await hired.start();
+  const employeeTies = createEmployeeTies({
+    employees: hired,
+    servers,
+    account,
+    saysEmployees: (server) => recordLinks.get(server)?.directory()?.employees === true,
+    projectOn: (server, folder) => projectFor(server, folder).catch(() => undefined),
+    check: checkBeforeItLeaves,
+    settings,
+    isoplanDir,
+    log,
+  });
+  await employeeTies.start();
   const offers = createExpertInstanceSetUpOffers({
     file: path.join(isoplanDir, "runner", "expert-instance-set-up-offers.json"),
     setUpWithoutAsking: async () => (await settings()).expertInstances.setUpWithoutAsking,
@@ -645,24 +724,23 @@ async function worker(): Promise<number> {
       log,
       send: (m) => live(index)(m),
       checkMs: first.approvedRefreshMinutes * 60000,
+      employeeTies,
+      onEmployeesChange: (listener) => hired.onChange(() => listener()),
     });
     link.onDirectory(() => offers.afterDirectory(office.server));
     recordLinks.set(office.server, link);
   });
-  // What instances learn, over each office's link: checked for secrets and personal data before it leaves, the patterns read again each time.
-  const checkBeforeItLeaves = createCheckBeforeItLeaves({
-    secretPatterns: () => loadPatterns(path.join(appDir, "secret-patterns.json"), path.join(isoplanDir, "secret-patterns.json"), log),
-    personalDataPatterns: () => loadPatterns(path.join(appDir, "personal-data-patterns.json"), path.join(isoplanDir, "personal-data-patterns.json"), log),
-  });
+  // What instances learn, and what employees learn from their owners' corrections, over each office's link.
   const learnedLinks = new Map<string, WhatWasLearnedLink>();
   answering.forEach((office, index) => {
     const recordLink = recordLinks.get(office.server)!;
     const link = createWhatWasLearnedLink({
       server: office.server,
       recordLink,
-      instances,
-      whatWasLearned: (key) => hosted.whatWasLearned(key),
-      health: (key) => hosted.health(key),
+      // An employee's record is tied here as an instance's is, and its key is its own: keys can't clash on one computer.
+      instances: { tiedRecords: (server) => [...instances.tiedRecords(server), ...employeeTies.tiedRecords(server)] },
+      whatWasLearned: (key) => (hired.get(key) ? hired.whatWasLearned(key) : hosted.whatWasLearned(key)),
+      health: (key) => (hired.get(key) ? hired.health(key) : hosted.health(key)),
       check: checkBeforeItLeaves,
       send: (m) => live(index)(m),
       log,
@@ -679,6 +757,14 @@ async function worker(): Promise<number> {
     waiting: () => learnedLinks.forEach((l) => l.sendWaiting()),
   }));
   instances.onChange(() => hosted.tiesMayHaveChanged());
+  hired.bindWhatWasLearned((key) => ({
+    tied: () => employeeTies.tiedRecordsOf(key),
+    held: (server) => employeeTies.heldOn(server, key),
+    servers,
+    catchUp: (server, expertRecordId) => learnedLinks.get(server)?.catchUp(expertRecordId) ?? "cannot",
+    waiting: () => learnedLinks.forEach((l) => l.sendWaiting()),
+  }));
+  employeeTies.onChange(() => hired.tiesMayHaveChanged());
   const expertRights = createExpertRightsOnThisComputer({
     instances,
     store: expertRecordsPerOffice,
@@ -708,6 +794,80 @@ async function worker(): Promise<number> {
   });
   await expertQuestions.start();
   expertQuestionsOnceStarted = expertQuestions;
+  askForARun = (r) => expertQuestions.askForAnEmployeeRun(r);
+
+  // Each office's employee link (employee-link.ts): runs, drafts and decisions, offers to make an employee, and making one from the floor.
+  const employeeLinks = new Map<string, EmployeeLink>();
+  answering.forEach((office, index) => {
+    employeeLinks.set(office.server, createEmployeeLink({ server: office.server, recordLink: recordLinks.get(office.server)!, employees: hired, ties: employeeTies, send: (m) => live(index)(m), log, checkMs: first.approvedRefreshMinutes * 60000 }));
+  });
+  // The office an employee of a project would be published to: the first in config.json's order that takes employees and the project.
+  const officeFor = async (project: string, cwd: string) => {
+    for (const server of servers) {
+      if (recordLinks.get(server)?.directory()?.employees !== true) continue;
+      const home = await projectFor(server, cwd).catch(() => null);
+      if (home && home.id.toLowerCase() === project && !project.startsWith("local:")) return { server, project: home };
+    }
+    return null;
+  };
+  const offersToMakeAnEmployee = createOffersToMakeAnEmployee({
+    file: path.join(isoplanDir, "runner", "offers-to-make-an-employee.json"),
+    projectsDir: path.join(claudeDir, "projects"),
+    claudeDir,
+    account,
+    officeFor,
+    send: (server, m) => employeeLinks.get(server)?.sendNow(m) ?? false,
+    write: async (input) => {
+      const s = (await settings()).employees;
+      return jobFromSessions.write(input, { model: s.jobFromSessionsModel, timeoutSeconds: s.jobFromSessionsTimeoutSeconds });
+    },
+    check: checkBeforeItLeaves,
+    // The experts the sessions asked, from the asking module's own file.
+    expertsAsked: async (sessions) => {
+      const read = (await readJson(path.join(isoplanDir, "runner", "expert-questions-asked-here.json"))) as { questions?: { session?: string; key?: string }[] } | null;
+      return [...new Set((read?.questions ?? []).filter((q) => q.session && sessions.includes(q.session) && q.key).map((q) => q.key!))];
+    },
+    madeHere: () => false,
+    hooked: (session) => pipe?.hooked(session) ?? null,
+    log,
+  });
+  await offersToMakeAnEmployee.load();
+  offersToMakeAnEmployeeOnceStarted = offersToMakeAnEmployee;
+  const jobsStartedByHand = createJobsStartedByHand({
+    file: path.join(isoplanDir, "runner", "jobs-started-by-hand.json"),
+    claudeDir,
+    settings: async () => (await settings()).employees,
+    helperPrompts: async () => (await config()).helperPrompts,
+    onRhythm: (job, rhythm, starts) => void offersToMakeAnEmployee.rhythm(job, rhythm, starts).catch((err: Error) => log(`couldn't offer to make an employee: ${err.message}`)),
+    log,
+  });
+  await jobsStartedByHand.load();
+  jobsStartedByHandOnceStarted = jobsStartedByHand;
+  const makeAnEmployee = createMakeAnEmployee({
+    account,
+    employees: hired,
+    ties: employeeTies,
+    expertHasKey,
+    checkoutOf: (server, project) => checkoutFor(indexOf(server), project),
+    clone: (url, project) => isoplanClone({ url }, project),
+    expertEntry: (server, key) => recordLinks.get(server)?.directory()?.experts.find((e) => e.key === key && !e.employee) ?? null,
+    hasInstance: (server, key) => {
+      const found = instances.lookUp(server, key, null);
+      return !!found && found.kind !== "set-up-failed";
+    },
+    setUpExpert: (server, entry) => void instances.setUp(server, entry).catch((err: Error) => log(`expert ${entry.key}: couldn't set it up: ${err.message}`)),
+    check: checkBeforeItLeaves,
+    scan: scanText,
+    log,
+  });
+  for (const [server, link] of employeeLinks) {
+    link.handle({
+      offerEnded: (m) => offersToMakeAnEmployee.ended(server, m),
+      offerJobWanted: (m) => void offersToMakeAnEmployee.jobWanted(server, m).catch((err: Error) => log(`couldn't send the job of an offer to make an employee: ${err.message}`)),
+      make: (m) => void makeAnEmployee.take(server, m, (x) => link.sendNow(x)).catch((err: Error) => log(`couldn't make an employee: ${err.message}`)),
+      opened: () => offersToMakeAnEmployee.opened(server),
+    });
+  }
   const drive: Driver = createDriver({
     claudeDir,
     account,
@@ -808,6 +968,7 @@ async function worker(): Promise<number> {
       const { pairing, runner } = answerers[answering.indexOf(office)]!;
       const records = recordLinks.get(office.server)!;
       const learned = learnedLinks.get(office.server)!;
+      const hiredHere = employeeLinks.get(office.server)!;
       log(`the runner's worker ${process.pid} is answering for this machine through ${office.server}`);
       status.opening(office.server);
       return createLink({
@@ -829,11 +990,12 @@ async function worker(): Promise<number> {
           drive.linked(office.server);
           records.onOpen();
           learned.onOpen();
+          hiredHere.onOpen();
           expertCreationSuggestions.linked(answering.indexOf(office));
           // The renewal before this hello kept the email the office named, if it did.
           void readPairing(pairingPath(claudeDir)).then((all) => status.email(office.server, pairingEntry(all, office.server, account.id)?.email));
         },
-        onClose: () => (status.closed(office.server), drive.unlinked(office.server), records.onClose(), learned.onClose(), expertCreationSuggestions.linked(answering.indexOf(office))),
+        onClose: () => (status.closed(office.server), drive.unlinked(office.server), records.onClose(), learned.onClose(), hiredHere.onClose(), expertCreationSuggestions.linked(answering.indexOf(office))),
         onNotWanted: () => (status.stopped(office.server, "not-wanted"), said.notWanted()),
         // A revoked or lapsed pairing closes this link: the sessions' links pair the machine again.
         onPairingEnded: () => (status.stopped(office.server, "unpaired"), said.unpaired()),
@@ -851,14 +1013,16 @@ async function worker(): Promise<number> {
           canCreateExpertsFromSuggestions: true,
           expertInstances: true,
           sharesWhatExpertInstancesLearn: true,
+          employees: true,
         },
       });
     },
     paired: async (office) => !!pairingEntry(await readPairing(pairingPath(claudeDir)), office.server, account.id)?.credential,
     // Nor while it reports sessions: their links, and the pairing they share, would end with it.
-    idle: () => answerers.every((a) => a.runner.idle()) && reporting.reporting().length === 0 && !pipe?.all().length && hosted.idle() && expertQuestions.idle() && expertCreationSuggestions.idle(),
+    idle: () => answerers.every((a) => a.runner.idle()) && reporting.reporting().length === 0 && !pipe?.all().length && hosted.idle() && hired.idle() && expertQuestions.idle() && expertCreationSuggestions.idle(),
     lit: async () => anyRoomSince(io, path.join(claudeDir, "projects"), Date.now() - askableMs(await config().catch(() => first))),
-    keep: async () => drive.held() > 0 || (await settings()).startAtLogin,
+    // An employee tied to a published record keeps its runner up for its runs.
+    keep: async () => drive.held() > 0 || hired.anyTied() || (await settings()).startAtLogin,
     gone,
     log,
     checkMs: CHECK_MS,
@@ -869,6 +1033,9 @@ async function worker(): Promise<number> {
   const ended = await links.ended;
   for (const link of recordLinks.values()) link.stop();
   for (const link of learnedLinks.values()) link.stop();
+  for (const link of employeeLinks.values()) link.stop();
+  hired.close();
+  await employeeTools.stop();
   expertQuestions.close();
   await expertRecordsPerOffice.written();
   // Each session's link closes, and its log says so, before the worker exits; one stuck in a pass is left after STOP_WAIT_MS (reporting.ts).

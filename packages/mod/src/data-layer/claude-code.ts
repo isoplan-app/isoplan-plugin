@@ -143,6 +143,8 @@ export interface SourceRead {
   said?: (project: string | null, folder: string) => Promise<string[]>;
   /** The files the session's agents read, most readings first, at most MAX_READINGS. Never sent: the runner counts reading again from them. */
   readings?: FileReading[];
+  /** Its person's messages up to and including its first prompt, when its transcript was read from its start; null when it wasn't. Never sent: the runner's offers to make an employee count them (isoplan-app#341). */
+  firstMessages?: { at: number; messages: FirstMessage[] } | null;
 }
 
 /**
@@ -225,7 +227,7 @@ export function createClaudeCode(io: SourceIo) {
       });
       const checkouts: Record<string, string> = {};
       const { facts, answered, said, readings } = await sessionFacts(c, main, where, workspace, now, config, resolve, place, fail, checkouts, corrected);
-      return { facts, status: null, errors, workspace, checkouts, answered, said, readings };
+      return { facts, status: null, errors, workspace, checkouts, answered, said, readings, firstMessages: main.fromStart ? { at: main.firstAt, messages: [...main.firstMessages] } : null };
     } finally {
       for (const cache of [transcripts, metas]) {
         for (const key of cache.keys()) if (!used.has(key)) cache.delete(key);
@@ -749,6 +751,7 @@ interface TranscriptState {
   prompts: number; // user lines that opened a turn, tool results and interruptions aside
   tools: number; // tool_use blocks
   firstPrompt: string | null; // the first prompt's opening, for leftOut only: it is never sent
+  firstMessages: FirstMessage[]; // its person's messages up to and including the first prompt, for the runner alone: never sent
   compacted: boolean; // the session was compacted at least once
   asks: Map<string, { at: number; input: unknown }>; // id of each AskUserQuestion tool_use since the last prompt → its time and input
   workflows: Map<string, WorkflowLaunch & { at: number }>; // run id of each workflow this file launched → its launch
@@ -909,6 +912,7 @@ function newTranscriptState(): TranscriptState {
     prompts: 0,
     tools: 0,
     firstPrompt: null,
+    firstMessages: [],
     compacted: false,
     asks: new Map(),
     workflows: new Map(),
@@ -1024,6 +1028,7 @@ function foldLine(st: TranscriptState, line: string, home: string | null, isDir?
         st.area.rejected = true;
       }
     }
+    if (!toolResults) firstMessage(st, ev, content);
     const turn = userTurn(ev, content);
     if (turn !== null) setTurn(st, turn, at);
     // An interruption, unless it only follows a call the person turned down.
@@ -1123,6 +1128,29 @@ function userTurn(ev: Line, content: unknown): boolean | null {
 
 // The first prompt's opening is kept only to match it against `helperPrompts`.
 const PROMPT_CHARS = 200;
+
+/**
+ * One of a person's first messages in a session (isoplan-app#341, for the runner's offers to make an
+ * employee): a command they typed (`/x`, as Claude Code records it in `<command-name>/x</command-name>`,
+ * a skill's with `<command-message>x</command-message>` before it, a built-in's alone), or a prompt.
+ */
+export type FirstMessage = { command: string } | { prompt: string };
+/** The most first messages kept: the commands before the first prompt, and that prompt. */
+const MAX_FIRST_MESSAGES = 10;
+/** The longest first prompt kept: it is matched whole, normalised, so a longer one is cut. */
+export const FIRST_PROMPT_CHARS = 2000;
+
+// Keeps the person's messages up to and including the first prompt, of a transcript read from its start.
+function firstMessage(st: TranscriptState, ev: Line, content: unknown): void {
+  if (!st.fromStart || ev.isMeta || ev.isCompactSummary || st.firstMessages.length >= MAX_FIRST_MESSAGES || st.firstMessages.some((m) => "prompt" in m)) return;
+  const texts = typeof content === "string" ? [content] : Array.isArray(content) ? content.filter((c) => c && c.type === "text" && typeof c.text === "string").map((c) => c.text as string) : [];
+  const text = texts.join("\n");
+  if (!text.trim() || text.startsWith("[Request interrupted by user")) return;
+  const command = /<command-name>\/?([^<\s]+)<\/command-name>/.exec(text)?.[1];
+  if (command) return void st.firstMessages.push({ command });
+  if (/^\s*<(command-|local-command-)/.test(text)) return;
+  st.firstMessages.push({ prompt: text.slice(0, FIRST_PROMPT_CHARS) });
+}
 
 function promptText(content: unknown): string {
   if (typeof content === "string") return content;

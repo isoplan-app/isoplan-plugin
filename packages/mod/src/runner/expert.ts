@@ -63,7 +63,7 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { AreaPathSchema, DEFAULT_LEARNED_ELSEWHERE_TOKENS_PER_QUESTION, MAX_FILES_WHAT_WAS_LEARNED_RESTS_ON, type FileWhatWasLearnedRestsOn } from "@isoplan/protocol";
+import { AreaPathSchema, DEFAULT_LEARNED_ELSEWHERE_TOKENS_PER_QUESTION, MAX_FILES_WHAT_WAS_LEARNED_RESTS_ON, MAX_WHAT_WAS_LEARNED_LENGTH, type FileWhatWasLearnedRestsOn } from "@isoplan/protocol";
 import type { Usage } from "./answerer.js";
 import { estimate, openLedger, weighted, type CapSettings, type Ledger } from "./caps.js";
 import { claudeCommand } from "./claude-binary.js";
@@ -78,6 +78,7 @@ import { meterOf, ROOM_FOR_THINGS_LEARNED, roomForWhatWasLearnedProblem, thresho
 import { answerText, citationBlock, fileOf, filesNamedIn, parseReply, withCommitsRead } from "./expert-reply.js";
 import { fingerprint, indexPath, readIndex, readState, writeIndex, writeState, type AddedToItsTrunk, type SavedExpert, type SavedGeneration } from "./expert-state.js";
 import { createTrunkAdditions } from "./expert-trunk-additions.js";
+import { createTrunkTranscripts } from "./trunk-transcript.js";
 import type { RunGit } from "../handoff/git.js";
 import { fill } from "./prompts.js";
 import { createForkSlots } from "./runner.js";
@@ -103,6 +104,13 @@ export type InstanceOutcome =
   | { kind: "answered"; answer: string; commit: string; branch: string }
   | { kind: "refused"; code: "EXPERT_CAP" | "EXPERT_FORK_FAILED" | "EXPERT_UNKNOWN"; detail: string; cap?: ExpertCap; limit?: number; frees?: number }
   | { kind: "not-yet"; detail: string };
+
+/** A rejected draft an employee's run made after asking this expert: its owner's correction, the draft, and this expert's answers in that run with the files each cited. */
+export interface CorrectionToTeach {
+  correction: string;
+  draftText: string;
+  answers: readonly { question: string; answer: string; files: readonly FileWhatWasLearnedRestsOn[] }[];
+}
 
 /** Why its last grounding failed, as an asker is told: never the log's detail, which can name paths on this computer. */
 export type ExpertFailure = "proof" | "checkout" | "other";
@@ -178,6 +186,13 @@ export interface Expert {
   catchingUp(): boolean;
   /** Grounds again now, as if its file had changed: Try again after a failure. */
   retryNow(): void;
+  /**
+   * An employee's owner rejected drafts its run made after asking this expert, and chose to teach it
+   * (isoplan-app#341): a fork of its junior with each correction and what it answered then writes what
+   * holds in general, resting on the files those answers cited, which then goes #366's way. `none`:
+   * nothing concerned what it knows; `waiting`: it can't now (no junior, grounding, its day's tokens spent).
+   */
+  learnFromCorrections(taught: readonly CorrectionToTeach[]): Promise<"learned" | "none" | "failed" | "waiting">;
   /** No grounding, fork, addition or judge running. */
   idle(): boolean;
   /** Its file was removed: its processes end, and its questions are refused. Its folder is kept. */
@@ -312,7 +327,7 @@ export function createExpert(o: ExpertOptions): Expert {
   const inFlight = new Set<Question>(); // past the caps, not finished
   const finished = new Map<string, InstanceOutcome>(); // question id → how it went
   const waiters = new Set<() => void>();
-  const transcripts = new Map<string, string>(); // trunk → its transcript's path, once found
+  const { transcriptOf, lastTurn, onlyOurs, forget: forgetTranscript } = createTrunkTranscripts(o.projectsDir);
   const live = new Map<string, number>(); // trunk → its processes running
   const discarded = new Set<string>(); // trunks whose files are deleted
 
@@ -502,7 +517,7 @@ export function createExpert(o: ExpertOptions): Expert {
     // A trunk that isn't a uuid could name a project folder itself, so nothing is deleted for it.
     if (!UUID.test(g.trunk)) return;
     const transcript = await transcriptOf(g.trunk);
-    transcripts.delete(g.trunk);
+    forgetTranscript(g.trunk);
     if (!transcript) return;
     try {
       // Tried again a few times: Windows holds a file or folder a moment while a scanner or a process in it lets go.
@@ -1291,57 +1306,6 @@ export function createExpert(o: ExpertOptions): Expert {
     void ground();
   }
 
-  // A trunk's transcript, under whichever project folder Claude Code named for read/; null when it is gone.
-  async function transcriptOf(trunk: string): Promise<string | null> {
-    const there = (file: string) => fs.stat(file).then(() => true, () => false);
-    const known = transcripts.get(trunk);
-    if (known && (await there(known))) return known;
-    const dirs = await fs.readdir(o.projectsDir, { withFileTypes: true }).catch(() => []);
-    for (const d of dirs) {
-      const file = path.join(o.projectsDir, d.name, `${trunk}.jsonl`);
-      if (d.isDirectory() && (await there(file))) return (transcripts.set(trunk, file), file);
-    }
-    return null;
-  }
-
-  // The uuid of a trunk transcript's last user or assistant entry: Claude Code writes other kinds of line too.
-  async function lastTurn(trunk: string): Promise<string | null> {
-    const file = await transcriptOf(trunk);
-    const lines = (file ? await fs.readFile(file, "utf8").catch(() => "") : "").split("\n");
-    for (let i = lines.length - 1; i >= 0; i--) {
-      try {
-        const e = JSON.parse(lines[i]!) as { type?: unknown; uuid?: unknown };
-        if ((e.type === "user" || e.type === "assistant") && typeof e.uuid === "string") return e.uuid;
-      } catch {
-        // a blank line, or one still being written
-      }
-    }
-    return null;
-  }
-
-  // Whether every user turn after `after` (from the start when null) in a trunk's transcript is one
-  // of `ours`. Tool results and Claude Code's own entries (isMeta, a subagent's) are user entries too.
-  async function onlyOurs(trunk: string, after: string | null, ours: string[]): Promise<boolean> {
-    const file = await transcriptOf(trunk);
-    const entries = (file ? await fs.readFile(file, "utf8").catch(() => "") : "").split("\n").flatMap((l) => {
-      try {
-        return [JSON.parse(l) as { type?: unknown; uuid?: unknown; isMeta?: unknown; isSidechain?: unknown; message?: { content?: unknown } }];
-      } catch {
-        return []; // a blank line, or one still being written
-      }
-    });
-    const from = after === null ? 0 : entries.findIndex((e) => e.uuid === after) + 1;
-    if (from === 0 && after !== null) return false;
-    const wanted = new Set(ours.map((t) => t.trim()));
-    return entries.slice(from).every((e) => {
-      if (e.type !== "user" || e.isMeta === true || e.isSidechain === true) return true;
-      const content = e.message?.content;
-      const blocks = typeof content === "string" ? [{ type: "text", text: content }] : Array.isArray(content) ? (content as { type?: unknown; text?: unknown }[]) : [];
-      if (blocks.some((b) => b?.type === "tool_result")) return true;
-      return wanted.has(blocks.map((b) => (b?.type === "text" && typeof b.text === "string" ? b.text : "")).join("").trim());
-    });
-  }
-
   /** Whether a junior's or senior's trunk is as the runner left it; one that isn't is taken out of use. */
   async function trusted(g: SavedGeneration): Promise<boolean> {
     const started = appendsStarted;
@@ -1474,6 +1438,42 @@ export function createExpert(o: ExpertOptions): Expert {
         .finally(() => questions.delete(q.id));
     },
     beforeQuestion,
+    async learnFromCorrections(taught) {
+      const j = gen("junior");
+      if (!j || stopped || groundingRun || !ledger || !taught.length) return "waiting";
+      const s = await o.settings();
+      // Inside its own day's tokens, as its questions are.
+      if (ledger.entries(now()).reduce((n, e) => n + weighted(e.usage, s), 0) >= file.caps.tokenBudgetPerDay) return "waiting";
+      if (!(await prepare()) || !(await trusted(j))) return "waiting";
+      const quoted = (t: string) => t.trim().replace(/^/gm, "  > ");
+      const corrections = taught
+        .map((x, i) => [`${i + 1}. The owner's correction: ${x.correction.trim()}`, `   The draft:\n${quoted(x.draftText)}`, ...x.answers.map((a) => `   You were asked: ${a.question.trim()}\n   You answered:\n${quoted(a.answer)}`)].join("\n"))
+        .join("\n\n");
+      const text = fill((await fs.readFile(path.join(o.appDir, "prompts", "expert-correction.md"), "utf8")).trim(), { corrections });
+      const commit = await checkout.head();
+      const c = await run(expertForkArgs(j.trunk, j.model, forkAt(j)), readDir, j.trunk, text, trunkNext([]), file.forkTimeLimitMinutes * minute, {});
+      overhead(c.usage);
+      if (!c.ok) return (log(`couldn't learn from an employee's corrections: ${c.failure!.detail}`), "failed");
+      const blocks = [...(c.turns.at(-1)?.text ?? "").matchAll(/<learned>([\s\S]*?)<\/learned>/g)].map((m) => m[1]!.trim().slice(0, MAX_WHAT_WAS_LEARNED_LENGTH)).filter(Boolean);
+      if (!blocks.length) return "none";
+      // Every file the answers cited, in their order, each once: what a block rests on.
+      const cited: FileWhatWasLearnedRestsOn[] = [];
+      for (const x of taught) for (const a of x.answers) for (const f of a.files) if (!cited.some((y) => y.path === f.path)) cited.push({ ...f });
+      const things: ThingLearnedHere[] = [];
+      for (const b of blocks) {
+        const named = new Set(filesNamedIn(b));
+        const files = (cited.some((f) => named.has(f.path)) ? cited.filter((f) => named.has(f.path)) : cited).slice(0, MAX_FILES_WHAT_WAS_LEARNED_RESTS_ON);
+        if (!files.length) continue;
+        const thing: ThingLearnedHere = { id: randomUUID(), text: b, files, learnedAt: new Date(now()).toISOString(), generation: j.n, firstLine: firstLineOf(b) };
+        await whatWasLearned.keepBeforeAdding(thing);
+        things.push(thing);
+      }
+      if (!things.length) return "none";
+      await addToTrunk(j, things, {}, await changedSince(things), commit);
+      whatWasLearned.additionEnded(things.map((t) => t.id));
+      say("learned", { from: "an employee's corrections", count: things.length });
+      return "learned";
+    },
     catchingUp: () => catchingUp,
     retryNow() {
       if (stopped) return;

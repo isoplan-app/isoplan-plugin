@@ -67,6 +67,17 @@ import {
   type ExpertLearnedSinceMessage,
   type ExpertLearnedWantedAfterMessage,
   type ExpertLearnedWantedAfterRefusedMessage,
+  type EmployeeRunsMessage,
+  type EmployeeDraftsMessage,
+  type EmployeeDraftDecisionAppliedMessage,
+  type OfferToMakeAnEmployeeMessage,
+  type OfferToMakeAnEmployeeJobMessage,
+  type MakingAnEmployeeMessage,
+  type EmployeeDraftsReceivedMessage,
+  type EmployeeDraftDecidedMessage,
+  type OfferToMakeAnEmployeeEndedMessage,
+  type OfferToMakeAnEmployeeJobWantedMessage,
+  type MakeAnEmployeeMessage,
   type ExpertProofFailedMessage,
   type ExpertQuestionMessage,
   type ExpertQuestionsAskedOnYourOtherComputersMessage,
@@ -160,13 +171,19 @@ export type ServerExpertCreationSuggestionMessage = ExpertCreationSuggestionDism
 /** What a runner that can create experts from suggestions sends, live. */
 export type RunnerExpertCreationSuggestionMessage = ExpertCreationSuggestionMessage | RunnerExpertCreationSuggestionEndedMessage | ExpertCreationProgressMessage;
 
-/** What the server tells a runner that keeps instances of experts (protocol 0.17.0), and what instances learn (0.18.0). */
-export type ServerExpertRecordMessage = ExpertDirectoryMessage | ExpertRecordMessage | ExpertDefinitionResultMessage | ExpertDeletedMessage | SetUpExpertInstanceMessage | ExpertSetUpOfferEndedMessage | ExpertQuestionsAskedOnYourOtherComputersMessage | ExpertInstanceLearnedReceivedMessage | ExpertLearnedSinceMessage | ExpertLearnedWantedAfterRefusedMessage;
+/** What the server tells a runner that runs employees (protocol 0.19.0, isoplan-app#341). */
+export type ServerEmployeeMessage = EmployeeDraftsReceivedMessage | EmployeeDraftDecidedMessage | OfferToMakeAnEmployeeEndedMessage | OfferToMakeAnEmployeeJobWantedMessage | MakeAnEmployeeMessage;
 
-/** What a runner that keeps instances of experts sends, live. */
-export type RunnerExpertRecordMessage = ExpertDefinitionMessage | ExpertRecordWantedMessage | ExpertInstanceStatesMessage | ExpertQuestionMessage | ExpertSetUpOfferedMessage | ExpertProofFailedMessage | ExpertInstanceLearnedMessage | ExpertLearnedWantedAfterMessage;
+/** What a runner that runs employees sends, live (protocol 0.19.0). */
+export type RunnerEmployeeMessage = EmployeeRunsMessage | EmployeeDraftsMessage | EmployeeDraftDecisionAppliedMessage | OfferToMakeAnEmployeeMessage | OfferToMakeAnEmployeeJobMessage | MakingAnEmployeeMessage;
 
-const SERVER_EXPERT_RECORD_TYPES = new Set<string>(["expert-directory", "expert-record", "expert-definition-result", "expert-deleted", "set-up-expert-instance", "expert-set-up-offer-ended", "expert-questions-asked-on-your-other-computers", "expert-instance-learned-received", "expert-learned-since", "expert-learned-wanted-after-refused"]);
+/** What the server tells a runner that keeps instances of experts (protocol 0.17.0), what instances learn (0.18.0), and employees (0.19.0), which come after the directory that opens them. */
+export type ServerExpertRecordMessage = ExpertDirectoryMessage | ExpertRecordMessage | ExpertDefinitionResultMessage | ExpertDeletedMessage | SetUpExpertInstanceMessage | ExpertSetUpOfferEndedMessage | ExpertQuestionsAskedOnYourOtherComputersMessage | ExpertInstanceLearnedReceivedMessage | ExpertLearnedSinceMessage | ExpertLearnedWantedAfterRefusedMessage | ServerEmployeeMessage;
+
+/** What a runner that keeps instances of experts sends, live, and one that runs employees. */
+export type RunnerExpertRecordMessage = ExpertDefinitionMessage | ExpertRecordWantedMessage | ExpertInstanceStatesMessage | ExpertQuestionMessage | ExpertSetUpOfferedMessage | ExpertProofFailedMessage | ExpertInstanceLearnedMessage | ExpertLearnedWantedAfterMessage | RunnerEmployeeMessage;
+
+const SERVER_EXPERT_RECORD_TYPES = new Set<string>(["expert-directory", "expert-record", "expert-definition-result", "expert-deleted", "set-up-expert-instance", "expert-set-up-offer-ended", "expert-questions-asked-on-your-other-computers", "expert-instance-learned-received", "expert-learned-since", "expert-learned-wanted-after-refused", "employee-drafts-received", "employee-draft-decided", "offer-to-make-an-employee-ended", "offer-to-make-an-employee-job-wanted", "make-an-employee"]);
 
 export interface Link {
   /** The session's facts now; what differs from what the server has goes out when the pace allows. */

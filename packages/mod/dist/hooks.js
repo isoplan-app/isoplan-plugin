@@ -155,6 +155,7 @@ const offices = /* @__PURE__ */ new Map();
 const openExpertCreationSuggestionsByOffice = /* @__PURE__ */ new Map();
 const expertCreationSuggestionsPutInTranscript = /* @__PURE__ */ new Set();
 const openExpertSetUpOffers = /* @__PURE__ */ new Map();
+const openOffersToMakeAnEmployee = /* @__PURE__ */ new Map();
 const readyTold = /* @__PURE__ */ new Set();
 const floorWaits = /* @__PURE__ */ new Map();
 const questionCalls = /* @__PURE__ */ new Set();
@@ -459,6 +460,7 @@ async function run($) {
 		offices.clear();
 		openExpertCreationSuggestionsByOffice.clear();
 		openExpertSetUpOffers.clear();
+		openOffersToMakeAnEmployee.clear();
 		running = session;
 		lead = `claude-code:${session}:lead`;
 		let switched = false;
@@ -561,6 +563,7 @@ function handle($, text) {
 			pairings.clear();
 			openExpertCreationSuggestionsByOffice.clear();
 			openExpertSetUpOffers.clear();
+			openOffersToMakeAnEmployee.clear();
 			show($, line.state === "down" ? RUNNER_DOWN_TEXT[line.held ?? "starting"] : statusText());
 			break;
 		case "title-ask":
@@ -595,6 +598,14 @@ function handle($, text) {
 			break;
 		case "expert-set-up-offer-ended":
 			openExpertSetUpOffers.delete(`${line.server}\n${line.key}`);
+			show($, statusText());
+			break;
+		case "offer-to-make-an-employee":
+			openOffersToMakeAnEmployee.set(`${line.server}\n${line.id}`, line);
+			show($, statusText());
+			break;
+		case "offer-to-make-an-employee-ended":
+			openOffersToMakeAnEmployee.delete(`${line.server}\n${line.id}`);
 			show($, statusText());
 			break;
 		case "asked":
@@ -650,6 +661,7 @@ function statusText() {
 		if (!part) continue;
 		parts.push(part);
 		for (const offer of openExpertSetUpOffers.values()) if (offer.server === server) parts.push(`The ${offer.name} isn't set up on this computer · set up: ${offer.url}`);
+		for (const offer of openOffersToMakeAnEmployee.values()) if (offer.server === server) parts.push(offerToMakeAnEmployeeText(offer));
 		const suggestion = [...openExpertCreationSuggestionsByOffice.get(server)?.values() ?? []].reverse().find((o) => !linked.has(o.id));
 		if (!suggestion) continue;
 		linked.add(suggestion.id);
@@ -657,6 +669,8 @@ function statusText() {
 	}
 	return parts.length ? `Isoplan: ${parts.join(" · ")}` : void 0;
 }
+/** The status line's words for an offer to make an employee: its skill's, or a prompt's job. */
+const offerToMakeAnEmployeeText = (offer) => `${offer.skill ? `Your /${offer.skill}` : "This job"} could run on its own · make an employee: ${offer.url}`;
 function addExpertCreationSuggestion($, line) {
 	let open = openExpertCreationSuggestionsByOffice.get(line.server);
 	if (!open) openExpertCreationSuggestionsByOffice.set(line.server, open = /* @__PURE__ */ new Map());
@@ -972,4 +986,4 @@ async function isThere($, file) {
 }
 const message = (err) => String(err && err.message || err);
 //#endregion
-export { expertToolDescription, register };
+export { expertToolDescription, offerToMakeAnEmployeeText, register };

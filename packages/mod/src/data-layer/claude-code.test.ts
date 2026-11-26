@@ -1259,3 +1259,15 @@ test("areas: what the session said in another repo's folder is found whatever th
   const id = r.facts!.areas!.find((a) => a.folder === "a")!.project!.id;
   expect(await r.said!(id.toUpperCase(), "a")).toEqual(["Asked: how does a work?\nAnswered: a parses."]);
 });
+
+test("a session's first messages from its person, as Claude Code records them, for the runner alone: a skill's start, a built-in command, then the first prompt; none past the first prompt, and none of them in the facts", async () => {
+  const { home, main } = office();
+  session(home, "skill", [line.user(main, "<command-message>outreach</command-message>\n<command-name>/outreach</command-name>\n<command-args></command-args>", 40), line.user(main, "Find ten agencies in Bristol.", 35), answer(main)]);
+  session(home, "effort", [line.user(main, "<command-name>/effort</command-name>\n<command-message>effort</command-message>", 40), line.user(main, "<local-command-stdout>Set effort to high</local-command-stdout>", 39), line.user(main, "Draft the weekly update.", 35), answer(main)]);
+  const read = sourceIn(home);
+  const skill = await read("skill");
+  expect(skill.firstMessages?.messages).toEqual([{ command: "outreach" }, { prompt: "Find ten agencies in Bristol." }]);
+  expect(skill.firstMessages?.at).toBe(Date.parse(at(40)));
+  expect((await read("effort")).firstMessages?.messages).toEqual([{ command: "effort" }, { prompt: "Draft the weekly update." }]);
+  expect(JSON.stringify(skill.facts)).not.toContain("Bristol");
+});
