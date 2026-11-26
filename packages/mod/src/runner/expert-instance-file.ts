@@ -140,7 +140,8 @@ export const expertFileFromRecord = (d: ExpertDefinition, local: ExpertLocalFiel
   fetchSeconds: local.fetchSeconds,
   maxForks: local.maxForks,
   caps: { perAskerPerDay: local.caps.perAskerPerDay, openPerAsker: local.caps.openPerAsker, tokenBudgetPerDay: local.caps.tokenBudgetPerDay },
-  proof: { question: d.proof.question, answer: d.proof.answer },
+  // An expert's record has its proof (protocol 0.19.0): this runner says no `employees`, so no employee's record reaches it.
+  proof: { question: d.proof!.question, answer: d.proof!.answer },
   ...(local.window !== undefined && { window: local.window }),
   areas: [...d.areas],
   ...(d.learnedElsewhereTokensPerQuestion !== undefined && { learnedElsewhereTokensPerQuestion: d.learnedElsewhereTokensPerQuestion }),
@@ -171,4 +172,5 @@ export const sameDefinition = (a: ExpertDefinition, b: ExpertDefinition) => JSON
 /** Whether an expert file still says what a definition says, whatever its project: what an owner's computer compares a new revision with. */
 export const fileSaysDefinition = (f: ExpertFile, d: ExpertDefinition) => sameDefinition(definitionOf(f, d.project), d);
 
-const comparable = (d: ExpertDefinition) => [d.key, d.project.id.toLowerCase(), d.subject, d.model, d.promoteAtTokens, d.areas, d.proof.question, d.proof.answer, d.learnedElsewhereTokensPerQuestion ?? null];
+// Experts' definitions only, each with its proof, as in expertFileFromRecord.
+const comparable = (d: ExpertDefinition) => [d.key, d.project.id.toLowerCase(), d.subject, d.model, d.promoteAtTokens, d.areas, d.proof!.question, d.proof!.answer, d.learnedElsewhereTokensPerQuestion ?? null];
