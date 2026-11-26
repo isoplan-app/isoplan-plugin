@@ -82,14 +82,15 @@ export interface ExpertRecordLink {
   onWhatWasLearned(listener: (m: WhatWasLearnedServerMessage) => void): void;
 }
 
-// A definition's fields, each checked for secrets, the first that matches named.
+// A definition's fields, each checked for secrets, the first that matches named. Only this
+// computer's expert files are published, and each has its proof (protocol 0.19.0).
 const FIELDS: [string, (d: ExpertDefinition) => string][] = [
   ["key", (d) => d.key],
   ["subject", (d) => d.subject],
   ["model", (d) => d.model],
   ["areas", (d) => d.areas.join("\n")],
-  ["proof.question", (d) => d.proof.question],
-  ["proof.answer", (d) => d.proof.answer],
+  ["proof.question", (d) => d.proof!.question],
+  ["proof.answer", (d) => d.proof!.answer],
 ];
 
 export function createExpertRecordLink(o: ExpertRecordLinkOptions): ExpertRecordLink {

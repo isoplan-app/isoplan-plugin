@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { areaCovers } from "./area-covers.js";
 import { AreaPathSchema, FactRemoveSchema, FactsSchema, FactUpsertSchema, ProjectSchema, SourceSchema } from "./facts.js";
 
 /**
@@ -229,6 +230,10 @@ export const HelloMessageSchema = z.object({
  * `sharesWhatExpertInstancesLearn` (protocol 0.18.0, isoplan-app#366): this runner sends what its
  * instances' forks learn to their expert records, and takes what other instances learned, in the
  * messages of "What instances learn". The server sends none of them to a runner that didn't say it.
+ * `employees` (protocol 0.19.0, isoplan-app#341): this runner runs employees: it publishes their
+ * job definitions, says how their runs go, sends their drafts and takes their owner's decisions,
+ * offers to make an employee, and makes one from the floor, in the messages of "Employees". The
+ * server sends none of them to a runner that didn't say it.
  */
 export const RunnerHelloMessageSchema = z.object({
   type: z.literal("runner"),
@@ -245,6 +250,7 @@ export const RunnerHelloMessageSchema = z.object({
   canCreateExpertsFromSuggestions: z.literal(true).optional(),
   expertInstances: z.literal(true).optional(),
   sharesWhatExpertInstancesLearn: z.literal(true).optional(),
+  employees: z.literal(true).optional(),
 });
 
 /** All of the session's facts. Sent on connect and on repair. */
@@ -325,6 +331,13 @@ export const MAX_AREA_PATHS = 20;
  */
 export const expertDisplayName = (key: string) =>
   [...key.split("-").filter(Boolean).map((word) => word[0]!.toUpperCase() + word.slice(1)), "Expert"].join(" ");
+
+/**
+ * An employee's name as people read it, from its key (protocol 0.19.0): the key's words, split on
+ * dashes, each capitalised, with nothing after them (`adams-outreach` is "Adams Outreach").
+ */
+export const employeeDisplayName = (key: string) =>
+  key.split("-").filter(Boolean).map((word) => word[0]!.toUpperCase() + word.slice(1)).join(" ");
 
 /**
  * One expert a session may ask: `repo` is its project's short name, `host` a person's name: the
@@ -613,6 +626,107 @@ export const ExpertCreationProgressMessageSchema = z.object({
   detail: Detail.optional(),
 });
 
+// An employee's job (protocol 0.19.0, isoplan-app#341): what an employee is set up to do and when,
+// as its owner's job file says it. An employee's definition in its expert record carries its job,
+// so these shared pieces come before the definition; the messages are under "Employees".
+
+/**
+ * The only tools a job may list: none of them sends, posts, merges or pays. `Read` is always among
+ * them, as grounding reads the job's documents with it. Isoplan's own `ask_expert` and
+ * `leave_draft` come with every job and are never listed.
+ */
+export const JOB_TOOLS = ["Read", "Grep", "Glob", "Agent", "WebSearch", "WebFetch"] as const;
+export const JobToolSchema = z.enum(JOB_TOOLS);
+/** The longest brief a job carries. */
+export const MAX_JOB_BRIEF_LENGTH = 8000;
+/** The most rules a job carries. */
+export const MAX_JOB_RULES = 50;
+/** The longest rule of a job. */
+export const MAX_JOB_RULE_LENGTH = 1000;
+/** The most documents, and the most examples, a job names. */
+export const MAX_JOB_PATHS = 50;
+/** The most drafts one run of a job may leave, and the most an `employee-drafts` carries. */
+export const MAX_DRAFTS_PER_RUN = 50;
+
+/** Adds an issue at `path(i)` for each of `values` that an earlier one named. */
+const checkEachOnce = (path: (i: number) => (string | number)[], values: readonly string[], context: z.RefinementCtx) => {
+  const seen = new Set<string>();
+  values.forEach((value, i) => {
+    if (seen.has(value)) context.addIssue({ code: "custom", path: path(i), message: `${value} is named once only` });
+    seen.add(value);
+  });
+};
+
+const Weekday = z.enum(["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]);
+
+/**
+ * When a job runs: every day, every weekday (Monday to Friday), or once a week on the day `on`,
+ * which a weekly job names and no other does; at `at`, 24-hour HH:MM; in `timeZone`, an IANA zone
+ * such as `Europe/London`, or, absent, its owner's computer's own.
+ */
+export const JobScheduleSchema = z
+  .object({
+    every: z.enum(["day", "weekday", "week"]),
+    at: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "a 24-hour time, HH:MM"),
+    on: Weekday.optional(),
+    timeZone: z.string().max(100).regex(/^[A-Za-z][A-Za-z0-9_+-]*(\/[A-Za-z0-9_+-]+){0,2}$/, "an IANA time zone, such as Europe/London").optional(),
+  })
+  .superRefine((schedule, context) => {
+    if (schedule.every === "week" && schedule.on === undefined) context.addIssue({ code: "custom", path: ["on"], message: "the day a weekly job runs on" });
+    if (schedule.every !== "week" && schedule.on !== undefined) context.addIssue({ code: "custom", path: ["on"], message: "only a weekly job names a day" });
+  });
+
+/** A job's limits, each absent being its runner's default: minutes and tokens per run and per rolling 24 hours, and drafts per run. */
+const JobLimits = z
+  .object({
+    runMinutes: z.number().int().positive().max(24 * 60),
+    dayMinutes: z.number().int().positive().max(24 * 60),
+    runTokens: z.number().int().positive(),
+    dayTokens: z.number().int().positive(),
+    draftsPerRun: z.number().int().positive().max(MAX_DRAFTS_PER_RUN),
+  })
+  .partial();
+
+/**
+ * What an employee is set up to do and when (CONTEXT.md: Job), as its owner's job file says it: its
+ * `brief` and `rules` as written; the paths in its project of its `documents` and `examples`, which
+ * it reads while grounding (never their contents); its `schedule`, and `missedRunWindowMinutes`,
+ * how late a missed run still runs (absent: half the gap to the next scheduled time); the `tools`
+ * it may use (JOB_TOOLS, each once) and the `experts` it may ask (each once); `draftsWaitHours`,
+ * how long its drafts wait for their owner before they expire; its `limits`; and `whoWasContacted`,
+ * the path in its project of the file of who was contacted (absent: its runner's default, so the
+ * jobs of one project share one file). Any field absent takes its runner's default, and a runner
+ * sends only the fields the job file sets, so a default changing on a computer changes no
+ * definition. The file of who was contacted holds prospects' details, which a run must not read
+ * while grounding, so it is one file (never `.`, nor a glob) that none of the job's documents or
+ * examples cover (areaCovers).
+ */
+export const JobSchema = z
+  .object({
+    brief: z.string().trim().min(1).max(MAX_JOB_BRIEF_LENGTH),
+    rules: z.array(z.string().trim().min(1).max(MAX_JOB_RULE_LENGTH)).max(MAX_JOB_RULES),
+    documents: z.array(AreaPathSchema).max(MAX_JOB_PATHS),
+    examples: z.array(AreaPathSchema).max(MAX_JOB_PATHS),
+    schedule: JobScheduleSchema,
+    missedRunWindowMinutes: z.number().int().positive().max(7 * 24 * 60).optional(),
+    tools: z.array(JobToolSchema).max(JOB_TOOLS.length),
+    experts: z.array(ExpertNameSchema).max(MAX_EXPERTS),
+    draftsWaitHours: z.number().int().positive().max(30 * 24).optional(),
+    limits: JobLimits.optional(),
+    whoWasContacted: AreaPathSchema.optional(),
+  })
+  .superRefine((job, context) => {
+    checkEachOnce((i) => ["tools", i], job.tools, context);
+    checkEachOnce((i) => ["experts", i], job.experts, context);
+    if (!job.tools.includes("Read")) context.addIssue({ code: "custom", path: ["tools"], message: "Read among them: grounding reads the job's documents with it" });
+    const file = job.whoWasContacted;
+    if (file === undefined) return;
+    if (file === "." || /[*?[\]{}]/.test(file)) return context.addIssue({ code: "custom", path: ["whoWasContacted"], message: "one file: never `.`, nor a glob" });
+    for (const field of ["documents", "examples"] as const) {
+      if (areaCovers(job[field], file)) context.addIssue({ code: "custom", path: ["whoWasContacted"], message: `a file none of the job's ${field} cover: it holds prospects' details, which a run must not read while grounding` });
+    }
+  });
+
 // Expert records and instances (protocol 0.17.0, isoplan-app#340): an expert's definition is kept in
 // its expert record on the office server, which its owner's runner publishes from the expert file
 // (`expert-definition`). Every computer whose sessions ask the expert keeps its own instance of it,
@@ -645,6 +759,8 @@ const Revision = z.number().int().positive();
 export const ExpertRecordIdSchema = z.uuid();
 /** The record and revision a computer last had of the definition it publishes. */
 const BasedOn = z.object({ expertRecordId: ExpertRecordIdSchema, revision: Revision });
+/** A definition's project: one with a remote, never a folder on one computer (`local:`, in any case). */
+const ProjectWithARemote = ProjectSchema.refine((project) => !project.id.toLowerCase().startsWith("local:"), "a project with a remote: a definition never names a folder on one computer");
 
 /**
  * What every computer's instance of an expert shares, as its owner's expert file says it: its key;
@@ -658,17 +774,32 @@ const BasedOn = z.object({ expertRecordId: ExpertRecordIdSchema, revision: Revis
  * from before 0.18.0 publishes the definition without it, which the server takes as a change, so
  * every computer of a person is updated.
  * The rest of an expert file is that computer's own, and never leaves it.
+ * `job` (protocol 0.19.0, isoplan-app#341): the record is an employee's, and this is its job, as its
+ * owner's job file says it. An employee's definition has no proof question, since its owner
+ * decides every draft, and covers no area (`areas` is []); one without a `job` is an expert's and
+ * has its proof, as before. Only a 0.19.0 side meets a definition with a `job` (see "Employees"),
+ * so code that reads a definition's `proof` reads it only where there is no `job`.
  */
-export const ExpertDefinitionSchema = z.object({
-  key: ExpertNameSchema,
-  project: ProjectSchema.refine((project) => !project.id.toLowerCase().startsWith("local:"), "a project with a remote: an expert's definition never names a folder on one computer"),
-  subject: Subject,
-  model: Model,
-  promoteAtTokens: z.number().int().positive(),
-  areas: z.array(AreaPathSchema).max(MAX_AREA_PATHS),
-  proof: Proof,
-  learnedElsewhereTokensPerQuestion: z.number().int().positive().max(1_000_000).optional(),
-});
+export const ExpertDefinitionSchema = z
+  .object({
+    key: ExpertNameSchema,
+    project: ProjectWithARemote,
+    subject: Subject,
+    model: Model,
+    promoteAtTokens: z.number().int().positive(),
+    areas: z.array(AreaPathSchema).max(MAX_AREA_PATHS),
+    proof: Proof.optional(),
+    learnedElsewhereTokensPerQuestion: z.number().int().positive().max(1_000_000).optional(),
+    job: JobSchema.optional(),
+  })
+  .superRefine((definition, context) => {
+    if (definition.job === undefined) {
+      if (definition.proof === undefined) context.addIssue({ code: "custom", path: ["proof"], message: "an expert's proof question and the answer expected" });
+      return;
+    }
+    if (definition.proof !== undefined) context.addIssue({ code: "custom", path: ["proof"], message: "none for an employee: its owner decides every draft" });
+    if (definition.areas.length > 0) context.addIssue({ code: "custom", path: ["areas"], message: "none for an employee: [], as it covers no area" });
+  });
 
 /**
  * Where this computer's instance of the expert `key` stands, set up from (or, on its owner's
@@ -695,6 +826,8 @@ export const ExpertInstanceStateSchema = z.object({
  * One expert record in an `expert-directory`: one whose project an office holds. `owner` is the
  * expert's owner, `yours` marks a record this runner's person owns, `revision` is its definition's
  * revision now, and `groundingTokens` a junior's context after grounding, as an instance last said.
+ * `employee` (protocol 0.19.0): the record is an employee's, listed only to its owner's runners
+ * whose hello said `employees`.
  */
 export const ExpertDirectoryEntrySchema = z.object({
   key: ExpertNameSchema,
@@ -704,6 +837,7 @@ export const ExpertDirectoryEntrySchema = z.object({
   yours: z.literal(true).optional(),
   revision: Revision,
   groundingTokens: z.number().int().positive().optional(),
+  employee: z.literal(true).optional(),
 });
 
 /** Adds an issue for each entry of the list `field` that names a key an earlier entry named. */
@@ -746,7 +880,8 @@ export const ExpertRecordWantedMessageSchema = z.object({
  * Every instance on this computer of this server's expert records whose project this server takes
  * (protocol 0.17.0), the whole list each time: the first on each connection always, even an empty
  * one, then only when it differs. An instance set up from one office server is never named to
- * another. Each key once.
+ * another. Each key once. From 0.19.0 it also names each employee of this computer tied to a record
+ * of this server, as `setting-up` at `grounding`, `ready`, or `failed` (`clone` or `other`).
  */
 export const ExpertInstanceStatesMessageSchema = z
   .object({
@@ -764,21 +899,29 @@ export const ExpertInstanceStatesMessageSchema = z
  * its senior, and `askedAt` and `endedAt` when it was asked and ended. Sent at each change of state,
  * and again after each new connection's first `expert-directory` until its end has gone. The same
  * `id` and `state` again is the same record.
+ * `employee` (protocol 0.19.0): a run of this computer's employee of that key asked it, not a
+ * session, and `session` is then `employee:<key>`. Sent only to a server whose directory said
+ * `employees`.
  */
-export const ExpertQuestionMessageSchema = z.object({
-  type: z.literal("expert-question"),
-  v: Version,
-  id: z.string().min(1).max(100),
-  key: ExpertNameSchema,
-  expertRecordId: ExpertRecordIdSchema,
-  session: z.string().min(1),
-  blocking: z.boolean(),
-  state: z.enum(["asking", "answered", "dropped"]),
-  code: ExpertCodeSchema.optional(),
-  senior: z.literal(true).optional(),
-  askedAt: z.iso.datetime({ offset: true }),
-  endedAt: z.iso.datetime({ offset: true }).optional(),
-});
+export const ExpertQuestionMessageSchema = z
+  .object({
+    type: z.literal("expert-question"),
+    v: Version,
+    id: z.string().min(1).max(100),
+    key: ExpertNameSchema,
+    expertRecordId: ExpertRecordIdSchema,
+    session: z.string().min(1),
+    employee: ExpertNameSchema.optional(),
+    blocking: z.boolean(),
+    state: z.enum(["asking", "answered", "dropped"]),
+    code: ExpertCodeSchema.optional(),
+    senior: z.literal(true).optional(),
+    askedAt: z.iso.datetime({ offset: true }),
+    endedAt: z.iso.datetime({ offset: true }).optional(),
+  })
+  .superRefine((message, context) => {
+    if (message.employee !== undefined && message.session !== `employee:${message.employee}`) context.addIssue({ code: "custom", path: ["session"], message: `employee:${message.employee}, for a question its run asked` });
+  });
 
 /**
  * An agent on this computer asked the expert `key`, of which this computer has no instance, so its
@@ -871,7 +1014,7 @@ const NoArrivalNumber = z.never().optional();
 const whatWasLearned = {
   id: WhatWasLearnedIdSchema,
   text: z.string().min(1).max(MAX_WHAT_WAS_LEARNED_LENGTH),
-  files: z.array(FileWhatWasLearnedRestsOnSchema).min(1).max(MAX_FILES_WHAT_WAS_LEARNED_RESTS_ON),
+  files: z.array(FileWhatWasLearnedRestsOnSchema).max(MAX_FILES_WHAT_WAS_LEARNED_RESTS_ON),
   learnedAt: z.iso.datetime({ offset: true }),
 };
 
@@ -897,6 +1040,10 @@ export const arrivalEntryId = (entry: Pick<WhatWasLearnedEntry, "kind" | "id">) 
  * computer, after each listing this connection sends and again while unanswered or refused
  * `not-an-instance-here`, until `expert-instance-learned-received` for its id comes `kept`,
  * `removed` or refused `record-gone`. The same id again is the same thing learned.
+ * `files` names at least one file for an expert's record. From 0.19.0 it may name none, for what an
+ * employee learned from its owner's corrections, which rest on no file: a 0.19.0 server keeps a
+ * thing with no files only in an employee's record, whose entries go only to its owner's 0.19.0
+ * runner, so an older runner never meets one.
  */
 export const ExpertInstanceLearnedMessageSchema = z.object({
   type: z.literal("expert-instance-learned"),
@@ -921,6 +1068,267 @@ export const ExpertLearnedWantedAfterMessageSchema = z.object({
   expertRecordId: ExpertRecordIdSchema,
   afterArrivalNumber: ArrivalNumberOrNone,
   chain: ArrivalChain,
+});
+
+// Employees (protocol 0.19.0, isoplan-app#341): an employee is an agent with one job (JobSchema),
+// done on a schedule on its owner's computer; each run ends with drafts left for its owner, who
+// approves, rejects with a correction, or skips each on the floor. An employee has an expert record
+// as an expert does: its owner's runner publishes its definition, with a `job` and no proof, in
+// `expert-definition`. It runs on one computer, the one it was first published from, and a publish
+// from another computer of its owner's is refused `runs-elsewhere`. That runner lists the employee
+// in `expert-instance-states`, says how its runs go (`employee-runs`), sends what each run left
+// once the secret check passed it on this computer (`employee-drafts`), and applies each decision
+// its owner made (`employee-draft-decided`, answered `employee-draft-decision-applied`). What an
+// employee learned from its owner's corrections reaches its record as "What instances learn" says,
+// resting on no file. Its owner's Try again after a failed grounding is `set-up-expert-instance`
+// with `again`. A runner also offers to make an employee where its person started the same job by
+// hand on a rhythm (`offer-to-make-an-employee`, ADR 0013): the job it wrote from those sessions
+// stays on the computer, and goes to its person's browser only when they open the offer
+// (`offer-to-make-an-employee-job-wanted`, `offer-to-make-an-employee-job`). And it makes an
+// employee from the floor (`make-an-employee`, answered `making-an-employee`).
+// A runner that does says `employees` in its hello, and the server says it in the
+// `expert-directory` it sends such a runner; the first directory on a connection decides it for
+// that connection. The server sends none of the family to a runner whose hello didn't say it, and
+// sends an employee's record (in the directory, marked `employee`, and as `expert-record`) and its
+// `expert-deleted` only to its owner's runners whose hello said it. A runner sends none of the
+// family, no definition with a `job` and no `expert-question` naming an employee on a connection
+// whose first directory didn't say it, and only after a listing (`expert-instance-states`) on that
+// connection, so the server has the employee's row first. As for "Expert records and instances", a
+// runner sends the family only while its link is up and counts a message sent only once it went,
+// and the server takes a repeat as the same message.
+// An older side: a server from before 0.19.0 doesn't say the flag, so a 0.19.0 runner publishes no
+// job there and sends it none of the family; its experts work as in 0.18.0. A runner from before
+// 0.19.0 doesn't say it, so its directory names no employee's record and it is sent none of the
+// family.
+
+/** The limits a run can stop at: its minutes and tokens, per run and per rolling 24 hours, and `context`, its context neared the model's window. */
+export const JOB_LIMITS = ["run-minutes", "day-minutes", "run-tokens", "day-tokens", "context"] as const;
+export const JobLimitSchema = z.enum(JOB_LIMITS);
+/** The longest draft's text. */
+export const MAX_DRAFT_LENGTH = 20000;
+/** The longest subject a draft has. */
+export const MAX_DRAFT_SUBJECT_LENGTH = 300;
+/** The longest name, and the longest organisation, of a draft's recipient. */
+export const MAX_DRAFT_RECIPIENT_NAME_LENGTH = 200;
+/** The longest address of a draft's recipient. */
+export const MAX_DRAFT_RECIPIENT_ADDRESS_LENGTH = 320;
+/** The longest correction an owner types when they reject a draft. */
+export const MAX_CORRECTION_LENGTH = 4000;
+/** The most employees an `employee-runs` names. */
+export const MAX_EMPLOYEES = 100;
+/** The most ended runs an `employee-runs` lists for one employee: those of the last 7 days, newest first. */
+export const MAX_ENDED_RUNS_PER_EMPLOYEE = 20;
+/** The most approvals an `employee-runs` lists for one employee whose recipient turned out to be another sender's. */
+export const MAX_APPROVED_TWICE_PER_EMPLOYEE = 20;
+/** The longest sender's name the file of who was contacted gives. */
+export const MAX_SENDER_NAME_LENGTH = 200;
+
+const Time = z.iso.datetime({ offset: true });
+/** One run of an employee, by the id its runner made. */
+const RunId = z.uuid();
+/** One draft, by the id its runner made. */
+const DraftId = z.uuid();
+const DraftCount = z.number().int().nonnegative().max(MAX_DRAFTS_PER_RUN);
+/** Another sender: the owner of another employee, by their name as the file of who was contacted gives it. */
+const SenderName = z.string().min(1).max(MAX_SENDER_NAME_LENGTH);
+/** A skill's name as its person typed it, without the slash: `outreach`, `isoplan:take`. */
+const SkillName = z.string().regex(/^[a-z0-9][a-z0-9:_-]{0,99}$/, "a skill's name without its slash: lowercase letters, digits and : _ -, at most 100");
+/** An offer to make an employee: its runner's own random id, which the floor's link names (`/?offer-to-make-an-employee=<id>`). */
+const OfferToMakeAnEmployeeId = z.string().regex(/^[A-Za-z0-9_-]{1,100}$/, "letters, digits, `_` and `-`, at most 100");
+
+/** One recipient of a draft: their address, and their name and organisation where the run has them. */
+const DraftRecipient = z.object({
+  name: z.string().trim().min(1).max(MAX_DRAFT_RECIPIENT_NAME_LENGTH).optional(),
+  address: z.email().max(MAX_DRAFT_RECIPIENT_ADDRESS_LENGTH),
+  organisation: z.string().trim().min(1).max(MAX_DRAFT_RECIPIENT_NAME_LENGTH).optional(),
+});
+
+/**
+ * One draft a run left (CONTEXT.md: Draft), waiting for its owner: its `text`, `subject` and
+ * recipient (`to`) where it has them; `askedExperts`, the run's experts whose answers cited a file,
+ * which its owner may teach as well when they reject it (each once); `afterACorrection`, an earlier
+ * draft to the same recipient was rejected; and `expiresAt`, when it stops waiting.
+ */
+export const EmployeeDraftSchema = z
+  .object({
+    id: DraftId,
+    text: z.string().min(1).max(MAX_DRAFT_LENGTH),
+    subject: z.string().trim().min(1).max(MAX_DRAFT_SUBJECT_LENGTH).optional(),
+    to: DraftRecipient.optional(),
+    askedExperts: z.array(ExpertNameSchema).max(MAX_EXPERTS),
+    afterACorrection: z.literal(true).optional(),
+    expiresAt: Time,
+  })
+  .superRefine((draft, context) => checkEachOnce((i) => ["askedExperts", i], draft.askedExperts, context));
+
+/**
+ * One run of an employee that ended: `scheduledFor`, the scheduled time it was for; `startedAt`,
+ * when it started, if it did; `endedAt`; and its `outcome`: `ran`; `failed`, with why in `why`;
+ * `missed`, its runner wasn't running inside its missed-run window; `held-back`, more drafts waited
+ * for its owner than one run leaves, until its window passed; or `stopped`, at the `limit` it names,
+ * which only a stopped run does. `drafts`: those it left that went to the floor; `heldBySecretCheck`:
+ * those the secret check held on this computer; `someoneElseHad`: those dropped as another sender's
+ * employee claimed or contacted their recipient first. `tryingAgainAt`: when its one try again
+ * starts; `wasTheTryAgain`: it was that try.
+ */
+const EndedRun = z
+  .object({
+    run: RunId,
+    scheduledFor: Time,
+    startedAt: Time.optional(),
+    endedAt: Time,
+    outcome: z.enum(["ran", "failed", "missed", "held-back", "stopped"]),
+    limit: JobLimitSchema.optional(),
+    drafts: DraftCount,
+    heldBySecretCheck: DraftCount,
+    someoneElseHad: DraftCount,
+    why: Detail.optional(),
+    tryingAgainAt: Time.optional(),
+    wasTheTryAgain: z.literal(true).optional(),
+  })
+  .superRefine((run, context) => {
+    if ((run.outcome === "stopped") !== (run.limit !== undefined)) context.addIssue({ code: "custom", path: ["limit"], message: "the limit a stopped run stopped at: with `stopped`, and only then" });
+  });
+
+/**
+ * How one employee's runs go on this computer: `running`, the run under way; `heldBack`, a
+ * scheduled time waiting while `draftsWaiting` drafts wait for its owner; `ended`, its runs that
+ * ended in the last 7 days, newest first, each run once; `nextRunAt`; `jobFileGone`, its job file
+ * was removed from this computer, so it doesn't run here; `whoWasContactedProblem`, the file of who
+ * was contacted couldn't be written, with git's words (`refused`: the remote refused the push, as
+ * opposed to not being reached); and `approvedTwice`, each approval of the last 7 days whose
+ * recipient a later push found another sender had contacted, by whom and when.
+ */
+const EmployeeRuns = z
+  .object({
+    key: ExpertNameSchema,
+    expertRecordId: ExpertRecordIdSchema,
+    running: z.object({ run: RunId, scheduledFor: Time, since: Time }).optional(),
+    heldBack: z.object({ scheduledFor: Time, draftsWaiting: z.number().int().positive() }).optional(),
+    ended: z.array(EndedRun).max(MAX_ENDED_RUNS_PER_EMPLOYEE),
+    nextRunAt: Time.optional(),
+    jobFileGone: z.literal(true).optional(),
+    whoWasContactedProblem: z.object({ detail: Detail, refused: z.literal(true).optional() }).optional(),
+    approvedTwice: z.array(z.object({ approvedAt: Time, alreadyContactedBy: SenderName, at: Time })).max(MAX_APPROVED_TWICE_PER_EMPLOYEE).optional(),
+  })
+  .superRefine((employee, context) => checkEachOnce((i) => ["ended", i, "run"], employee.ended.map((run) => run.run), context));
+
+/**
+ * How the runs go of every employee of this computer tied to a record of this server (protocol
+ * 0.19.0), the whole list each time, each key once: the first on each connection always, after its
+ * listing, then on each change. No words but a failure's `why` and `whoWasContactedProblem`'s
+ * `detail`, secret-checked on this computer (a match sends only that its log there says why), and
+ * another sender's name in `approvedTwice`. The server counts each ended run once, by its `run`, so
+ * a run that ended while the link was down still counts.
+ */
+export const EmployeeRunsMessageSchema = z
+  .object({
+    type: z.literal("employee-runs"),
+    v: Version,
+    employees: z.array(EmployeeRuns).max(MAX_EMPLOYEES),
+  })
+  .superRefine((message, context) => checkEachKeyOnce("employees", message.employees, context));
+
+/**
+ * What the run `run` of the employee `key` left (protocol 0.19.0), once the secret check passed
+ * each draft on this computer and its recipient was claimed in the file of who was contacted: a
+ * draft the check held never leaves, and is only counted in `employee-runs`. Sent until
+ * `employee-drafts-received` names each id: after each listing on a connection, and on the link's
+ * timer while unanswered. The same id again is the same draft.
+ */
+export const EmployeeDraftsMessageSchema = z
+  .object({
+    type: z.literal("employee-drafts"),
+    v: Version,
+    key: ExpertNameSchema,
+    expertRecordId: ExpertRecordIdSchema,
+    run: RunId,
+    drafts: z.array(EmployeeDraftSchema).min(1).max(MAX_DRAFTS_PER_RUN),
+  })
+  .superRefine((message, context) => checkEachOnce((i) => ["drafts", i, "id"], message.drafts.map((draft) => draft.id), context));
+
+/**
+ * The answer to `employee-draft-decided`, by its draft's id (protocol 0.19.0), sent as soon as the
+ * decision is recorded on this computer and, for an approval, the newest file of who was contacted
+ * was fetched and checked; its push follows. An approval's answer says `whoWasContacted`: `marked`;
+ * `unchecked`, the file couldn't be fetched, so the change waits and is checked when it can be; or
+ * the other sender who had already contacted the recipient, and when (`claimed`: their employee
+ * had only claimed them). A rejection's or a skip's says neither. `refused`, in place of an answer:
+ * `unknown-draft`, this computer no longer has the draft; `not-yours`, `by` isn't this runner's
+ * person. A repeat of the decision gets the same answer.
+ */
+export const EmployeeDraftDecisionAppliedMessageSchema = z
+  .object({
+    type: z.literal("employee-draft-decision-applied"),
+    v: Version,
+    key: ExpertNameSchema,
+    expertRecordId: ExpertRecordIdSchema,
+    draft: DraftId,
+    whoWasContacted: z.union([z.enum(["marked", "unchecked"]), z.object({ alreadyContactedBy: SenderName, at: Time, claimed: z.literal(true).optional() })]).optional(),
+    refused: z.enum(["unknown-draft", "not-yours"]).optional(),
+  })
+  .superRefine((message, context) => {
+    if (message.whoWasContacted !== undefined && message.refused !== undefined) context.addIssue({ code: "custom", path: ["refused"], message: "a refused decision says nothing of who was contacted" });
+  });
+
+/** The rhythm a job was started on by hand: on `days` of the last 7, or in each of the last `weeks` weeks. */
+const Rhythm = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("days"), days: z.number().int().min(1).max(7) }),
+  z.object({ kind: z.literal("weeks"), weeks: z.number().int().min(2).max(52) }),
+]);
+
+/**
+ * This computer's person started the same job by hand on `rhythm`, with the skill `skill` where it
+ * was one, and a job written from those sessions waits on this computer (protocol 0.19.0, ADR 0013):
+ * an offer to make an employee, `id`, made at `at`. Sent to one office only, the one the employee
+ * would be published to, once, and again after each new connection's first directory there until
+ * it ended. Never any of the job.
+ */
+export const OfferToMakeAnEmployeeMessageSchema = z.object({
+  type: z.literal("offer-to-make-an-employee"),
+  v: Version,
+  id: OfferToMakeAnEmployeeId,
+  rhythm: Rhythm,
+  skill: SkillName.optional(),
+  at: Time,
+});
+
+/**
+ * The job this computer wrote from its person's sessions for the offer `id`, in answer to
+ * `offer-to-make-an-employee-job-wanted` under its `request` (protocol 0.19.0): the employee's
+ * `key`, `subject`, `project` and `model` where it has them, and its `job`, checked again on this
+ * computer against the secret and personal-data patterns first; or `gone`, when a pattern matched
+ * or the job is gone. Exactly one of the two. The server relays it to its person's browser and
+ * keeps none of it.
+ */
+export const OfferToMakeAnEmployeeJobMessageSchema = z
+  .object({
+    type: z.literal("offer-to-make-an-employee-job"),
+    v: Version,
+    request: RequestId,
+    id: OfferToMakeAnEmployeeId,
+    job: z.object({ key: ExpertNameSchema, subject: Subject, project: ProjectWithARemote.optional(), model: Model.optional(), job: JobSchema }).optional(),
+    gone: z.literal(true).optional(),
+  })
+  .superRefine((message, context) => {
+    if ((message.job === undefined) === (message.gone === undefined)) context.addIssue({ code: "custom", path: ["job"], message: "the job, or gone: one of the two" });
+  });
+
+/**
+ * How a `make-an-employee` goes on this computer, under its `request` (protocol 0.19.0), at each
+ * state: `cloning`, it finds this computer's checkout of the project or clones it;
+ * `setting-up-experts`, it sets up here each expert of the job this computer keeps no instance of;
+ * `grounding`; `ready`, grounded, and its first run starts now; or `failed`, with why in `detail`,
+ * secret-checked on this computer (for a definition the personal-data patterns matched, the field).
+ */
+export const MakingAnEmployeeStateSchema = z.enum(["cloning", "setting-up-experts", "grounding", "ready", "failed"]);
+export const MakingAnEmployeeMessageSchema = z.object({
+  type: z.literal("making-an-employee"),
+  v: Version,
+  request: RequestId,
+  key: ExpertNameSchema,
+  state: MakingAnEmployeeStateSchema,
+  detail: Detail.optional(),
 });
 
 const driven = { type: z.literal("driven"), v: Version };
@@ -1105,6 +1513,12 @@ export const DataLayerMessageSchema = z.discriminatedUnion("type", [
   ExpertProofFailedMessageSchema,
   ExpertInstanceLearnedMessageSchema,
   ExpertLearnedWantedAfterMessageSchema,
+  EmployeeRunsMessageSchema,
+  EmployeeDraftsMessageSchema,
+  EmployeeDraftDecisionAppliedMessageSchema,
+  OfferToMakeAnEmployeeMessageSchema,
+  OfferToMakeAnEmployeeJobMessageSchema,
+  MakingAnEmployeeMessageSchema,
 ]);
 
 // Office server → data layer.
@@ -1560,6 +1974,8 @@ export const ServerExpertCreationSuggestionEndedMessageSchema = z.discriminatedU
  * it (see "Expert records and instances"). Each key once. `sharesWhatExpertInstancesLearn` (protocol
  * 0.18.0): this server takes and sends the messages of "What instances learn", said only to a runner
  * whose hello said it; the first directory on a connection decides it for that connection.
+ * `employees` (protocol 0.19.0): this server takes employees and sends the messages of "Employees",
+ * said only to a runner whose hello said it, and decided for a connection by its first directory too.
  */
 export const ExpertDirectoryMessageSchema = z
   .object({
@@ -1572,6 +1988,7 @@ export const ExpertDirectoryMessageSchema = z
       maxAgeHours: z.number().positive(),
     }),
     sharesWhatExpertInstancesLearn: z.literal(true).optional(),
+    employees: z.literal(true).optional(),
   })
   .superRefine((message, context) => checkEachKeyOnce("experts", message.experts, context));
 
@@ -1602,13 +2019,16 @@ const expertDefinitionRefused = { ...expertDefinitionResult, outcome: z.literal(
  * writes the record's `definition`, at `revision`, into the expert file; `key-taken`, another
  * person's expert has the key; `not-owner`, the record `basedOn` named is now another person's, its
  * owner changed; `project-not-in-an-office`, no office on this server holds its project; `deleted`,
- * the record `basedOn` named was deleted on the floor.
+ * the record `basedOn` named was deleted on the floor; `runs-elsewhere` (protocol 0.19.0), for an
+ * employee's definition only: the employee runs on another computer of its owner's, `machineName`,
+ * the one it was first published from, so this one neither publishes nor runs it.
  */
 export const ExpertDefinitionResultMessageSchema = z.discriminatedUnion("outcome", [
   z.object({ ...expertDefinitionResult, outcome: z.literal("published"), expertRecordId: ExpertRecordIdSchema, revision: Revision }),
   z.discriminatedUnion("reason", [
     z.object({ ...expertDefinitionRefused, reason: z.literal("edited-elsewhere"), expertRecordId: ExpertRecordIdSchema, revision: Revision, definition: ExpertDefinitionSchema }),
     z.object({ ...expertDefinitionRefused, reason: z.enum(["key-taken", "not-owner", "project-not-in-an-office", "deleted"]) }),
+    z.object({ ...expertDefinitionRefused, reason: z.literal("runs-elsewhere"), machineName: z.string().min(1) }),
   ]),
 ]);
 
@@ -1631,7 +2051,10 @@ export const ExpertDeletedMessageSchema = z.object({
  * it again now). Sent to that person's own runner on the computer they chose; `by` is the account
  * that runner said hello as, which the runner checks is its own, starting nothing otherwise. Nothing
  * is queued: the server refuses at once when that runner isn't linked. How the set-up goes, the
- * runner says in `expert-instance-states`.
+ * runner says in `expert-instance-states`. From 0.19.0 it may name an employee's key and record,
+ * with `again`: its owner's Try again after a failed grounding, sent to the runner of the computer
+ * the employee runs on, which grounds it again now. No expert on a computer shares a key with one
+ * of its employees, so a 0.19.0 runner sends that key to its employee.
  */
 export const SetUpExpertInstanceMessageSchema = z.object({
   type: z.literal("set-up-expert-instance"),
@@ -1738,6 +2161,108 @@ export const ExpertLearnedWantedAfterRefusedMessageSchema = z.object({
   reason: WhatWasLearnedRefusal,
 });
 
+/**
+ * The answer to `employee-drafts` (protocol 0.19.0): `kept`, the drafts of the run `run` the server
+ * keeps for their owner; `refused`, each other one and why: `record-gone`, the office holds no
+ * record of that id under the key; `not-this-computer`, the employee isn't its owner's on the
+ * computer it runs on. Each draft once. A repeat gets the same answer.
+ */
+export const EmployeeDraftsReceivedMessageSchema = z
+  .object({
+    type: z.literal("employee-drafts-received"),
+    v: Version,
+    key: ExpertNameSchema,
+    expertRecordId: ExpertRecordIdSchema,
+    run: RunId,
+    kept: z.array(DraftId).max(MAX_DRAFTS_PER_RUN),
+    refused: z.array(z.object({ id: DraftId, reason: z.enum(["record-gone", "not-this-computer"]) })).max(MAX_DRAFTS_PER_RUN),
+  })
+  .superRefine((message, context) => {
+    const kept = message.kept.length;
+    checkEachOnce((i) => (i < kept ? ["kept", i] : ["refused", i - kept, "id"]), [...message.kept, ...message.refused.map((refused) => refused.id)], context);
+  });
+
+const employeeDraftDecided = {
+  type: z.literal("employee-draft-decided"),
+  v: Version,
+  key: ExpertNameSchema,
+  expertRecordId: ExpertRecordIdSchema,
+  draft: DraftId,
+  by: Account,
+  at: Time,
+};
+
+/**
+ * The owner of the employee `key` decided its draft `draft` on the floor, at `at` (protocol 0.19.0):
+ * `approved`; `rejected`, with the `correction` they typed, `repeat` when they marked it as a
+ * mistake made before, and `teach`, the draft's `askedExperts` they chose to teach as well (each
+ * once); or `skipped`. `by` is the account that runner said hello as, which the runner checks is its
+ * own person, refusing `not-yours` otherwise. Sent at once to every linked runner of the computer
+ * the employee runs on, and again after each new connection's first directory until
+ * `employee-draft-decision-applied` came.
+ */
+export const EmployeeDraftDecidedMessageSchema = z.discriminatedUnion("decision", [
+  z.object({ ...employeeDraftDecided, decision: z.literal("approved") }),
+  z
+    .object({
+      ...employeeDraftDecided,
+      decision: z.literal("rejected"),
+      correction: z.string().trim().min(1).max(MAX_CORRECTION_LENGTH),
+      repeat: z.literal(true).optional(),
+      teach: z.array(ExpertNameSchema).max(MAX_EXPERTS),
+    })
+    .superRefine((message, context) => checkEachOnce((i) => ["teach", i], message.teach, context)),
+  z.object({ ...employeeDraftDecided, decision: z.literal("skipped") }),
+]);
+
+/**
+ * The offer to make an employee `id` ended (protocol 0.19.0): `made`, an employee was made from it;
+ * `dismissed` by its person; `expired`; or `refused`, the server keeps no record of it from this
+ * runner. Sent to the runner that offered it when it ends, and on each link for every offer of that
+ * computer that ended in the last 30 days.
+ */
+export const OfferToMakeAnEmployeeEndedMessageSchema = z.object({
+  type: z.literal("offer-to-make-an-employee-ended"),
+  v: Version,
+  id: OfferToMakeAnEmployeeId,
+  why: z.enum(["made", "dismissed", "expired", "refused"]),
+});
+
+/**
+ * The person `by` opened the offer to make an employee `id` on the floor (protocol 0.19.0): send the
+ * job written from their sessions, `offer-to-make-an-employee-job` under `request`. `by` is the
+ * account that runner said hello as, which it checks is its own person, sending nothing otherwise.
+ * Nothing is queued: the server refuses the browser at once when that runner isn't linked.
+ */
+export const OfferToMakeAnEmployeeJobWantedMessageSchema = z.object({
+  type: z.literal("offer-to-make-an-employee-job-wanted"),
+  v: Version,
+  request: RequestId,
+  id: OfferToMakeAnEmployeeId,
+  by: Account,
+});
+
+/**
+ * The person `by` pressed Make employee on the floor, choosing this computer (protocol 0.19.0): make
+ * the employee `definition` says, which has a `job`, from the offer `offer` when it came from one.
+ * `by` is the account that runner said hello as, which it checks is its own person, making nothing
+ * otherwise. The runner writes the job file, publishes it, grounds it and starts its first run,
+ * answering `making-an-employee` under `request` at each state. Nothing is queued: the server
+ * refuses at once when that runner isn't linked.
+ */
+export const MakeAnEmployeeMessageSchema = z
+  .object({
+    type: z.literal("make-an-employee"),
+    v: Version,
+    request: RequestId,
+    by: Account,
+    offer: OfferToMakeAnEmployeeId.optional(),
+    definition: ExpertDefinitionSchema,
+  })
+  .superRefine((message, context) => {
+    if (message.definition.job === undefined) context.addIssue({ code: "custom", path: ["definition", "job"], message: "the employee's job" });
+  });
+
 export const OfficeServerMessageSchema = z.discriminatedUnion("type", [
   RepairMessageSchema,
   WelcomeMessageSchema,
@@ -1768,6 +2293,11 @@ export const OfficeServerMessageSchema = z.discriminatedUnion("type", [
   ExpertInstanceLearnedReceivedMessageSchema,
   ExpertLearnedSinceMessageSchema,
   ExpertLearnedWantedAfterRefusedMessageSchema,
+  EmployeeDraftsReceivedMessageSchema,
+  EmployeeDraftDecidedMessageSchema,
+  OfferToMakeAnEmployeeEndedMessageSchema,
+  OfferToMakeAnEmployeeJobWantedMessageSchema,
+  MakeAnEmployeeMessageSchema,
 ]);
 
 export type HandoffRepo = z.infer<typeof HandoffRepoSchema>;
@@ -1838,6 +2368,23 @@ export type ExpertLearnedWantedAfterMessage = z.infer<typeof ExpertLearnedWanted
 export type ExpertInstanceLearnedReceivedMessage = z.infer<typeof ExpertInstanceLearnedReceivedMessageSchema>;
 export type ExpertLearnedSinceMessage = z.infer<typeof ExpertLearnedSinceMessageSchema>;
 export type ExpertLearnedWantedAfterRefusedMessage = z.infer<typeof ExpertLearnedWantedAfterRefusedMessageSchema>;
+export type JobTool = z.infer<typeof JobToolSchema>;
+export type JobSchedule = z.infer<typeof JobScheduleSchema>;
+export type Job = z.infer<typeof JobSchema>;
+export type JobLimit = z.infer<typeof JobLimitSchema>;
+export type EmployeeDraft = z.infer<typeof EmployeeDraftSchema>;
+export type EmployeeRunsMessage = z.infer<typeof EmployeeRunsMessageSchema>;
+export type EmployeeDraftsMessage = z.infer<typeof EmployeeDraftsMessageSchema>;
+export type EmployeeDraftDecisionAppliedMessage = z.infer<typeof EmployeeDraftDecisionAppliedMessageSchema>;
+export type OfferToMakeAnEmployeeMessage = z.infer<typeof OfferToMakeAnEmployeeMessageSchema>;
+export type OfferToMakeAnEmployeeJobMessage = z.infer<typeof OfferToMakeAnEmployeeJobMessageSchema>;
+export type MakingAnEmployeeState = z.infer<typeof MakingAnEmployeeStateSchema>;
+export type MakingAnEmployeeMessage = z.infer<typeof MakingAnEmployeeMessageSchema>;
+export type EmployeeDraftsReceivedMessage = z.infer<typeof EmployeeDraftsReceivedMessageSchema>;
+export type EmployeeDraftDecidedMessage = z.infer<typeof EmployeeDraftDecidedMessageSchema>;
+export type OfferToMakeAnEmployeeEndedMessage = z.infer<typeof OfferToMakeAnEmployeeEndedMessageSchema>;
+export type OfferToMakeAnEmployeeJobWantedMessage = z.infer<typeof OfferToMakeAnEmployeeJobWantedMessageSchema>;
+export type MakeAnEmployeeMessage = z.infer<typeof MakeAnEmployeeMessageSchema>;
 export type ExpertCreationSuggestionMessage = z.infer<typeof ExpertCreationSuggestionMessageSchema>;
 export type ExpertCreationSuggestionRepetition = z.infer<typeof ExpertCreationSuggestionRepetitionSchema>;
 export type RunnerExpertCreationSuggestionEndedMessage = z.infer<typeof RunnerExpertCreationSuggestionEndedMessageSchema>;
