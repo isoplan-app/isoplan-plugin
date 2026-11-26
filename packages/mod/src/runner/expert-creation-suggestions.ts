@@ -5,22 +5,34 @@
 // own computers: that computer's runner writes the expert file and says how its creation goes until
 // the expert is ready.
 //
-// - The signals are the session's areas (data-layer/claude-code.ts), each pass's as one office may
-//   be told of them (report-session.ts SessionAreas). A folder passes when what its reads and
-//   searches took is `contextShare` of the session's context window or more (the window its hooks
-//   module said, else its model's, expert-meter.ts), or `tokens`; or its calls took `minutes`; or
-//   the person corrected the agent there `corrections` times: runner.json's `expertCreationSuggestions`.
-//   A read counts in every folder its folder is in, so of the folders that pass, only those with no
-//   other passing folder of the same repo inside them are candidates (the protocol's areaCovers, the
-//   rule the office uses for office-wide suggestions), before any is ruled out below: a folder whose
-//   reads were all in a dismissed folder is never suggested for them, while one whose reads are
-//   spread over folders that don't pass on their own still is. Of the candidates, the deepest is
-//   suggested. Never one already suggested to the session, or one inside or above it; never one the person dismissed in any office
+// - The signals are the session's areas and its files' readings (data-layer/claude-code.ts), each
+//   pass's as one office may be told of them (report-session.ts SessionAreas), with the readings of
+//   the other sessions whose latest pass this runner had for that office (isoplan-app#338). What
+//   suggests an expert is work done there again, never volume alone, as runner.json's
+//   `expertCreationSuggestions` sets it: a file read again `readAgain` times, in other turns or other
+//   sessions (one reading a turn, so one read of one large file never counts), or reading the area's
+//   files again took `contextShare` of the session's context window (the window its hooks module
+//   said, else its model's, expert-meter.ts); or a folder searched `searches` times in itself, the
+//   searches in the folders inside it aside, so no folder passes on their sum (the data layer counts
+//   a search made again as it was in the same turn once). The minutes spent and the corrections made
+//   in a folder are said with its suggestion once they reach `minutes` and `corrections`, and
+//   suggest nothing alone; what reading and searching a folder took isn't said with it, since a
+//   large file read once there would count. An area always fits one expert: never the repo's top
+//   folder or a folder or file at its top, never a path the protocol would read as a glob, never one
+//   that holds the area of an expert on this computer, and never one whose files total more than
+//   `groundingBudgetTokens` (bytes / 4), what one expert's grounding reads. Files read again are an
+//   area of their own: the file read most, with the others of its repo read together with it again,
+//   in two turns or more, as many as fit, its folder being that file, so the floor's review can't
+//   widen it past those paths. Else the deepest folder searched enough is. Never a path already
+//   suggested to the session, or one inside or above it, and a file read again never one suggested
+//   to any session; never one the person dismissed in any office
 //   (`expert-creation-suggestion-dismissals`: until its time, or for good), nor one inside it, by the
-//   protocol's isDismissed, the rule the office uses too; and never one an expert on this computer
-//   covers, by its file's areas (the protocol's areaCovers, the rule the office uses too). The
-//   office checks other computers' experts itself. A folder whose draft couldn't be made, and the
-//   folders inside and above it, wait RETRY_MS for that session before one is tried again, a
+//   protocol's isDismissed, the rule the office uses too (it keeps a dismissal of each of a
+//   suggestion's files); and never one an expert on this computer covers, by its file's areas (the
+//   protocol's areaCovers, the rule the office uses too). The office checks other computers' experts
+//   itself. What a suggestion's session did there again goes with it (`repetition`), counts only. A
+//   folder whose draft couldn't be made, and the folders inside and above it, wait RETRY_MS for that
+//   session (a file, for every session) before one is tried again, a
 //   restart included; so does the folder of a suggestion every office it went to refused, from the
 //   last refusal. Which sessions and folders were suggested, the folders waiting, the suggestions,
 //   the expert creations under way and done, and the correction check's verdicts are kept in
@@ -32,11 +44,11 @@
 // - The draft: a `claude -p` call with no tools and no hooks (expert-creation-suggestion-model-calls.ts,
 //   prompts/expert-draft.md, `draftModel`), on the person's own Claude account: what it is given
 //   goes only to that account, never to the office. It writes the expert's key, subject and proof
-//   question with its answer, from the names of the folder's files (in the session's checkout, at
+//   question with its answer, from the names of the area's files (in the session's checkout, at
 //   most MAX_FILES), the start of the first few that read as text (EXCERPT_FILES, EXCERPT_CHARS
 //   each), which its proof is taken from, and what the session said there. Its area is the folder
-//   alone. The whole draft, its folder included, passes the secret scan before any of it is sent; a
-//   match, or patterns that can't be read, means no suggestion, logged. A folder that matches isn't
+//   alone, or the files read again. The whole draft, its area included, passes the secret scan before any of it is sent; a
+//   match, or patterns that can't be read, means no suggestion, logged. An area whose paths match isn't
 //   drafted at all.
 // - Nothing goes on a connection before its first `expert-creation-suggestion-dismissals` (protocol
 //   0.15.0): a suggestion, an answer and an expert creation's progress wait for it, and then go live
@@ -47,7 +59,8 @@
 //   dismissed in any office is withdrawn from the others.
 // - An office that sees several sessions search one folder asks the runner of the latest to draft
 //   an office-wide suggestion (`draft-office-wide-expert-creation-suggestion`): drafted the same
-//   way, from the newest of those sessions this runner reported to it, it goes to that office alone
+//   way, from the newest of those sessions this runner reported to it, unless the folder is too
+//   broad for one expert by the rules above (`no-draft`, saying why), it goes to that office alone
 //   as scope `office`, with the request's id, or `no-draft` goes back when none could be made. How
 //   many sessions on any machine searched the folder, and the window in days, from the request, are
 //   kept with it for its session's line (ExpertCreationSuggestionLine `officeWideReason`). The
@@ -114,6 +127,7 @@ import {
   expertDisplayName,
   ExpertCreationSuggestionMessageSchema,
   isDismissed,
+  MAX_AREA_PATHS,
   PROTOCOL_VERSION,
   type AreaFact,
   type DraftOfficeWideExpertCreationSuggestionMessage,
@@ -125,8 +139,9 @@ import {
   type ServerExpertCreationSuggestionEndedMessage,
 } from "@isoplan/protocol";
 import type { RunnerExpertCreationSuggestionMessage, ServerExpertCreationSuggestionMessage } from "../data-layer/link.js";
+import type { FileReading } from "../data-layer/claude-code.js";
 import type { SessionAreas } from "../data-layer/report-session.js";
-import type { DataLayerLine, ExpertCreationSuggestionLine, OfficeWideReason } from "../lines.js";
+import type { DataLayerLine, ExpertCreationSuggestionLine, ExpertCreationSuggestionRepetition, OfficeWideReason } from "../lines.js";
 import { parseExpertFile } from "./expert-file.js";
 import { windowFor } from "./expert-meter.js";
 import { readState } from "./expert-state.js";
@@ -135,9 +150,15 @@ import type { Draft, DraftInput, ExpertCreationSuggestionModelCallSettings } fro
 
 /** runner.json's `expertCreationSuggestions`. */
 export interface ExpertCreationSuggestionSettings extends ExpertCreationSuggestionModelCallSettings {
-  /** The share of the session's context window a folder's reads and searches took, from 0 to 1. */
+  /** How many times a file must have been read again, each a reading in another turn or another session, for an area of it to pass. */
+  readAgain: number;
+  /** How many searches in a folder itself, the folders inside it aside, make it pass. */
+  searches: number;
+  /** The share of the session's context window, from 0 to 1, that reading an area's files again took, which makes it pass too. */
   contextShare: number;
-  tokens: number;
+  /** The most tokens an area's files may total, as bytes / 4: what one expert's grounding reads. An area past it is never suggested. */
+  groundingBudgetTokens: number;
+  /** The minutes spent and the corrections made in a folder from which they are said with its suggestion; neither suggests an expert alone. */
   minutes: number;
   corrections: number;
   /** How long a session and folder already suggested, and a suggestion, are remembered. */
@@ -254,18 +275,70 @@ export function signalsOf(area: AreaFact, window: number | null): Why {
   return { share: window ? Math.min(1, area.tokens / window) : 0, tokens: area.tokens, minutes: Math.floor(area.ms / 6000) / 10, corrections: area.corrections };
 }
 
-/** Whether a folder's signals pass any of their thresholds. */
-export const passes = (why: Why, t: ExpertCreationSuggestionSettings) => why.share >= t.contextShare || why.tokens >= t.tokens || why.minutes >= t.minutes || why.corrections >= t.corrections;
+/**
+ * Whether what was done in an area again passes its thresholds (isoplan-app#338): its file read most
+ * was read again `readAgain` times, or reading its files again took `contextShare` of the context
+ * window (`why.share`, from reading again alone); or the folder was searched `searches` times.
+ */
+export const repeated = (r: ExpertCreationSuggestionRepetition, why: Why, t: ExpertCreationSuggestionSettings) => ("searches" in r ? r.searches >= t.searches : r.readings - 1 >= t.readAgain || why.share >= t.contextShare);
 
 /** The signals a suggestion gives (ADR 0004): those that passed their thresholds, each other one 0. Share and tokens are one signal, what reading and searching there took. */
 export function passed(why: Why, t: ExpertCreationSuggestionSettings): Why {
-  const spent = why.share >= t.contextShare || why.tokens >= t.tokens;
+  const spent = why.share >= t.contextShare;
   return { share: spent ? why.share : 0, tokens: spent ? why.tokens : 0, minutes: why.minutes >= t.minutes ? why.minutes : 0, corrections: why.corrections >= t.corrections ? why.corrections : 0 };
+}
+
+/** A folder's searches in itself: a search counts in every folder above its own too (the session's area facts), so those of the folders just inside it are taken off. */
+export function ownSearches(areas: readonly AreaFact[], area: AreaFact): number {
+  const project = area.project?.id.toLowerCase();
+  const inside = areas.filter((a) => a.project?.id.toLowerCase() === project && a.folder.startsWith(area.folder + "/") && !a.folder.slice(area.folder.length + 1).includes("/"));
+  return Math.max(0, area.searches - inside.reduce((n, a) => n + a.searches, 0));
+}
+
+/** The repo's top folder, or a folder or file at its top (docs, src, packages, package.json): never an area of one expert. */
+export const topLevel = (folder: string) => !folder.includes("/");
+
+// A part of an area path the protocol's areaCovers reads as a glob.
+const WILD = /[*?[\]{}]/;
+
+/** An area path's part before its first wildcard part, as the protocol's areaCovers reads it: `.` for one that starts with a wildcard. */
+const areaBase = (area: string) => {
+  const parts = area.split("/");
+  const wild = parts.findIndex((part) => WILD.test(part));
+  return (wild < 0 ? parts : parts.slice(0, wild)).join("/") || ".";
+};
+
+/** Why a path can't be one expert's area, or in one, by the path alone; null when it can. */
+export function whyNotByPath(p: string): string | null {
+  if (topLevel(p)) return "it is the repo's top folder, or a folder or file at its top, too broad for one expert";
+  // A Next.js or SvelteKit route such as src/routes/[slug]/+page.svelte: as an area, it would cover all of src/routes.
+  if (WILD.test(p)) return "its path has a character an area reads as a glob ([ ] { } * ?), so its expert would cover more than it";
+  return null;
+}
+
+/** Whether `areas` (an expert's) cover `p`, or one of them is `p` or inside it. */
+export const nearAreas = (areas: readonly string[], p: string) => areaCovers(areas, p) || areas.some((a) => areaCovers([p], areaBase(a)));
+
+/** About how many tokens the files of `paths` in `checkout` total (files, and folders whose files count, dot entries and node_modules left out), as bytes / 4; once past `max`, a number past it, without reading on. */
+export async function areaTokens(checkout: string, paths: readonly string[], max: number): Promise<number> {
+  let bytes = 0;
+  const queue = [...paths];
+  while (queue.length && bytes / 4 <= max) {
+    const rel = queue.shift()!;
+    const full = path.join(checkout, rel);
+    const st = await fs.stat(full).catch(() => null);
+    if (st?.isFile()) bytes += st.size;
+    else if (st?.isDirectory()) {
+      for (const e of await fs.readdir(full, { withFileTypes: true }).catch(() => [])) if (!e.name.startsWith(".") && e.name !== "node_modules") queue.push(rel === "." ? e.name : `${rel}/${e.name}`);
+    }
+  }
+  return Math.ceil(bytes / 4);
 }
 
 // `folder` is `other`, or inside it; or either is inside the other.
 const within = (folder: string, other: string) => other === "." || folder === other || folder.startsWith(other + "/");
 const near = (a: string, b: string) => within(a, b) || within(b, a);
+const parentOf = (p: string) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : ".");
 
 /** The addresses Isoplan's own clone of a project is made from where this computer has no checkout, in order: https from its id, then ssh; none for a repo with no remote. */
 export function cloneUrls(project: string): string[] {
@@ -388,6 +461,16 @@ interface ExpertCreation {
   timer: ReturnType<typeof setTimeout> | null;
 }
 
+/** An area a session's pass may be suggested an expert on: a folder (`area` null), or the files `area` names, `folder` being the first; with its repo's checkout here. */
+interface Candidate {
+  project: Project;
+  folder: string;
+  area: string[] | null;
+  why: Why;
+  repetition: ExpertCreationSuggestionRepetition;
+  checkout: string;
+}
+
 export function createExpertCreationSuggestions(o: ExpertCreationSuggestionsOptions): ExpertCreationSuggestions {
   const now = o.now ?? Date.now;
   const pollMs = o.pollMs ?? 2000;
@@ -440,7 +523,7 @@ export function createExpertCreationSuggestions(o: ExpertCreationSuggestionsOpti
   // What the session's hooks module is told of a suggestion open in one office.
   const lineOf = (r: ExpertCreationSuggestionRecord, server: string): ExpertCreationSuggestionLine => {
     const label = o.offices[indexOf(server)]?.label;
-    return { type: "expert-creation-suggestion", server, ...(label && { label }), id: r.id, key: r.key, name: expertDisplayName(r.key), folder: r.folder, url: reviewUrl(server, r.id), why: r.message.why, ...(r.officeWideReason && { officeWideReason: r.officeWideReason }) };
+    return { type: "expert-creation-suggestion", server, ...(label && { label }), id: r.id, key: r.key, name: expertDisplayName(r.key), folder: r.folder, url: reviewUrl(server, r.id), why: r.message.why, ...(r.officeWideReason && { officeWideReason: r.officeWideReason }), ...(r.message.repetition && { repetition: r.message.repetition }) };
   };
   const tell = (r: ExpertCreationSuggestionRecord, line: DataLayerLine) => (r.bare ? o.hooked(r.bare)?.send(line) : undefined);
 
@@ -530,25 +613,38 @@ export function createExpertCreationSuggestions(o: ExpertCreationSuggestionsOpti
     if (!(st.ready && o.offices[index]!.send(message))) st.queue.push(message);
   }
 
-  // Whether an expert on this computer covers `folder` of `project`. Its repo's project is looked up
-  // again only every PROJECT_MS, since a covered folder that passes is looked at every pass.
+  // The areas of the experts on this computer whose repo is `project`. Each repo's project is looked
+  // up again only every PROJECT_MS, since the areas are looked at every pass.
   const expertProjects = new Map<string, { at: number; project: Promise<string | null> }>();
-  async function coveredHere(project: string, folder: string) {
+  async function expertAreasHere(project: string) {
+    const out: string[] = [];
     for (const e of o.experts()) {
-      if (!e.areas?.length || !areaCovers(e.areas, folder)) continue;
+      if (!e.areas?.length) continue;
       let hit = expertProjects.get(e.repo);
       if (!hit || now() - hit.at > PROJECT_MS) expertProjects.set(e.repo, (hit = { at: now(), project: o.projectOf(e.repo).catch(() => null) }));
-      if ((await hit.project) === project) return true;
+      if ((await hit.project) === project) out.push(...e.areas);
     }
-    return false;
+    return out;
   }
 
   // A suggestion every office it went to refused, RETRY_MS ago or more: its folder may be suggested to its session again.
   const retryable = (r: ExpertCreationSuggestionRecord | undefined, at: number) => !!r?.refusedAt && at - r.refusedAt >= RETRY_MS && Object.values(r.offices).every((s) => s === "refused");
-  const alreadySuggestedNear = (session: string, project: string, folder: string, at: number) =>
-    saved.foldersAlreadySuggested.some((x) => x.session === session && x.project === project && near(folder, x.folder) && !(x.expertCreationSuggestionId && retryable(saved.expertCreationSuggestions.find((r) => r.id === x.expertCreationSuggestionId), at)));
-  const heldNear = (session: string, project: string, folder: string, at: number) =>
-    (saved.held = saved.held.filter((x) => x.until > at)).some((x) => x.session === session && x.project === project && near(folder, x.folder));
+  // Suggested, or held, to `session`, or to any session when it is null.
+  const alreadySuggestedNear = (session: string | null, project: string, folder: string, at: number) =>
+    saved.foldersAlreadySuggested.some((x) => (session === null || x.session === session) && x.project === project && near(folder, x.folder) && !(x.expertCreationSuggestionId && retryable(saved.expertCreationSuggestions.find((r) => r.id === x.expertCreationSuggestionId), at)));
+  const heldNear = (session: string | null, project: string, folder: string, at: number) =>
+    (saved.held = saved.held.filter((x) => x.until > at)).some((x) => (session === null || x.session === session) && x.project === project && near(folder, x.folder));
+  // Whether `p` of `project` may be in a suggestion to `session`, or to any session when it is null (see the top of this file).
+  const free = async (session: string | null, project: string, p: string, at: number) =>
+    !whyNotByPath(p) && !alreadySuggestedNear(session, project, p, at) && !heldNear(session, project, p, at) && !offices.some((f) => isDismissed(f.dismissals, project, p, at)) && !nearAreas(await expertAreasHere(project), p);
+  // Why `folder` of `project` can't be one expert's area (see the top of this file); null when it can.
+  async function whyNotOneExpertsArea(project: string, folder: string, checkout: string, t: ExpertCreationSuggestionSettings) {
+    const byPath = whyNotByPath(folder);
+    if (byPath) return byPath;
+    if (nearAreas(await expertAreasHere(project), folder)) return "an expert on this computer covers it, or has its area inside it";
+    if ((await areaTokens(checkout, [folder], t.groundingBudgetTokens)) > t.groundingBudgetTokens) return `its files total more than ${t.groundingBudgetTokens} tokens, more than one expert's grounding reads`;
+    return null;
+  }
 
   // The repos an office's pass of a session may name, lower-cased: the session's own as it says
   // hello there, and the others its areas were let through for (report-session.ts).
@@ -577,20 +673,21 @@ export function createExpertCreationSuggestions(o: ExpertCreationSuggestionsOpti
     return w && w.ok ? w.window : null;
   };
 
-  // The draft of an expert on `folder`, secret-checked, as an expert-creation-suggestion; null when there is none to send.
-  async function drafted(a: { id: string; scope: "session" | "office"; session: string; project: Project; folder: string; checkout: string | null; said: string[]; why: Why }, t: ExpertCreationSuggestionSettings): Promise<ExpertCreationSuggestionMessage | null> {
+  // The draft of an expert on `folder`, or on the files `area` names, secret-checked, as an expert-creation-suggestion; null when there is none to send.
+  async function drafted(a: { id: string; scope: "session" | "office"; session: string; project: Project; folder: string; checkout: string | null; said: string[]; why: Why; repetition?: ExpertCreationSuggestionRepetition; area?: string[] }, t: ExpertCreationSuggestionSettings): Promise<ExpertCreationSuggestionMessage | null> {
     const where = `${a.folder} of ${a.project.name}`;
     if (!a.checkout) {
       say(`no expert is suggested on ${where}: this computer has no checkout of the repo to draft it from`);
       return null;
     }
-    // Its folder leaves with it, so one that matches isn't drafted (nor written in the log).
-    const named = await o.scan(a.folder);
+    // Its area leaves with it, so one that matches isn't drafted (nor written in the log).
+    const area = a.area ?? [a.folder];
+    const named = await o.scan([a.folder, ...area].join("\n"));
     if (named) {
       say(`no expert is suggested on a folder of ${a.project.name}: its path matches the secret pattern "${named}"`);
       return null;
     }
-    const files = await folderFiles(a.checkout, a.folder);
+    const files = a.area ?? (await folderFiles(a.checkout, a.folder));
     const excerpts = await folderExcerpts(a.checkout, files);
     if (!excerpts.length) {
       say(`no expert is suggested on ${where}: none of its files could be read to draft it from`);
@@ -601,13 +698,13 @@ export function createExpertCreationSuggestions(o: ExpertCreationSuggestionsOpti
       say(`no expert is suggested on ${where}: no usable draft came`);
       return null;
     }
-    // The whole draft, its folder (its one area) included.
-    const matched = await o.scan([a.folder, draft.key, draft.subject, draft.proof.question, draft.proof.answer].join("\n"));
+    // The whole draft, its area included.
+    const matched = await o.scan([a.folder, ...area, draft.key, draft.subject, draft.proof.question, draft.proof.answer].join("\n"));
     if (matched) {
       say(`no expert is suggested on ${where}: its draft matches the secret pattern "${matched}"`);
       return null;
     }
-    const message = { type: "expert-creation-suggestion" as const, v: PROTOCOL_VERSION, id: a.id, session: a.session, project: { id: a.project.id, name: a.project.name }, folder: a.folder, scope: a.scope, key: draft.key, subject: draft.subject, area: [a.folder], proof: draft.proof, why: passed(a.why, t), at: new Date(now()).toISOString() };
+    const message = { type: "expert-creation-suggestion" as const, v: PROTOCOL_VERSION, id: a.id, session: a.session, project: { id: a.project.id, name: a.project.name }, folder: a.folder, scope: a.scope, key: draft.key, subject: draft.subject, area, proof: draft.proof, why: passed(a.why, t), ...(a.repetition && { repetition: a.repetition }), at: new Date(now()).toISOString() };
     const parsed = ExpertCreationSuggestionMessageSchema.safeParse(message);
     if (!parsed.success) {
       say(`no expert is suggested on ${where}: its suggestion doesn't fit the protocol: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
@@ -629,9 +726,9 @@ export function createExpertCreationSuggestions(o: ExpertCreationSuggestionsOpti
     offices: Object.fromEntries([...servers].map((s) => [s, "pending" as const])),
   });
 
-  // A session's pass, once the office it came for has said its person's dismissals: of the folders
-  // that pass with no other passing folder inside them, the deepest not already suggested, held,
-  // dismissed or covered is drafted and suggested.
+  // A session's pass, once the office it came for has said its person's dismissals: the files it read
+  // again, else the deepest folder it searched enough, whichever fits one expert and isn't already
+  // suggested, held, dismissed or an expert's here (see the top of this file), is drafted and suggested.
   async function consider(s: SessionAreas) {
     const index = indexOf(s.server);
     if (!offices[index]!.ready) return;
@@ -639,35 +736,89 @@ export function createExpertCreationSuggestions(o: ExpertCreationSuggestionsOpti
     const window = windowOf(s);
     const at = now();
     forget(t, at);
-    const passing = s.areas.map((area) => ({ area, project: area.project ?? s.project, why: signalsOf(area, window) })).filter((c) => passes(c.why, t));
-    // A read counts in every folder its folder is in (the session's area facts), so of the folders
-    // that pass only the deepest are candidates: never a parent on the strength of a child excluded below.
-    const deepest = passing.filter((c) => !passing.some((d) => d.project.id.toLowerCase() === c.project.id.toLowerCase() && d.area.folder !== c.area.folder && areaCovers([c.area.folder], d.area.folder)));
-    const candidates: { area: AreaFact; project: Project; why: Why }[] = [];
-    for (const { area, project, why } of deepest) {
-      const id = project.id.toLowerCase();
-      if (alreadySuggestedNear(s.session, id, area.folder, at) || heldNear(s.session, id, area.folder, at)) continue;
-      if (offices.some((f) => isDismissed(f.dismissals, id, area.folder, at))) continue;
-      if (await coveredHere(id, area.folder)) continue;
-      candidates.push({ area, project, why });
-    }
-    const depth = (folder: string) => folder.split("/").length;
-    const best = candidates.sort((a, b) => depth(b.area.folder) - depth(a.area.folder) || b.area.tokens - a.area.tokens)[0];
+    const best = (await readAgain(s, index, window, t, at)) ?? (await searchedAgain(s, index, window, t, at));
     if (!best) return;
-    const { area, project, why } = best;
+    const { project, folder, area, why, repetition, checkout } = best;
     const id = project.id.toLowerCase();
-    const checkout = area.project ? await o.checkout(index, project).catch(() => null) : s.checkout;
-    const said = await s.said(area.project ? area.project.id : null, area.folder).catch(() => []);
-    const message = await drafted({ id: randomBytes(12).toString("base64url"), scope: "session", session: s.session, project, folder: area.folder, checkout, said, why }, t);
+    const own = project === s.project;
+    const said = await s.said(own ? null : project.id, area ? parentOf(folder) : folder).catch(() => []);
+    const message = await drafted({ id: randomBytes(12).toString("base64url"), scope: "session", session: s.session, project, folder, checkout, said, why, repetition, ...(area && { area }) }, t);
     if (closed) return;
+    // Each of its paths, so none is suggested to the session again on its own.
+    const paths = [...new Set([folder, ...(area ?? [])])];
     if (!message) {
-      saved.held.push({ session: s.session, project: id, folder: area.folder, until: now() + RETRY_MS });
+      for (const p of paths) saved.held.push({ session: s.session, project: id, folder: p, until: now() + RETRY_MS });
       return void save();
     }
-    saved.foldersAlreadySuggested.push({ session: s.session, project: id, folder: area.folder, at, expertCreationSuggestionId: message.id });
+    for (const p of paths) saved.foldersAlreadySuggested.push({ session: s.session, project: id, folder: p, at, expertCreationSuggestionId: message.id });
     saved.expertCreationSuggestions.push(record(message, s.bare, new Set([s.server, ...mayTell(s.session, id)])));
     await save();
     o.offices.forEach((_, i) => flush(i));
+  }
+
+  // The files of one repo the session read again, in its turns or in other sessions whose latest pass
+  // this runner had for the same office: the one read most that may be suggested, with the others
+  // read together with it again, in two turns or more, as many as fit one expert's grounding, if
+  // what was done there again passes. A file suggested to any session already, or held after its
+  // draft failed for one, isn't again: what the sessions read only adds up.
+  async function readAgain(s: SessionAreas, index: number, window: number | null, t: ExpertCreationSuggestionSettings, at: number): Promise<Candidate | null> {
+    const sessionPasses = [s, ...[...latest.values()].map((byOffice) => byOffice.get(s.server)).filter((x): x is SessionAreas => !!x && x.session !== s.session)];
+    const keyOf = (r: FileReading, of: SessionAreas) => `${(r.project ?? of.project).id.toLowerCase()}\n${r.file}`;
+    // Each file's readings and sessions in all, and the turns it was read in, `<session>\n<turn>`.
+    const across = new Map<string, { readings: number; sessions: number; turns: Set<string> }>();
+    for (const p of sessionPasses) {
+      for (const r of p.readings) {
+        const x = across.get(keyOf(r, p)) ?? { readings: 0, sessions: 0, turns: new Set<string>() };
+        for (const turn of r.turns) x.turns.add(`${p.session}\n${turn}`);
+        across.set(keyOf(r, p), { readings: x.readings + r.readings, sessions: x.sessions + 1, turns: x.turns });
+      }
+    }
+    const again = s.readings.map((r) => ({ r, project: r.project ?? s.project, ...across.get(keyOf(r, s))! })).filter((x) => x.readings >= 2);
+    again.sort((a, b) => b.readings - a.readings || b.sessions - a.sessions || b.r.tokensAgain - a.r.tokensAgain);
+    const together = (a: (typeof again)[number], b: (typeof again)[number]) => [...a.turns].filter((turn) => b.turns.has(turn)).length;
+    const projects = [...new Map(again.map((x) => [x.project.id.toLowerCase(), x.project])).values()];
+    for (const project of projects) {
+      const id = project.id.toLowerCase();
+      const checkout = project === s.project ? s.checkout : await o.checkout(index, project).catch(() => null);
+      if (!checkout) continue;
+      const files: typeof again = [];
+      let total = 0;
+      for (const x of again) {
+        if (files.length >= MAX_AREA_PATHS) break;
+        if (x.project.id.toLowerCase() !== id || (files[0] && together(files[0], x) < 2) || !(await free(null, id, x.r.file, at))) continue;
+        const tokens = await areaTokens(checkout, [x.r.file], t.groundingBudgetTokens);
+        // A file that is gone has nothing to ground on.
+        if (tokens === 0 || total + tokens > t.groundingBudgetTokens) continue;
+        files.push(x);
+        total += tokens;
+      }
+      const first = files[0];
+      if (!first) continue;
+      const tokensAgain = files.reduce((n, x) => n + x.r.tokensAgain, 0);
+      const why: Why = { share: window ? Math.min(1, tokensAgain / window) : 0, tokens: tokensAgain, minutes: 0, corrections: 0 };
+      const repetition = { readings: first.readings, sessions: first.sessions, files: files.length };
+      if (repeated(repetition, why, t)) return { project, folder: first.r.file, area: files.map((x) => x.r.file), why, repetition, checkout };
+    }
+    return null;
+  }
+
+  // The deepest folder the session searched enough in itself that may be suggested and fits one expert.
+  async function searchedAgain(s: SessionAreas, index: number, window: number | null, t: ExpertCreationSuggestionSettings, at: number): Promise<Candidate | null> {
+    const depth = (folder: string) => folder.split("/").length;
+    const passing = s.areas
+      .map((area) => ({ area, project: area.project ?? s.project, repetition: { searches: ownSearches(s.areas, area) } }))
+      .filter((c) => !topLevel(c.area.folder) && repeated(c.repetition, signalsOf(c.area, window), t))
+      .sort((a, b) => depth(b.area.folder) - depth(a.area.folder) || b.area.tokens - a.area.tokens);
+    for (const { area, project, repetition } of passing) {
+      const id = project.id.toLowerCase();
+      if (!(await free(s.session, id, area.folder, at))) continue;
+      const checkout = area.project ? await o.checkout(index, project).catch(() => null) : s.checkout;
+      if (!checkout || (await whyNotOneExpertsArea(id, area.folder, checkout, t))) continue;
+      // What reading and searching the folder and those inside it took, a large file read once
+      // among them, isn't what was done there again: its suggestion says its searches.
+      return { project, folder: area.folder, area: null, why: { ...signalsOf(area, window), share: 0, tokens: 0 }, repetition, checkout };
+    }
+    return null;
   }
 
   // An office-wide draft, from the newest of the sessions it names that this runner reported to that office.
@@ -687,7 +838,9 @@ export function createExpertCreationSuggestions(o: ExpertCreationSuggestionsOpti
         const said = s ? await s.said(own ? null : m.project.id, m.folder).catch(() => []) : [];
         const why = area && s ? signalsOf(area, windowOf(s)) : { share: 0, tokens: 0, minutes: 0, corrections: 0 };
         const t = await settings();
-        message = await drafted({ id: m.request, scope: "office", session: m.sessions[0]!, project: m.project, folder: m.folder, checkout, said, why }, t);
+        const unfit = checkout ? await whyNotOneExpertsArea(project, m.folder, checkout, t) : null;
+        if (unfit) say(`no office-wide expert is suggested on ${m.folder} of ${m.project.name} (${m.request}): ${unfit}`);
+        else message = await drafted({ id: m.request, scope: "office", session: m.sessions[0]!, project: m.project, folder: m.folder, checkout, said, why }, t);
       } catch (err) {
         say(`no office-wide expert is suggested on ${m.folder} of ${m.project.name} (${m.request}): drafting it failed: ${(err as Error).message}`);
       }

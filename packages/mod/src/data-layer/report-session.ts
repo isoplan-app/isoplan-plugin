@@ -94,7 +94,7 @@ import { alive, HOLD_OFF_MS, lockHolder, lockPath, readLock, refreshLock, releas
 import { approvedPath, cachedRepos, createApproved, createSessionGate, type Approved, type Dormancy, type SessionGate } from "./approved.js";
 import { forOffice } from "./attribution.js";
 import { candidatesOf, inRepos } from "./home.js";
-import { createClaudeCode, type SourceRead } from "./claude-code.js";
+import { createClaudeCode, type FileReading, type SourceRead } from "./claude-code.js";
 import { loadConfig, officesOf, type Config, type Office } from "./config.js";
 import { detachedStop } from "./detached.js";
 import { createGit, pathKey, type Where } from "./git.js";
@@ -156,6 +156,8 @@ export interface SessionAreas {
   /** Its areas this office may be told of: another repo's only when the office holds it (attribution.ts forOffice). */
   areas: AreaFact[];
   said: NonNullable<SourceRead["said"]>;
+  /** Its files' readings this office may be told of, as its areas are. Never sent: the runner counts reading again from them. */
+  readings: FileReading[];
 }
 
 // How long a session the office doesn't take waits between passes.
@@ -810,17 +812,19 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
       }
     }
     // The areas each office may be told of, for the runner's expert creation suggestions: in a workspace only its
-    // repos', and another repo's only once this connection's welcome names it.
-    if (o.areas && facts.areas?.length) {
+    // repos', and another repo's only once this connection's welcome names it; its files' readings the same way.
+    if (o.areas && (facts.areas?.length || read.readings?.length)) {
       const model = facts.agents.find((a) => a.id === facts.session.lead)?.usage?.model ?? null;
       for (const run of taking) {
         const link = run.gate.current();
         if (!run.home || !link) continue;
         const welcome = link.projects();
-        const areas = facts.areas.filter((a) => (a.project ? !!welcome?.has(a.project.id.toLowerCase()) : !workspace));
-        if (!areas.length) continue;
+        const told = (a: { project?: Project }) => (a.project ? !!welcome?.has(a.project.id.toLowerCase()) : !workspace);
+        const areas = (facts.areas ?? []).filter(told);
+        const readings = (read.readings ?? []).filter(told);
+        if (!areas.length && !readings.length) continue;
         try {
-          o.areas({ server: run.office.server, session: facts.session.id, bare: sessionId, project: run.home, checkout: facts.session.checkout ?? cwd, window: contextWindow, model, areas, said: read.said ?? (async () => []) });
+          o.areas({ server: run.office.server, session: facts.session.id, bare: sessionId, project: run.home, checkout: facts.session.checkout ?? cwd, window: contextWindow, model, areas, said: read.said ?? (async () => []), readings });
         } catch (err) {
           emit({ type: "log", text: `couldn't look at this session's areas for an expert creation suggestion: ${await c.message(err)}` });
         }

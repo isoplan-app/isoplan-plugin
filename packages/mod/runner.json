@@ -43,8 +43,10 @@
   "expertWaitSeconds": 10,
   "clonesFolder": "",
   "expertCreationSuggestions": {
+    "readAgain": 3,
+    "searches": 5,
     "contextShare": 0.15,
-    "tokens": 30000,
+    "groundingBudgetTokens": 30000,
     "minutes": 10,
     "corrections": 2,
     "rememberDays": 30,
