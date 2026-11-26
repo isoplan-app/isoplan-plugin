@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
 import { tempRoot } from "../data-layer/fixture.js";
-import { employeeDisallowed, mcpToolTimeout } from "./employee-claude.js";
+import { employeeDisallowed } from "./employee-claude.js";
 import { draftTo, GROUNDS, setUpEmployee, until, type EmployeeRule } from "./employee-fixture.js";
 
 vi.stubEnv("CLAUDE_CONFIG_DIR", path.join(tempRoot(), "claude"));
@@ -48,7 +48,7 @@ test("the trunk's turns and a run have the job's tools and only those, the same 
   // Each process had a config of its own, gone once it ended; the run's wait for an answer is under Claude Code's.
   expect(flag(trunk, "--mcp-config")).not.toBe(flag(run, "--mcp-config"));
   expect(fs.existsSync(flag(run, "--mcp-config"))).toBe(false);
-  expect(starts.find((x) => x.kind === "fork")!.env!.MCP_TOOL_TIMEOUT).toBe(mcpToolTimeout(s.settings.employees.expertAnswerWaitMinutes));
+  expect(Number(starts.find((x) => x.kind === "fork")!.env!.MCP_TOOL_TIMEOUT)).toBeGreaterThan(s.settings.employees.expertAnswerWaitMinutes * 60000);
   const strip = (argv: string[]) => argv.filter((a, i) => !["--session-id", "--resume", "--resume-session-at", "--mcp-config", "--model"].includes(argv[i - 1] ?? "") && !["-p", "--session-id", "--resume", "--fork-session", "--no-session-persistence", "--resume-session-at"].includes(a));
   // The run takes the model id its grounding resolved to.
   expect(strip(run)).toEqual(strip(trunk));
@@ -70,7 +70,7 @@ test("leave_draft keeps a draft before it answers, refuses past the batch, a rec
       {
         kind: "fork",
         text: "Today's run",
-        calls: [draftTo("ana@studio.example"), draftTo("ana@studio.example"), draftTo("cy@claimed.example"), draftTo("bo@agency.example", "SECRET plans for Bo"), draftTo("di@agency.example")],
+        calls: [draftTo("ana@studio.example"), draftTo("ana@studio.example"), draftTo("cy@claimed.example"), draftTo("bo@agency.example", "SECRET plans for Bo"), draftTo("di@agency.example"), draftTo("ed@agency.example")],
         reply: "done",
       },
     ],
@@ -93,6 +93,7 @@ test("leave_draft keeps a draft before it answers, refuses past the batch, a rec
     "Valentina's employee claimed cy@claimed.example on 25 Nov: pick another.",
     "Left draft 2 of 3.",
     "Left draft 3 of 3.",
+    "This run's 3 drafts are left: end the run now.",
   ]);
   expect(ended).toMatchObject({ outcome: "ran", drafts: 2, heldBySecretCheck: 1, someoneElseHad: 0 });
   const sent = s.e().drafts.toSend();
@@ -110,7 +111,7 @@ test("leave_draft keeps a draft before it answers, refuses past the batch, a rec
   expect(s.results().at(-1)).toMatch(/^You skipped ana@studio.example on \d+ Nov: pick another\.$/);
 });
 
-test("the runner killed mid-run after two drafts: at its next start, before anything else is due, the run's end is done, its drafts claimed and sent once, and its try again refuses their recipients", async () => {
+test("the runner stopped mid-run after two drafts, its fork ended: at its next start, before anything else is due, the run's end is done, its drafts claimed and waiting to be sent, and its try again refuses their recipients", async () => {
   const root = tempRoot();
   const s = await started([{ kind: "fork", text: "Today's run", calls: [draftTo("ana@studio.example"), draftTo("bo@agency.example")], hang: true }], { root });
   s.clock.t = Date.parse("2026-11-26T09:01:00Z");
@@ -124,6 +125,7 @@ test("the runner killed mid-run after two drafts: at its next start, before anyt
   // The runner starts again, its run's process ended with it.
   const again = await setUpEmployee({ root, rules: [...GROUNDS, { kind: "fork", text: "Today's run", calls: [draftTo("ana@studio.example")], reply: "done" }] });
   closing.push(again.close);
+  await until(() => (again.e().runs?.listing().ended.length ?? 0) === 1, 60000, "the end of the run the runner stopped in");
   const leftover = again.e().runs!.listing().ended[0]!;
   expect(leftover).toMatchObject({ outcome: "failed", drafts: 2, tryingAgainAt: expect.any(String) });
   expect(again.e().drafts.toSend()[0]!.drafts).toHaveLength(2);

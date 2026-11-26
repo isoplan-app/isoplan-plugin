@@ -13,9 +13,14 @@
 //   approval after fetching the newest file of who was contacted (`marked`, the other sender, or
 //   `unchecked`), its push afterwards; a rejection keeps the claim, puts the recipient and the
 //   correction in rejected-for-the-next-run.json, and waits to be learned from; a skip marks the
-//   recipient skipped. A repeat gets the same answer, for 30 days.
+//   recipient skipped. A repeat gets the same answer, for 30 days. Decisions are applied one at a
+//   time, so the same one twice at once is applied once.
 // - At its expiry a draft's claim is released, and it stays 30 days more, as long as the office may
-//   still hold a decision made before; a late decision is still applied.
+//   still hold a decision made before; a late decision is still applied. A rejection still waiting to
+//   be learned from goes then too, learned or not.
+// - A release is for a prospect, since the file has one row per prospect and sender: it is made only
+//   when no other draft of this employee still holds that prospect (waiting, or rejected and carried
+//   to the next run). Deleting the employee releases every one (`releaseAll`).
 // Never logged: a draft's text and recipient stay in these files.
 
 import { randomUUID } from "node:crypto";
@@ -36,7 +41,8 @@ export interface RunAnswer {
   files: FileWhatWasLearnedRestsOn[];
 }
 
-export type Answer = Pick<EmployeeDraftDecisionAppliedMessage, "whoWasContacted" | "refused">;
+/** What applying a decision answers the office. */
+export type DecisionApplied = Pick<EmployeeDraftDecisionAppliedMessage, "whoWasContacted" | "refused">;
 
 export interface KeptDraft {
   draft: Omit<EmployeeDraft, "expiresAt" | "askedExperts">;
@@ -51,9 +57,9 @@ export interface KeptDraft {
   someoneElseHad?: true;
   received?: "kept" | "record-gone" | "not-this-computer";
   decision?: { decision: EmployeeDraftDecidedMessage["decision"]; at: string; correction?: string; repeat?: true; teach?: string[] };
-  answer?: Answer;
-  /** For a rejection: learned into the employee, and into each expert taught; tries counted. */
-  learning?: { employee: boolean; experts: string[]; tries: number };
+  answer?: DecisionApplied;
+  /** For a rejection: learned into the employee, and into each expert taught; the failed tries of each, by `employee` or the expert's key. */
+  learning?: { employee: boolean; experts: string[]; tries: Record<string, number> };
   /** Its claim released at expiry. */
   released?: true;
 }
@@ -94,13 +100,14 @@ export interface EmployeeDraftsHere {
   /** Each run's drafts that wait for the office to have them. */
   toSend(): { run: string; drafts: EmployeeDraft[] }[];
   received(kept: readonly string[], refused: readonly { id: string; reason: "record-gone" | "not-this-computer" }[]): Promise<void>;
-  decide(m: EmployeeDraftDecidedMessage): Promise<Answer>;
+  decide(m: EmployeeDraftDecidedMessage): Promise<DecisionApplied>;
   /** Undecided, unexpired drafts that went to the office: what holds a run back. */
   waiting(): number;
   /** Releases the claims of expired drafts, and forgets what is past keeping. */
   tidy(): Promise<void>;
   /** Rejections still to be learned from, oldest first. */
   toLearn(): KeptDraft[];
+  /** `part` (`employee` or an expert's key) learned from them, or failed to; a part that failed twice is given up. */
   learned(ids: readonly string[], part: "employee" | string, ok: boolean): Promise<void>;
   /** Every claim of the employee, released: it is being deleted. */
   releaseAll(): WhoWasContactedChange[];
@@ -116,9 +123,10 @@ export function createEmployeeDraftsHere(o: EmployeeDraftsHereOptions): Employee
   const file = path.join(o.dir, "drafts-waiting.json");
   const rejectedFile = path.join(o.dir, "rejected-for-the-next-run.json");
   let drafts: KeptDraft[] = [];
-  let answered: { id: string; answer: Answer; at: string }[] = [];
+  let answered: { id: string; answer: DecisionApplied; at: string }[] = [];
   let rejected: RejectedRecipient[] = [];
   let writing: Promise<void> = Promise.resolve();
+  let deciding: Promise<unknown> = Promise.resolve();
 
   const save = () => {
     const copy = structuredClone({ version: 1, drafts, answered });
@@ -128,6 +136,10 @@ export function createEmployeeDraftsHere(o: EmployeeDraftsHereOptions): Employee
   };
   const me = () => ({ sender: o.account().name || o.account().id });
   const iso = () => new Date(now()).toISOString();
+  // Whether a draft of this employee but `draft` still holds the prospect's claim: one not ended yet or waiting, or a rejected one carried to the next run.
+  const othersHold = (prospect: string, draft: string) =>
+    drafts.some((d) => d.draft.id !== draft && d.draft.to && prospectOf(d.draft.to.address) === prospect && !d.heldBySecretCheck && !d.someoneElseHad && (unended(d) || isWaiting(d, now()))) || rejected.some((r) => r.prospect === prospect && r.draft !== draft);
+  const release = (prospect: string, draft: string): WhoWasContactedChange[] => (othersHold(prospect, draft) ? [] : [{ op: "release", prospect, draft, at: iso() }]);
 
   async function leave(run: string, input: Record<string, unknown>, batch: number, answers: Record<string, RunAnswer[]>): Promise<string> {
     const mine = drafts.filter((d) => d.run === run);
@@ -168,7 +180,7 @@ export function createEmployeeDraftsHere(o: EmployeeDraftsHereOptions): Employee
 
   const sendable = (d: KeptDraft): EmployeeDraft => ({ ...d.draft, askedExperts: Object.keys(d.answers).sort(), expiresAt: d.expiresAt! });
 
-  async function decide(m: EmployeeDraftDecidedMessage): Promise<Answer> {
+  async function decideNow(m: EmployeeDraftDecidedMessage): Promise<DecisionApplied> {
     if (m.by.id !== o.account().id) return { refused: "not-yours" };
     const done = answered.find((a) => a.id === m.draft);
     const d = drafts.find((x) => x.draft.id === m.draft);
@@ -178,7 +190,7 @@ export function createEmployeeDraftsHere(o: EmployeeDraftsHereOptions): Employee
     await save();
     const to = d.draft.to;
     const change = (op: WhoWasContactedChange["op"]): WhoWasContactedChange[] => (to ? [{ op, prospect: prospectOf(to.address), ...(to.name && { name: to.name }), ...(to.organisation && { organisation: to.organisation }), draft: d.draft.id, at: iso() }] : []);
-    let answer: Answer = {};
+    let answer: DecisionApplied = {};
     if (m.decision === "approved") {
       if (to) {
         const fetched = await o.writer.fetch();
@@ -194,7 +206,7 @@ export function createEmployeeDraftsHere(o: EmployeeDraftsHereOptions): Employee
     } else if (m.decision === "rejected") {
       await o.writer.add(change("keep"));
       if (to) rejected.push({ prospect: prospectOf(to.address), ...(to.name && { name: to.name }), ...(to.organisation && { organisation: to.organisation }), correction: m.correction, draft: d.draft.id, at: m.at, runs: [] });
-      d.learning = { employee: false, experts: [], tries: 0 };
+      d.learning = { employee: false, experts: [], tries: {} };
       void o.writer.write();
     } else {
       await o.writer.add(change("skip"));
@@ -208,6 +220,13 @@ export function createEmployeeDraftsHere(o: EmployeeDraftsHereOptions): Employee
     o.onDecided?.(d);
     return answer;
   }
+
+  // One at a time: the second of the same decision finds it applied.
+  const decide = (m: EmployeeDraftDecidedMessage): Promise<DecisionApplied> => {
+    const next = deciding.then(() => decideNow(m));
+    deciding = next.catch(() => {});
+    return next;
+  };
 
   return {
     async load() {
@@ -235,8 +254,9 @@ export function createEmployeeDraftsHere(o: EmployeeDraftsHereOptions): Employee
       if (e.outcome !== "failed") {
         const going = rejected.filter((r) => r.runs.includes(run));
         rejected = rejected.filter((r) => !going.includes(r));
-        await o.writer.add(going.map((r) => ({ op: "release" as const, prospect: r.prospect, draft: r.draft, at: iso() })));
-        if (going.length) void o.writer.write();
+        const releasing = going.flatMap((r) => release(r.prospect, r.draft));
+        await o.writer.add(releasing);
+        if (releasing.length) void o.writer.write();
       }
       // A held draft never leaves, and neither its words nor its claim stay: it is gone.
       drafts = drafts.filter((d) => !(d.run === run && (d.heldBySecretCheck || d.someoneElseHad)));
@@ -263,9 +283,9 @@ export function createEmployeeDraftsHere(o: EmployeeDraftsHereOptions): Employee
       for (const d of drafts) {
         if (!d.expiresAt || d.released || d.decision || Date.parse(d.expiresAt) > t) continue;
         d.released = true;
-        if (d.draft.to) releasing.push({ op: "release", prospect: prospectOf(d.draft.to.address), draft: d.draft.id, at: iso() });
+        if (d.draft.to) releasing.push(...release(prospectOf(d.draft.to.address), d.draft.id));
       }
-      drafts = drafts.filter((d) => !(d.expiresAt && Date.parse(d.expiresAt) + KEPT_AFTER_MS < t && !d.learning));
+      drafts = drafts.filter((d) => !(d.expiresAt && Date.parse(d.expiresAt) + KEPT_AFTER_MS < t));
       answered = answered.filter((a) => Date.parse(a.at) + KEPT_AFTER_MS > t);
       if (releasing.length) await o.writer.add(releasing);
       await save();
@@ -275,17 +295,19 @@ export function createEmployeeDraftsHere(o: EmployeeDraftsHereOptions): Employee
     async learned(ids, part, ok) {
       for (const d of drafts) {
         if (!ids.includes(d.draft.id) || !d.learning) continue;
-        if (!ok) d.learning.tries++;
-        else if (part === "employee") d.learning.employee = true;
-        else if (!d.learning.experts.includes(part)) d.learning.experts.push(part);
-        // A fork that failed twice leaves it to the next run's prompt, which carries the correction's words.
-        if (d.learning.tries >= 2) d.learning = { employee: true, experts: [...(d.decision?.teach ?? [])], tries: d.learning.tries };
+        const tries = ok ? 0 : (d.learning.tries[part] = (d.learning.tries[part] ?? 0) + 1);
+        // A part that failed twice is given up: for the employee, the next run's prompt still carries the correction's words.
+        if (ok || tries >= 2) {
+          if (part === "employee") d.learning.employee = true;
+          else if (!d.learning.experts.includes(part)) d.learning.experts.push(part);
+        }
       }
       drafts = drafts.filter((d) => !(d.learning && d.learning.employee && (d.decision?.teach ?? []).every((k) => d.learning!.experts.includes(k))));
       await save();
     },
     releaseAll() {
-      return drafts.filter((d) => d.draft.to && !d.decision).map((d) => ({ op: "release" as const, prospect: prospectOf(d.draft.to!.address), draft: d.draft.id, at: iso() }));
+      const held = [...drafts.filter((d) => d.draft.to).map((d) => ({ prospect: prospectOf(d.draft.to!.address), draft: d.draft.id })), ...rejected.map((r) => ({ prospect: r.prospect, draft: r.draft }))];
+      return held.filter((x, i) => held.findIndex((y) => y.prospect === x.prospect) === i).map((x) => ({ op: "release" as const, ...x, at: iso() }));
     },
     written: () => writing,
   };

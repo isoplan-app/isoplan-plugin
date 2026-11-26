@@ -19,13 +19,16 @@
 //   and the changes applied again, up to `tries` times, 2, 4, 8, 16 seconds apart. A refusal by the
 //   remote (a protected branch, required signatures or reviews, a hook that declined) is told apart
 //   from not reaching it (`refused`), and isn't tried again until the next run's start. Changes not
-//   pushed wait, and go with the next write; `problem()` says why meanwhile.
+//   pushed wait, and go with the next write; `problem()` says why meanwhile, in git's words checked
+//   against the secret patterns first, since they can hold a remote's address with its credentials (a
+//   match says only that this computer's log says why).
 // - One write or fetch at a time.
 
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { GitResult, RunGit } from "../handoff/git.js";
 import { noHooks, onTheWire } from "../handoff/take.js";
+import { WHY_HELD } from "./employee-runs.js";
 import { borrowFrom, cloneBorrowing, longPaths, renamed } from "./expert-checkout.js";
 import { readJson, writeJson } from "./expert-state.js";
 import { cloneUrls } from "./project-checkout-for-expert.js";
@@ -45,6 +48,8 @@ export interface WhoWasContactedWriterOptions {
   /** The employee's name as people read it, for the commit message. */
   employeeName: () => string;
   timeoutMs: () => Promise<number>;
+  /** The secret check `problem()`'s words pass before they can go to the floor. */
+  scan: (text: string) => Promise<string | null>;
   log: (text: string) => void;
   /** How many writes a push rejected for being behind is tried in all. */
   tries: () => Promise<number>;
@@ -67,7 +72,7 @@ export interface WhoWasContactedWriter {
   add(changes: readonly WhoWasContactedChange[]): Promise<void>;
   /** Pushes what waits; `runStart` tries a remote that refused before. `alreadySent`: drafts whose claims are made whatever the file says now. */
   write(o?: { runStart?: boolean; alreadySent?: ReadonlySet<string> }): Promise<WriteResult>;
-  /** Why the last write didn't push, until one does. */
+  /** Why the last write didn't push, until one does: secret-checked, for the floor. */
   problem(): { detail: string; refused?: true } | null;
   waiting(): readonly WhoWasContactedChange[];
   /** Reads the waiting changes; settles before anything else is asked. */
@@ -184,9 +189,12 @@ export function createWhoWasContactedWriter(o: WhoWasContactedWriterOptions): Wh
     }
   }
 
-  function said(r: WriteResult): WriteResult {
-    problem = r.pushed ? null : { detail: r.detail, ...(r.refused && { refused: true as const }) };
-    if (!r.pushed) o.log(`the file of who was contacted wasn't written: ${r.detail}`);
+  async function said(r: WriteResult): Promise<WriteResult> {
+    if (r.pushed) problem = null;
+    else {
+      o.log(`the file of who was contacted wasn't written: ${r.detail}`);
+      problem = { detail: (await o.scan(r.detail)) ? WHY_HELD : r.detail, ...(r.refused && { refused: true as const }) };
+    }
     return r;
   }
 

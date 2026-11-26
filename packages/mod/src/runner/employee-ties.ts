@@ -63,6 +63,8 @@ export interface EmployeeTies {
   definitionsFor(server: string): Promise<PublishedDefinition[]>;
   /** Why its definition isn't published, when a check stopped it: for making one from the floor. */
   blocked(key: string): string | null;
+  /** Why its office refused its job, until one publishes it: for making one from the floor. */
+  refused(key: string): string | null;
   definitionResult(server: string, m: ExpertDefinitionResultMessage, sent: ExpertDefinition): Promise<void>;
   deleted(server: string, m: ExpertDeletedMessage): Promise<void>;
   directory(server: string, m: ExpertDirectoryMessage): Promise<void>;
@@ -76,10 +78,13 @@ export interface EmployeeTies {
 }
 
 /** A definition's fields as text, each checked before it leaves. */
-const FIELDS: [string, (d: ExpertDefinition) => string][] = [
+/** What the check reads of a definition: a job written from sessions has no model or project yet. */
+type Checked = Pick<ExpertDefinition, "key" | "subject" | "job"> & { model?: string };
+
+const FIELDS: [string, (d: Checked) => string][] = [
   ["key", (d) => d.key],
   ["subject", (d) => d.subject],
-  ["model", (d) => d.model],
+  ["model", (d) => d.model ?? ""],
   ["brief", (d) => d.job!.brief],
   ["rules", (d) => d.job!.rules.join("\n")],
   ["documents", (d) => d.job!.documents.join("\n")],
@@ -89,7 +94,7 @@ const FIELDS: [string, (d: ExpertDefinition) => string][] = [
 ];
 
 /** The first field of a definition a check matched, with why, or null; `unreadable` when the patterns can't be read. */
-export async function definitionCheck(d: ExpertDefinition, check: EmployeeTiesOptions["check"]): Promise<{ field: string; why: string } | "unreadable" | null> {
+export async function definitionCheck(d: Checked, check: EmployeeTiesOptions["check"]): Promise<{ field: string; why: string } | "unreadable" | null> {
   for (const [field, text] of FIELDS) {
     const t = text(d);
     if (!t) continue;
@@ -103,6 +108,7 @@ export async function definitionCheck(d: ExpertDefinition, check: EmployeeTiesOp
 export function createEmployeeTies(o: EmployeeTiesOptions): EmployeeTies {
   const files = new Map<string, ExpertRecordsFile>();
   const blocked = new Map<string, string>();
+  const refusals = new Map<string, string>();
   const listeners: (() => void)[] = [];
   let saving: Promise<void> = Promise.resolve();
   const changed = () => listeners.forEach((l) => l());
@@ -165,6 +171,7 @@ export function createEmployeeTies(o: EmployeeTiesOptions): EmployeeTies {
     serverOf: (key) => recordServer(key) ?? (o.employees.get(key)?.file ? (o.servers.find((s) => o.saysEmployees(s)) ?? null) : null),
     tiedAndPublished,
     blocked: (key) => blocked.get(key) ?? null,
+    refused: (key) => refusals.get(key) ?? null,
 
     async definitionsFor(server) {
       const out: PublishedDefinition[] = [];
@@ -224,6 +231,7 @@ export function createEmployeeTies(o: EmployeeTiesOptions): EmployeeTies {
       if (!e) return;
       if (m.outcome === "published") {
         await save(key, (f) => void (f.servers[server] = { ...f.servers[server], record: { expertRecordId: m.expertRecordId, revision: m.revision, owner: o.account, yours: true, definition: sent }, lastResult: "published" }));
+        refusals.delete(key);
         o.employees.setRefused(key, null);
         o.employees.setProject(key, sent.project.id);
         o.employees.health(key).say("published", { server, record: m.expertRecordId, revision: m.revision });
@@ -242,6 +250,7 @@ export function createEmployeeTies(o: EmployeeTiesOptions): EmployeeTies {
       }
       if (m.reason === "deleted") return remove(server, key, `deleted on the floor of ${server}, its office says`);
       const why = m.reason === "runs-elsewhere" ? `it runs on ${m.machineName}, the computer it was first published from, so it doesn't run on this one` : m.reason === "key-taken" ? "another expert or employee has this key: rename its job file" : m.reason === "project-not-in-an-office" ? "no office there holds its project" : "its record is someone else's now";
+      refusals.set(key, why);
       await save(key, (f) => void (f.servers[server] = { ...f.servers[server], lastResult: m.reason, refusedFor: JSON.stringify(sent) }));
       if (m.reason === "runs-elsewhere" || m.reason === "key-taken" || m.reason === "not-owner") o.employees.setRefused(key, why);
       o.employees.health(key).say("refused", { server, reason: m.reason, why });
@@ -276,7 +285,11 @@ export function createEmployeeTies(o: EmployeeTiesOptions): EmployeeTies {
     tiedRecordsOf: (key) => Object.entries(of(key).servers).flatMap(([server, r]) => (r.lastResult === "published" && r.record ? [{ server, expertRecordId: r.record.expertRecordId }] : [])),
     heldOn: (server, key) => of(key).servers[server]?.record?.expertRecordId,
     setUpAgain(key) {
-      o.employees.get(key)?.trunk?.retryNow();
+      const trunk = o.employees.get(key)?.trunk;
+      if (trunk) return trunk.retryNow();
+      // No trunk: its job file is gone. It is read again, which starts it if it is back.
+      log(key, `asked to try again, but its job file is gone from this computer, so nothing grounds until it is back in ${path.dirname(o.employees.jobFilePath(key))}`);
+      void o.employees.refresh(key);
     },
     onChange: (l) => void listeners.push(l),
   };

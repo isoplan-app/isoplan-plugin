@@ -131,6 +131,7 @@ import { createJobFromSessionsModelCall } from "./job-from-sessions-model-call.j
 import { createJobsStartedByHand, type JobsStartedByHand } from "./jobs-started-by-hand.js";
 import { createMakeAnEmployee } from "./make-an-employee.js";
 import { createOffersToMakeAnEmployee, type OffersToMakeAnEmployee } from "./offers-to-make-an-employee.js";
+import { bindWhatEmployeesLearned, whatWasLearnedOfExpertsAndEmployees } from "./what-was-learned-of-employees.js";
 import { readJson } from "./expert-state.js";
 import { createPipeServer, type Hooked } from "../pipe/server.js";
 import { createPairLinks } from "./pair-links.js";
@@ -655,7 +656,7 @@ async function worker(): Promise<number> {
   // Set below, once the asking module is made: a run's question to one of its job's experts.
   let askForARun: ((r: Parameters<ExpertQuestionsAskedHere["askForAnEmployeeRun"]>[0]) => ReturnType<ExpertQuestionsAskedHere["askForAnEmployeeRun"]>) | null = null;
   const expertHasKey = (key: string) => hosted.running(key) !== null || [hosted.expertFilePath(key), hosted.instanceFilePath(key)].some((p) => fsSync.existsSync(p));
-  const hired = createEmployees({
+  const employeesOnThisComputer = createEmployees({
     employeesDir,
     clonesFolder: clones.folder,
     logsDir: path.join(isoplanDir, "logs"),
@@ -670,7 +671,13 @@ async function worker(): Promise<number> {
     account,
     expertHasKey,
     // The subjects of the job's experts, as this computer's instances of them have them.
-    expertsOf: (key) => (hired.get(key)?.file?.job.experts ?? []).map((k) => ({ key: k, subject: hosted.running(k)?.file.subject ?? "not set up on this computer yet" })),
+    expertsOf: (key) => (employeesOnThisComputer.get(key)?.file?.job.experts ?? []).map((k) => ({ key: k, subject: hosted.running(k)?.file.subject ?? "not set up on this computer yet" })),
+    // This computer's experts whose record is of the employee's project, for the warning that one's area covers its file of who was contacted.
+    expertAreasOf: (key) => {
+      const project = employeesOnThisComputer.get(key)?.project;
+      if (!project) return [];
+      return hosted.all().flatMap((x) => (servers.some((s) => instances.heldOn(s, x.key)?.record?.definition.project.id === project) ? [{ expert: x.key, areas: x.file.areas }] : []));
+    },
     ask: async (key, run, expert, question, deadline) => {
       const server = employeeTies.serverOf(key);
       if (!server || !askForARun) return { text: `Expert ${expert}: Isoplan's runner can't ask it now. Carry on without it.` };
@@ -681,10 +688,10 @@ async function worker(): Promise<number> {
     track: registry.track,
     log,
   });
-  employees = hired;
-  await hired.start();
+  employees = employeesOnThisComputer;
+  await employeesOnThisComputer.start();
   const employeeTies = createEmployeeTies({
-    employees: hired,
+    employees: employeesOnThisComputer,
     servers,
     account,
     saysEmployees: (server) => recordLinks.get(server)?.directory()?.employees === true,
@@ -725,7 +732,7 @@ async function worker(): Promise<number> {
       send: (m) => live(index)(m),
       checkMs: first.approvedRefreshMinutes * 60000,
       employeeTies,
-      onEmployeesChange: (listener) => hired.onChange(() => listener()),
+      onEmployeesChange: (listener) => employeesOnThisComputer.onChange(() => listener()),
     });
     link.onDirectory(() => offers.afterDirectory(office.server));
     recordLinks.set(office.server, link);
@@ -737,10 +744,7 @@ async function worker(): Promise<number> {
     const link = createWhatWasLearnedLink({
       server: office.server,
       recordLink,
-      // An employee's record is tied here as an instance's is, and its key is its own: keys can't clash on one computer.
-      instances: { tiedRecords: (server) => [...instances.tiedRecords(server), ...employeeTies.tiedRecords(server)] },
-      whatWasLearned: (key) => (hired.get(key) ? hired.whatWasLearned(key) : hosted.whatWasLearned(key)),
-      health: (key) => (hired.get(key) ? hired.health(key) : hosted.health(key)),
+      ...whatWasLearnedOfExpertsAndEmployees({ instances, experts: hosted, employees: employeesOnThisComputer, employeeTies }),
       check: checkBeforeItLeaves,
       send: (m) => live(index)(m),
       log,
@@ -757,14 +761,7 @@ async function worker(): Promise<number> {
     waiting: () => learnedLinks.forEach((l) => l.sendWaiting()),
   }));
   instances.onChange(() => hosted.tiesMayHaveChanged());
-  hired.bindWhatWasLearned((key) => ({
-    tied: () => employeeTies.tiedRecordsOf(key),
-    held: (server) => employeeTies.heldOn(server, key),
-    servers,
-    catchUp: (server, expertRecordId) => learnedLinks.get(server)?.catchUp(expertRecordId) ?? "cannot",
-    waiting: () => learnedLinks.forEach((l) => l.sendWaiting()),
-  }));
-  employeeTies.onChange(() => hired.tiesMayHaveChanged());
+  bindWhatEmployeesLearned(employeesOnThisComputer, employeeTies, servers, learnedLinks);
   const expertRights = createExpertRightsOnThisComputer({
     instances,
     store: expertRecordsPerOffice,
@@ -799,7 +796,7 @@ async function worker(): Promise<number> {
   // Each office's employee link (employee-link.ts): runs, drafts and decisions, offers to make an employee, and making one from the floor.
   const employeeLinks = new Map<string, EmployeeLink>();
   answering.forEach((office, index) => {
-    employeeLinks.set(office.server, createEmployeeLink({ server: office.server, recordLink: recordLinks.get(office.server)!, employees: hired, ties: employeeTies, send: (m) => live(index)(m), log, checkMs: first.approvedRefreshMinutes * 60000 }));
+    employeeLinks.set(office.server, createEmployeeLink({ server: office.server, recordLink: recordLinks.get(office.server)!, employees: employeesOnThisComputer, ties: employeeTies, send: (m) => live(index)(m), log, checkMs: first.approvedRefreshMinutes * 60000 }));
   });
   // The office an employee of a project would be published to: the first in config.json's order that takes employees and the project.
   const officeFor = async (project: string, cwd: string) => {
@@ -815,6 +812,7 @@ async function worker(): Promise<number> {
     projectsDir: path.join(claudeDir, "projects"),
     claudeDir,
     account,
+    settings: async () => (await settings()).employees,
     officeFor,
     send: (server, m) => employeeLinks.get(server)?.sendNow(m) ?? false,
     write: async (input) => {
@@ -838,14 +836,14 @@ async function worker(): Promise<number> {
     claudeDir,
     settings: async () => (await settings()).employees,
     helperPrompts: async () => (await config()).helperPrompts,
-    onRhythm: (job, rhythm, starts) => void offersToMakeAnEmployee.rhythm(job, rhythm, starts).catch((err: Error) => log(`couldn't offer to make an employee: ${err.message}`)),
+    onRhythm: (startedWith, rhythm, starts) => void offersToMakeAnEmployee.rhythm(startedWith, rhythm, starts).catch((err: Error) => log(`couldn't offer to make an employee: ${err.message}`)),
     log,
   });
   await jobsStartedByHand.load();
   jobsStartedByHandOnceStarted = jobsStartedByHand;
   const makeAnEmployee = createMakeAnEmployee({
     account,
-    employees: hired,
+    employees: employeesOnThisComputer,
     ties: employeeTies,
     expertHasKey,
     checkoutOf: (server, project) => checkoutFor(indexOf(server), project),
@@ -856,6 +854,11 @@ async function worker(): Promise<number> {
       return !!found && found.kind !== "set-up-failed";
     },
     setUpExpert: (server, entry) => void instances.setUp(server, entry).catch((err: Error) => log(`expert ${entry.key}: couldn't set it up: ${err.message}`)),
+    expertSetUpDone: (server, key) => {
+      const found = instances.lookUp(server, key, null);
+      return found?.kind !== "setting-up" && (found?.kind !== "running" || found.running.expert.hosted().state !== "starting");
+    },
+    waitMinutes: async () => (await settings()).employees.makingWaitMinutes,
     check: checkBeforeItLeaves,
     scan: scanText,
     log,
@@ -968,7 +971,7 @@ async function worker(): Promise<number> {
       const { pairing, runner } = answerers[answering.indexOf(office)]!;
       const records = recordLinks.get(office.server)!;
       const learned = learnedLinks.get(office.server)!;
-      const hiredHere = employeeLinks.get(office.server)!;
+      const employeeLink = employeeLinks.get(office.server)!;
       log(`the runner's worker ${process.pid} is answering for this machine through ${office.server}`);
       status.opening(office.server);
       return createLink({
@@ -990,12 +993,12 @@ async function worker(): Promise<number> {
           drive.linked(office.server);
           records.onOpen();
           learned.onOpen();
-          hiredHere.onOpen();
+          employeeLink.onOpen();
           expertCreationSuggestions.linked(answering.indexOf(office));
           // The renewal before this hello kept the email the office named, if it did.
           void readPairing(pairingPath(claudeDir)).then((all) => status.email(office.server, pairingEntry(all, office.server, account.id)?.email));
         },
-        onClose: () => (status.closed(office.server), drive.unlinked(office.server), records.onClose(), learned.onClose(), hiredHere.onClose(), expertCreationSuggestions.linked(answering.indexOf(office))),
+        onClose: () => (status.closed(office.server), drive.unlinked(office.server), records.onClose(), learned.onClose(), employeeLink.onClose(), expertCreationSuggestions.linked(answering.indexOf(office))),
         onNotWanted: () => (status.stopped(office.server, "not-wanted"), said.notWanted()),
         // A revoked or lapsed pairing closes this link: the sessions' links pair the machine again.
         onPairingEnded: () => (status.stopped(office.server, "unpaired"), said.unpaired()),
@@ -1019,10 +1022,10 @@ async function worker(): Promise<number> {
     },
     paired: async (office) => !!pairingEntry(await readPairing(pairingPath(claudeDir)), office.server, account.id)?.credential,
     // Nor while it reports sessions: their links, and the pairing they share, would end with it.
-    idle: () => answerers.every((a) => a.runner.idle()) && reporting.reporting().length === 0 && !pipe?.all().length && hosted.idle() && hired.idle() && expertQuestions.idle() && expertCreationSuggestions.idle(),
+    idle: () => answerers.every((a) => a.runner.idle()) && reporting.reporting().length === 0 && !pipe?.all().length && hosted.idle() && employeesOnThisComputer.idle() && expertQuestions.idle() && expertCreationSuggestions.idle(),
     lit: async () => anyRoomSince(io, path.join(claudeDir, "projects"), Date.now() - askableMs(await config().catch(() => first))),
     // An employee tied to a published record keeps its runner up for its runs.
-    keep: async () => drive.held() > 0 || hired.anyTied() || (await settings()).startAtLogin,
+    keep: async () => drive.held() > 0 || employeesOnThisComputer.anyTied() || (await settings()).startAtLogin,
     gone,
     log,
     checkMs: CHECK_MS,
@@ -1034,7 +1037,7 @@ async function worker(): Promise<number> {
   for (const link of recordLinks.values()) link.stop();
   for (const link of learnedLinks.values()) link.stop();
   for (const link of employeeLinks.values()) link.stop();
-  hired.close();
+  employeesOnThisComputer.close();
   await employeeTools.stop();
   expertQuestions.close();
   await expertRecordsPerOffice.written();

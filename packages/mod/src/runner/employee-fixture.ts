@@ -165,6 +165,10 @@ export interface EmployeeSetUp {
   git?: (real: RunGit) => RunGit;
   /** What its record of what it learned is bound to: nothing tied unless given. */
   learned?: WhatWasLearnedBinding;
+  /** The registry's own minute timer, as the runner has it, in place of ticking by hand. */
+  minuteTimer?: boolean;
+  /** This computer's experts of its project, with their areas. */
+  expertAreas?: { expert: string; areas: string[] }[];
 }
 
 export async function setUpEmployee(o: EmployeeSetUp = {}) {
@@ -217,13 +221,14 @@ export async function setUpEmployee(o: EmployeeSetUp = {}) {
     account: ADAM,
     expertHasKey: () => false,
     expertsOf: () => [{ key: "adams-writing", subject: "How Adam writes." }],
+    ...(o.expertAreas && { expertAreasOf: () => o.expertAreas! }),
     ask: async (_key, _run, expert, question) => (asked.push({ expert, question }), o.ask ? o.ask(expert, question) : { text: `${expert} answered: write warmly.` }),
     env,
     log: (t) => void logs.push(t),
     now: () => clock.t,
     lookMs: 50,
     minuteMs: 2000,
-    tickMs: null,
+    ...(!o.minuteTimer && { tickMs: null }),
     cloneFrom: () => true,
     writeDelayMs: () => 10,
   });

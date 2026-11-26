@@ -1,8 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
+import { PROTOCOL_VERSION } from "@isoplan/protocol";
 import { tempRoot } from "../data-layer/fixture.js";
-import { ADAM, draftTo, GROUNDS, setUpEmployee, until, type EmployeeRule } from "./employee-fixture.js";
+import { createEmployeeDraftsHere } from "./employee-drafts-here.js";
+import { ADAM, draftTo, GROUNDS, RECORD, setUpEmployee, until, type EmployeeRule } from "./employee-fixture.js";
 
 vi.stubEnv("CLAUDE_CONFIG_DIR", path.join(tempRoot(), "claude"));
 for (const [k, v] of Object.entries({ GIT_AUTHOR_NAME: "Adam", GIT_AUTHOR_EMAIL: "adam@example.invalid", GIT_COMMITTER_NAME: "Adam", GIT_COMMITTER_EMAIL: "adam@example.invalid" })) vi.stubEnv(k, v);
@@ -124,5 +126,50 @@ test("expired: the claim is released, and a late decision is still applied, even
     ["ana@agency.example", "contacted"],
     ["bo@agency.example", "skipped"],
   ]);
-  expect(ADAM.name).toBe("Adam");
+});
+
+test("decisions are applied one at a time, so the same rejection twice at once is applied once; a late rejection of an expired draft releases no claim a newer draft to the same person holds", async () => {
+  const s = await started([{ kind: "fork", text: RUN, calls: [draftTo("ana@agency.example")], reply: "done" }]);
+  const rejected = () => JSON.parse(fs.readFileSync(path.join(s.dir, "rejected-for-the-next-run.json"), "utf8")).recipients.map((r: { prospect: string }) => r.prospect);
+  await runAt(s, "2026-11-26T09:01:00Z");
+  const first = idOf(s, "ana@agency.example");
+  // Expired, its claim released; the next run drafts ana again, and claims her.
+  s.clock.t = Date.parse("2026-11-28T10:00:00Z");
+  await s.e().drafts.tidy();
+  await until(() => adams(s).length === 0, 30000, "released");
+  await runAt(s, "2026-11-29T09:01:00Z");
+  expect(adams(s)).toEqual([["ana@agency.example", "claimed"]]);
+
+  // The first draft's rejection comes late, twice at once.
+  const [a, b] = await Promise.all([s.decided("rejected", first), s.decided("rejected", first)]);
+  expect(b).toEqual(a);
+  expect(rejected()).toEqual(["ana@agency.example"]);
+  // The next run carries her, can't draft her while the newer draft waits, and ends: the newer draft's claim stays.
+  await runAt(s, "2026-11-30T09:01:00Z");
+  expect(s.results().at(-1)).toBe("A draft to ana@agency.example waits for your owner already: pick another.");
+  expect(rejected()).toEqual([]);
+  await s.e().writer.write();
+  expect(adams(s)).toEqual([["ana@agency.example", "claimed"]]);
+});
+
+test("learning from a rejection: the employee's fork and each expert taught count their own failed tries, so one giving up leaves the rest waiting; 30 days past its expiry the draft goes, learned from or not", async () => {
+  const dir = path.join(tempRoot(), "employee");
+  const clock = { t: Date.parse("2026-11-26T09:00:00Z") };
+  const writer = { fetch: async () => ({ ok: true as const }), lookUp: () => ({ mine: null, others: [] }), add: async () => {}, write: async () => ({ pushed: true as const, someoneElseHad: [], contactedTwice: [] }) };
+  const d = createEmployeeDraftsHere({ dir, writer, account: () => ADAM, now: () => clock.t, log: () => {} });
+  await d.load();
+  const answers = { "adams-writing": [{ question: "How does Adam open?", answer: "With their newest project.", files: [{ path: "voice.md" }] }] };
+  expect(await d.leave("r1", { text: "Hello Ana.", to: { name: "Ana", address: "ana@agency.example" } }, 10, answers)).toBe("Left draft 1 of 10.");
+  await d.endRun("r1", { held: new Set(), dropped: new Set(), expiresAt: "2026-11-28T09:00:00.000Z", outcome: "ran" });
+  const id = d.toSend()[0]!.drafts[0]!.id;
+  await d.decide({ type: "employee-draft-decided", v: PROTOCOL_VERSION, key: "adams-outreach", expertRecordId: RECORD, draft: id, by: ADAM, at: "2026-11-26T10:00:00.000Z", decision: "rejected", correction: "Shorter.", teach: ["adams-writing"] });
+  // The employee's fork fails twice and gives up; the expert, whose instance wasn't ready each time, still waits.
+  await d.learned([id], "employee", false);
+  expect(d.toLearn()[0]!.learning).toEqual({ employee: false, experts: [], tries: { employee: 1 } });
+  await d.learned([id], "employee", false);
+  expect(d.toLearn()[0]!.learning).toEqual({ employee: true, experts: [], tries: { employee: 2 } });
+  clock.t = Date.parse("2026-12-28T09:01:00Z");
+  await d.tidy();
+  expect(d.toLearn()).toEqual([]);
+  expect(JSON.parse(fs.readFileSync(path.join(dir, "drafts-waiting.json"), "utf8")).drafts).toEqual([]);
 });

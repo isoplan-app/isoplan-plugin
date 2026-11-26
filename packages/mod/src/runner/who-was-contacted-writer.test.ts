@@ -1,9 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { expect, test, vi } from "vitest";
-import { tempRoot } from "../data-layer/fixture.js";
+import { modDir, tempRoot } from "../data-layer/fixture.js";
 import { git, remoteAndClone, setIdentity } from "../handoff/fixture.js";
 import { createRunGit, type RunGit } from "../handoff/git.js";
+import { WHY_HELD } from "./employee-runs.js";
+import { loadPatterns, scan } from "./scan.js";
 import { parseTable } from "./who-was-contacted.js";
 import { createWhoWasContactedWriter } from "./who-was-contacted-writer.js";
 
@@ -16,6 +18,7 @@ const at = "2026-11-26T09:00:00.000Z";
 
 function setUp(o: { git?: RunGit } = {}) {
   const root = tempRoot();
+  const logs: string[] = [];
   const { remote, clone: checkout } = remoteAndClone(root, "checkout");
   const dir = path.join(root, "employees", "adams-outreach");
   const writer = createWhoWasContactedWriter({
@@ -27,7 +30,9 @@ function setUp(o: { git?: RunGit } = {}) {
     me: () => ({ sender: "Adam", employee: "adams-outreach" }),
     employeeName: () => "Adams Outreach",
     timeoutMs: async () => 20000,
-    log: () => {},
+    // This computer's secret patterns, as the runner reads them.
+    scan: async (text) => scan(text, await loadPatterns(path.join(modDir, "secret-patterns.json"), path.join(root, "none.json"), () => {})),
+    log: (text) => void logs.push(text),
     tries: async () => 5,
     delayMs: () => 10,
     cloneFrom: () => true,
@@ -51,7 +56,7 @@ function setUp(o: { git?: RunGit } = {}) {
     git(other, "commit", "-q", "-m", "Valentina's claim");
     git(other, "push", "-q", "origin", "main");
   };
-  return { root, remote, dir, writer, onRemote, valentinaPushes };
+  return { root, remote, checkout, dir, writer, onRemote, valentinaPushes, logs };
 }
 
 test("a claim is committed unsigned, with a message naming counts only, and pushed; another computer's push in between is reset to and applied again, dropping a claim it now covers; changes already there count as pushed", async () => {
@@ -97,7 +102,7 @@ test("with the remote out of reach the change waits in its file and the problem 
   await s.writer.add([{ op: "claim", prospect: "ana@studio.example", draft: "d1", at }]);
   const offline = await s.writer.write();
   expect(offline).toMatchObject({ pushed: false });
-  expect(s.writer.problem()?.refused).toBeUndefined();
+  expect(s.writer.problem()).toEqual({ detail: expect.stringContaining("couldn't fetch main") });
   expect(JSON.parse(fs.readFileSync(path.join(s.dir, "who-was-contacted-changes-waiting.json"), "utf8")).changes).toHaveLength(1);
   fs.renameSync(moved, s.remote);
   expect(await s.writer.write()).toMatchObject({ pushed: true });
@@ -114,4 +119,14 @@ test("with the remote out of reach the change waits in its file and the problem 
   expect(await s.writer.write()).toMatchObject({ pushed: false, refused: true });
   expect(await s.writer.write({ runStart: true })).toMatchObject({ pushed: true });
   expect(s.onRemote().rows[0]).toMatchObject({ prospect: "ana@studio.example", state: "contacted" });
+});
+
+test("git's words holding the remote's address with a password in it never reach the floor: the problem says only that this computer's log has them", async () => {
+  const s = setUp();
+  await s.writer.load();
+  git(s.checkout, "remote", "set-url", "origin", "https://adam:hunter2hunter2@127.0.0.1:9/acme/docs.git");
+  await s.writer.add([{ op: "claim", prospect: "ana@studio.example", draft: "d1", at }]);
+  expect(await s.writer.write()).toMatchObject({ pushed: false });
+  expect(s.writer.problem()).toEqual({ detail: WHY_HELD });
+  expect(s.logs.some((l) => l.includes("adam:hunter2hunter2@127.0.0.1"))).toBe(true);
 });

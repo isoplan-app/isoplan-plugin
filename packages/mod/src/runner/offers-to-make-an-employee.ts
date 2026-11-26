@@ -3,8 +3,11 @@
 // sessions on this computer (job-from-sessions-model-call.ts), checks it against the secret and the
 // personal-data patterns (a match, or patterns that can't be read, makes no offer, logged with the
 // field), and offers to make an employee, to one office: the one the employee would be published to.
+// No job written, or one that didn't pass its check, is no offer: the skill or prompt is tried again
+// `jobFromSessionsTriedAgainAfterHours` later, on its next start by hand.
 //
-// - Once per skill or prompt, ever: never one an employee here was made from, never one dismissed.
+// - Once per skill or prompt, ever: never one an employee here was made from, never one offered
+//   before. An ended offer is kept 30 days; what it was made for, for good (`offeredFor`).
 // - The offer carries only its id, its rhythm and, for a skill, the skill's name; the job stays here
 //   (offers-to-make-an-employee.json), and goes to the floor only when its person opens the offer
 //   (`offer-to-make-an-employee-job-wanted`, by this runner's person), checked again first.
@@ -15,9 +18,10 @@
 import { randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { PROTOCOL_VERSION, type ExpertDefinition, type OfferToMakeAnEmployeeEndedMessage, type OfferToMakeAnEmployeeJobWantedMessage, type Project } from "@isoplan/protocol";
+import { PROTOCOL_VERSION, type OfferToMakeAnEmployeeEndedMessage, type OfferToMakeAnEmployeeJobWantedMessage, type Project } from "@isoplan/protocol";
 import type { DataLayerLine } from "../lines.js";
 import type { RunnerEmployeeMessage } from "../data-layer/link.js";
+import type { EmployeesSettings } from "./employee.js";
 import { definitionCheck } from "./employee-ties.js";
 import { readJson, writeJson } from "./expert-state.js";
 import type { JobFromSessions, JobFromSessionsInput } from "./job-from-sessions-model-call.js";
@@ -26,13 +30,11 @@ import type { CheckBeforeItLeaves } from "./what-was-learned-before-it-leaves.js
 
 const DAY = 24 * 3600000;
 const KEPT_AFTER_IT_ENDED_MS = 30 * DAY;
-/** The newest sessions a job is written from. */
-const SESSIONS_WRITTEN_FROM = 5;
 
 interface Offer {
   id: string;
-  /** What it was made for: `skill:<name>` or `prompt:<sha256>`. */
-  job: string;
+  /** What it was made for: what its person started by hand, `skill:<name>` or `prompt:<sha256>`. */
+  startedWith: string;
   skill?: string;
   rhythm: Rhythm;
   server: string;
@@ -43,8 +45,17 @@ interface Offer {
   session: string;
   at: number;
   sent: boolean;
-  ended?: OfferToMakeAnEmployeeEndedMessage["why"] | "no-job";
+  ended?: OfferToMakeAnEmployeeEndedMessage["why"];
   endedAt?: number;
+}
+
+interface OffersFile {
+  version: 1;
+  offers: Offer[];
+  /** What an offer that ended over 30 days ago was made for: never offered again. */
+  offeredFor: string[];
+  /** What no job could be written from, or whose job didn't pass its check, and when. */
+  noJob: { startedWith: string; at: number }[];
 }
 
 export interface OffersToMakeAnEmployeeOptions {
@@ -52,6 +63,7 @@ export interface OffersToMakeAnEmployeeOptions {
   projectsDir: string;
   claudeDir: string;
   account: { id: string; name: string };
+  settings: () => Promise<Pick<EmployeesSettings, "sessionsAJobIsWrittenFrom" | "jobFromSessionsTriedAgainAfterHours">>;
   /** The office an employee of this project would be published to; null when none takes it now. */
   officeFor: (project: string, cwd: string) => Promise<{ server: string; project: Project } | null>;
   /** Sends on that office's employee link while it carries the family; false when it can't now. */
@@ -60,8 +72,8 @@ export interface OffersToMakeAnEmployeeOptions {
   check: (thing: { text: string; files: { path: string }[] }) => Promise<CheckBeforeItLeaves>;
   /** The experts the sessions asked, from the asking module's file. */
   expertsAsked: (sessions: readonly string[]) => Promise<string[]>;
-  /** Whether an employee here was made from this job already. */
-  madeHere: (job: string) => boolean;
+  /** Whether an employee here was made from what its person started by hand already. */
+  madeHere: (startedWith: string) => boolean;
   hooked: (session: string) => { send(line: DataLayerLine): void } | null;
   log: (text: string) => void;
   now?: () => number;
@@ -69,14 +81,14 @@ export interface OffersToMakeAnEmployeeOptions {
 
 export interface OffersToMakeAnEmployee {
   load(): Promise<void>;
-  /** A job's rhythm crossed its threshold. */
-  rhythm(job: string, rhythm: Rhythm, starts: StartedByHand[]): Promise<void>;
+  /** What its person started by hand crossed its rhythm's threshold. */
+  rhythm(startedWith: string, rhythm: Rhythm, starts: StartedByHand[]): Promise<void>;
   /** The office's employee link carries the family now: what didn't go, goes. */
   opened(server: string): void;
   ended(server: string, m: OfferToMakeAnEmployeeEndedMessage): void;
   jobWanted(server: string, m: OfferToMakeAnEmployeeJobWantedMessage): Promise<void>;
-  /** The job made from an offer, for `make-an-employee`'s check that it came from one. */
-  get(id: string): { job: string } | null;
+  /** What an offer was made for, for `make-an-employee`'s check that it came from one. */
+  get(id: string): { startedWith: string } | null;
   /** The session's pipe connected afresh: it is given its open offer again. */
   rehooked(session: string): void;
   written(): Promise<void>;
@@ -120,11 +132,13 @@ async function sessionTexts(projectsDir: string, session: string): Promise<{ fir
 export function createOffersToMakeAnEmployee(o: OffersToMakeAnEmployeeOptions): OffersToMakeAnEmployee {
   const now = o.now ?? Date.now;
   let offers: Offer[] = [];
+  let offeredFor: string[] = [];
+  let noJob: OffersFile["noJob"] = [];
   let writing: Promise<void> = Promise.resolve();
   const busy = new Set<string>();
   const save = () => {
-    const copy = structuredClone(offers);
-    writing = writing.then(() => writeJson(o.file, { version: 1, offers: copy })).catch((err: Error) => o.log(`couldn't write ${o.file}: ${err.message}`));
+    const copy: OffersFile = structuredClone({ version: 1, offers, offeredFor, noJob });
+    writing = writing.then(() => writeJson(o.file, copy)).catch((err: Error) => o.log(`couldn't write ${o.file}: ${err.message}`));
     return writing;
   };
   const line = (x: Offer): DataLayerLine => ({ type: "offer-to-make-an-employee", server: x.server, id: x.id, ...(x.skill && { skill: x.skill }), url: offerUrl(x.server, x.id) });
@@ -136,43 +150,48 @@ export function createOffersToMakeAnEmployee(o: OffersToMakeAnEmployeeOptions): 
     }
   };
 
-  // The job as a definition, for the check: its key and words, as a published one is checked.
-  const asDefinition = (j: JobFromSessions, project: Project): ExpertDefinition => ({ key: j.key, project, subject: j.subject, model: "sonnet", promoteAtTokens: 80000, areas: [], job: j.job });
-
   return {
     async load() {
-      const read = (await readJson(o.file)) as { version?: unknown; offers?: unknown } | null;
-      if (read?.version === 1 && Array.isArray(read.offers)) offers = read.offers as Offer[];
-      offers = offers.filter((x) => !x.endedAt || now() - x.endedAt < KEPT_AFTER_IT_ENDED_MS || x.ended === "made" || x.ended === "dismissed" || x.ended === "no-job");
+      const read = (await readJson(o.file)) as Partial<OffersFile> | null;
+      if (read?.version === 1) {
+        if (Array.isArray(read.offers)) offers = read.offers;
+        if (Array.isArray(read.offeredFor)) offeredFor = read.offeredFor;
+        if (Array.isArray(read.noJob)) noJob = read.noJob;
+      }
+      const old = offers.filter((x) => x.endedAt !== undefined && now() - x.endedAt >= KEPT_AFTER_IT_ENDED_MS);
+      offeredFor = [...new Set([...offeredFor, ...old.map((x) => x.startedWith)])];
+      offers = offers.filter((x) => !old.includes(x));
     },
-    async rhythm(job, rhythm, starts) {
-      if (busy.has(job) || offers.some((x) => x.job === job) || o.madeHere(job)) return;
-      busy.add(job);
+    async rhythm(startedWith, rhythm, starts) {
+      if (busy.has(startedWith) || offers.some((x) => x.startedWith === startedWith) || offeredFor.includes(startedWith) || o.madeHere(startedWith)) return;
+      const s = await o.settings();
+      noJob = noJob.filter((x) => now() - x.at < s.jobFromSessionsTriedAgainAfterHours * 3600000);
+      if (noJob.some((x) => x.startedWith === startedWith)) return;
+      busy.add(startedWith);
       try {
         const newest = starts[0]!;
         const office = await o.officeFor(newest.project, newest.cwd);
         if (!office) return;
-        const sessions = starts.slice(0, SESSIONS_WRITTEN_FROM);
+        const sessions = starts.slice(0, s.sessionsAJobIsWrittenFrom);
         const skill = newest.skill;
         const skillFile = skill ? await skillText(o.claudeDir, newest.cwd, skill) : null;
         const texts = await Promise.all(sessions.map(async (s) => ({ ...(await sessionTexts(o.projectsDir, s.session)), startedAt: new Date(s.at).toISOString() })));
         const written = await o.write({ ...(skill && { skill: { name: skill, text: skillFile } }), sessions: texts, experts: await o.expertsAsked(sessions.map((s) => s.session)) });
         const id = randomBytes(12).toString("base64url");
-        const base = { id, job, ...(skill && { skill: skill.toLowerCase() }), rhythm, server: office.server, project: office.project.id, session: newest.session, at: now(), sent: false };
-        const hit = written ? await definitionCheck(asDefinition(written, office.project), o.check) : null;
+        const hit = written ? await definitionCheck(written, o.check) : null;
         if (!written || hit) {
-          o.log(`no offer to make an employee for a job started by hand on a rhythm: ${!written ? "no job could be written from its sessions" : hit === "unreadable" ? "the patterns can't be read" : hit!.why}`);
-          offers.push({ ...base, ended: "no-job", endedAt: now() });
+          o.log(`no offer to make an employee for a job started by hand on a rhythm, tried again in ${s.jobFromSessionsTriedAgainAfterHours} hours: ${!written ? "no job could be written from its sessions" : hit === "unreadable" ? "the patterns can't be read" : hit!.why}`);
+          noJob.push({ startedWith, at: now() });
           return void (await save());
         }
-        const offer: Offer = { ...base, jobFromSessions: written };
+        const offer: Offer = { id, startedWith, ...(skill && { skill: skill.toLowerCase() }), rhythm, server: office.server, project: office.project.id, session: newest.session, at: now(), sent: false, jobFromSessions: written };
         offers.push(offer);
         await save();
         o.log(`offers to make an employee on ${office.server}: the same job was started by hand on ${rhythm.kind === "days" ? `${rhythm.days} of the last 7 days` : `each of the last ${rhythm.weeks} weeks`}`);
         send(offer);
         o.hooked(offer.session)?.send(line(offer));
       } finally {
-        busy.delete(job);
+        busy.delete(startedWith);
       }
     },
     opened(server) {
@@ -195,13 +214,13 @@ export function createOffersToMakeAnEmployee(o: OffersToMakeAnEmployeeOptions): 
       const j = x?.jobFromSessions;
       if (!x || x.ended || !j) return void answer();
       const project = { id: x.project, name: x.project.split("/").pop() ?? x.project };
-      const hit = await definitionCheck(asDefinition(j, project), o.check);
+      const hit = await definitionCheck(j, o.check);
       if (hit) return (o.log(`the job of offer ${x.id} didn't pass its check again, so it isn't sent: ${hit === "unreadable" ? "the patterns can't be read" : hit.why}`), void answer());
       answer({ key: j.key, subject: j.subject, project, job: j.job });
     },
     get: (id) => {
       const x = offers.find((y) => y.id === id);
-      return x ? { job: x.job } : null;
+      return x ? { startedWith: x.startedWith } : null;
     },
     rehooked(session) {
       for (const x of offers) if (x.session === session && !x.ended && x.jobFromSessions) o.hooked(session)?.send(line(x));

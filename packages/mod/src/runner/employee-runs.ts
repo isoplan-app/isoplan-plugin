@@ -8,15 +8,20 @@
 // - A schedule change (its every, at, on or zone) passes over every scheduled time before the change,
 //   and so does the employee's first look, so it runs from its next scheduled time on.
 // - Not before its job file is tied to a published record and a generation is ready; a due time
-//   waits for those inside its window. No overlapping runs: a time due during a run waits for it.
+//   waits for those inside its window. No overlapping runs: a time due during a run waits for it, and
+//   a run started now (`runNow`) while a tick looks makes that tick start none.
 // - Held back: while more of its drafts wait for its owner than one run leaves, a due time waits;
 //   once decisions or expiry bring them down inside its window, it runs; past it, `held-back`.
 // - Its day's minutes and tokens (rolling 24 hours, this file and its ledger) stop a run starting
 //   when spent, and a run stopped at a limit is `stopped` with it and isn't tried again.
 // - One try again: a run that failed is tried again once, `tryAgainAfterMinutes` later, if still
 //   inside its window; a second failure isn't.
-// - At start, a run this file names as running whose end wasn't done gets its end now (its drafts
+// - At start, a run this file names as running whose end wasn't done gets its end (its drafts
 //   scanned, claimed and sent), and counts as failed, so its try again finds their recipients claimed.
+//   That end is in the background, as a run is: nothing is due before it is done, and git's time
+//   doesn't hold the runner's start.
+// - `stop` starts no more runs, and the run under way ends as it would, its end done; `close`, as the
+//   runner stops, leaves the end of the run under way to the next start.
 
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -57,7 +62,8 @@ export interface EmployeeRunsOptions {
   waiting: () => number;
   draftsPerRun: () => Promise<number>;
   tryAgainAfterMinutes: () => Promise<number>;
-  run: (run: string, scheduledFor: number) => Promise<RunOutcome>;
+  /** `closed`: whether the runner is stopping, so the run leaves its end to the next start. */
+  run: (run: string, scheduledFor: number, closed: () => boolean) => Promise<RunOutcome>;
   /** The end of a run the runner died in. */
   endLeftover: (run: string) => Promise<{ drafts: number; heldBySecretCheck: number; someoneElseHad: number }>;
   scan: (text: string) => Promise<string | null>;
@@ -81,7 +87,12 @@ export interface EmployeeRuns {
   /** The minutes it ran in the last 24 hours. */
   dayMinutes(): number;
   running(): boolean;
+  /** Starts no more runs; the run under way ends as it would. */
   stop(): void;
+  /** The runner stops: the end of the run under way is left to the next start. */
+  close(): void;
+  /** Settles once the run under way, or the end of one the runner died in, is over. */
+  settled(): Promise<void>;
   written(): Promise<void>;
 }
 
@@ -94,6 +105,7 @@ export function createEmployeeRuns(o: EmployeeRunsOptions): EmployeeRuns {
   let ticking: Promise<void> | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
   let stopped = false;
+  let closed = false;
   let writing: Promise<void> = Promise.resolve();
 
   const save = () => {
@@ -125,11 +137,11 @@ export function createEmployeeRuns(o: EmployeeRunsOptions): EmployeeRuns {
     o.onChange();
     let out: RunOutcome;
     try {
-      out = await o.run(run, scheduledFor);
+      out = await o.run(run, scheduledFor, () => closed);
     } catch (err) {
       out = { outcome: "failed", why: `the runner failed: ${(err as Error).message}`, drafts: 0, heldBySecretCheck: 0, someoneElseHad: 0, startedAt: since };
     }
-    if (stopped) return;
+    if (closed) return;
     const endedAt = now();
     s().dayMinutes = [...s().dayMinutes.filter((x) => endedAt - x.at < DAY), { at: endedAt, minutes: (endedAt - since) / 60000 }];
     const tryAgainAt = out.outcome === "failed" && !wasTheTryAgain ? endedAt + (await o.tryAgainAfterMinutes()) * 60000 : null;
@@ -142,10 +154,27 @@ export function createEmployeeRuns(o: EmployeeRunsOptions): EmployeeRuns {
     o.onChange();
   }
 
-  const go = (scheduledFor: number, again: boolean) => {
+  // Never two at once: a run asked for while one is under way is that one.
+  const go = (scheduledFor: number, again: boolean): Promise<void> => {
+    if (running || stopped) return running ?? Promise.resolve();
     running = start(scheduledFor, again).finally(() => (running = null));
     return running;
   };
+
+  // The end of a run this file names as running: the runner stopped during it.
+  async function endLeftover(left: NonNullable<RunsFile["running"]>) {
+    o.log(`its run ${left.run} was under way when the runner stopped, so its end is done now`);
+    const counts = await o.endLeftover(left.run);
+    if (closed) return;
+    const endedAt = now();
+    const tryAgainAt = left.wasTheTryAgain ? null : endedAt + (await o.tryAgainAfterMinutes()) * 60000;
+    const retries = tryAgainAt !== null && tryAgainAt < windowEnd(left.scheduledFor);
+    end({ run: left.run, scheduledFor: left.scheduledFor, startedAt: left.since, endedAt, outcome: "failed", ...counts, why: "the runner stopped during the run", ...(retries && { tryingAgainAt: tryAgainAt! }), ...(left.wasTheTryAgain && { wasTheTryAgain: true as const }) });
+    s().running = null;
+    s().tryAgain = retries ? { scheduledFor: left.scheduledFor, at: tryAgainAt! } : null;
+    await save();
+    o.onChange();
+  }
 
   // A schedule changed: every time before now is passed over.
   async function jobChanged() {
@@ -198,18 +227,14 @@ export function createEmployeeRuns(o: EmployeeRunsOptions): EmployeeRuns {
       state = read?.version === 1 ? read : { version: 1, scheduleKey: scheduleKey(schedule()), passedOverBefore: now(), lastScheduledFor: null, running: null, tryAgain: null, ended: [], dayMinutes: [] };
       if (!read) await save();
       const left = s().running;
-      if (left) {
-        o.log(`its run ${left.run} was under way when the runner stopped, so its end is done now`);
-        const counts = await o.endLeftover(left.run);
-        const endedAt = now();
-        const tryAgainAt = left.wasTheTryAgain ? null : endedAt + (await o.tryAgainAfterMinutes()) * 60000;
-        const retries = tryAgainAt !== null && tryAgainAt < windowEnd(left.scheduledFor);
-        end({ run: left.run, scheduledFor: left.scheduledFor, startedAt: left.since, endedAt, outcome: "failed", ...counts, why: "the runner stopped during the run", ...(retries && { tryingAgainAt: tryAgainAt! }), ...(left.wasTheTryAgain && { wasTheTryAgain: true as const }) });
-        s().running = null;
-        s().tryAgain = retries ? { scheduledFor: left.scheduledFor, at: tryAgainAt! } : null;
-        await save();
-        o.onChange();
-      }
+      // Held as a run is, so nothing is due until it is done; then it looks at the schedule.
+      if (left)
+        running = endLeftover(left)
+          .catch((err: Error) => o.log(`the end of its run ${left.run} failed: ${err.message}`))
+          .finally(() => {
+            running = null;
+            void tick();
+          });
       if (o.tickMs !== null) {
         timer = setInterval(() => void tick(), o.tickMs ?? 60000);
         timer.unref?.();
@@ -242,6 +267,11 @@ export function createEmployeeRuns(o: EmployeeRunsOptions): EmployeeRuns {
       stopped = true;
       if (timer) clearInterval(timer);
     },
+    close() {
+      stopped = closed = true;
+      if (timer) clearInterval(timer);
+    },
+    settled: async () => void (await running),
     written: () => writing,
   };
 }

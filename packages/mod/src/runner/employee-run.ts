@@ -13,6 +13,7 @@
 //   scanned for secrets (a match never leaves and is only counted); a claim per draft with a
 //   recipient, pushed, a recipient another sender claimed or contacted since dropping its draft;
 //   then the drafts go to the office (employee-link.ts). A push that fails still lets the drafts go.
+//   A run the runner stopped during (`closed`) leaves its end to the runner's next start.
 
 import type { JOB_LIMITS } from "@isoplan/protocol";
 import type { Ledger } from "./caps.js";
@@ -73,9 +74,10 @@ export interface EmployeeRunDeps {
   log: (text: string) => void;
 }
 
-/** One run: `run` its id, for the scheduled time `scheduledFor`. */
-export async function runOnce(d: EmployeeRunDeps, run: string, scheduledFor: number): Promise<RunOutcome> {
+/** One run: `run` its id, for the scheduled time `scheduledFor`; `closed`, whether the runner is stopping. */
+export async function runOnce(d: EmployeeRunDeps, run: string, scheduledFor: number, closed: () => boolean = () => false): Promise<RunOutcome> {
   const startedAt = d.now();
+  const leftToTheNextStart: RunOutcome = { outcome: "failed", why: "the runner stopped during the run", drafts: 0, heldBySecretCheck: 0, someoneElseHad: 0, startedAt };
   const f = d.file();
   const s = await d.settings();
   const limits = limitsOf(f, s.employees);
@@ -88,6 +90,7 @@ export async function runOnce(d: EmployeeRunDeps, run: string, scheduledFor: num
 
   await d.writer.write({ runStart: true, alreadySent: alreadySent(d.drafts, run) });
   const refreshed = await d.trunk.refresh();
+  if (closed()) return leftToTheNextStart;
   if (refreshed) return failed(refreshed);
 
   const zone = zoneOf(f.job.schedule);
@@ -124,6 +127,7 @@ export async function runOnce(d: EmployeeRunDeps, run: string, scheduledFor: num
       return limit ? `it reached its limit, ${limit}` : null;
     },
   });
+  if (closed()) return leftToTheNextStart;
   if (!c.ok && c.failure!.kind === "timed-out") limit = limits.runMinutes <= minutesLeft ? "run-minutes" : "day-minutes";
   const end = await endOfRun(d, run, c.ok ? "ran" : limit ? "stopped" : "failed");
   if (c.ok) return { outcome: "ran", ...end, startedAt };

@@ -49,30 +49,46 @@ test("a time inside its window runs once when the runner is back; past it, it is
   expect(s.e().runs!.listing().nextRunAt).toBe("2026-12-02T08:00:00.000Z");
 });
 
-test("no overlapping runs: a time due during a run waits for it; a failed run is tried again once; a run stopped at a limit isn't", async () => {
+test("no overlapping runs: a time due during a run waits for it, then runs; a run started now while a tick looks is the only one; a failed run is tried again once; a run stopped at a limit isn't", async () => {
   const s = await started([{ kind: "fork", text: RUN, reply: "done", delayMs: 4000 }]);
+  const forks = () => s.claude().filter((x) => x.kind === "fork" && x.argv).length;
+  // Run now at 08:58, as an employee made on the floor is, and still running as 09:00 comes: nothing more starts.
+  s.clock.t = Date.parse("2026-11-26T08:58:00Z");
+  const first = s.e().runs!.runNow();
+  await until(() => forks() === 1);
   s.clock.t = Date.parse("2026-11-26T09:01:00Z");
   await s.e().runs!.tick();
-  await until(() => s.claude().some((x) => x.kind === "fork" && !!x.argv));
-  // The next day's time comes while it runs: nothing more starts.
+  expect(forks()).toBe(1);
+  await first;
+  // Once it ended, the time due during it runs.
+  await at(s, "2026-11-26T09:02:00Z", () => ended(s).length === 2);
+  expect(ended(s).map((e) => [e.scheduledFor, e.outcome])).toEqual([
+    ["2026-11-26T09:00:00.000Z", "ran"],
+    ["2026-11-26T08:58:00.000Z", "ran"],
+  ]);
+  expect(forks()).toBe(2);
+  // A run started now while a tick at a due time is looking: one run.
   s.clock.t = Date.parse("2026-11-27T09:01:00Z");
-  await s.e().runs!.tick();
-  expect(s.claude().filter((x) => x.kind === "fork" && x.argv)).toHaveLength(1);
+  const ticking = s.e().runs!.tick();
+  await new Promise((r) => setImmediate(r));
+  const now = s.e().runs!.runNow();
+  await ticking;
+  await now;
   await until(() => !s.e().runs!.running(), 30000);
-  await at(s, "2026-11-27T09:02:00Z", () => ended(s).length === 2);
-  expect(ended(s).map((e) => e.scheduledFor)).toEqual(["2026-11-27T09:00:00.000Z", "2026-11-26T09:00:00.000Z"]);
+  expect(forks()).toBe(3);
+  expect(ended(s)).toHaveLength(3);
 
   // Failed: tried again once, 10 minutes later, and not again.
   s.rules([...GROUNDS, { kind: "fork", text: RUN, exit: true }]);
-  await at(s, "2026-11-28T09:01:00Z", () => ended(s).length === 3);
+  await at(s, "2026-11-28T09:01:00Z", () => ended(s).length === 4);
   expect(ended(s)[0]).toMatchObject({ outcome: "failed", tryingAgainAt: "2026-11-28T09:11:00.000Z" });
-  await at(s, "2026-11-28T09:11:00Z", () => ended(s).length === 4);
+  await at(s, "2026-11-28T09:11:00Z", () => ended(s).length === 5);
   expect(ended(s)[0]).toMatchObject({ outcome: "failed", wasTheTryAgain: true });
   expect(ended(s)[0]!.tryingAgainAt).toBeUndefined();
 
   // Stopped at its context limit: kept its draft, not tried again.
   s.rules([...GROUNDS, { kind: "fork", text: RUN, context: 1000, contextStep: 500000, calls: [draftTo("ana@studio.example"), draftTo("bo@agency.example")], reply: "done" }]);
-  await at(s, "2026-11-29T09:01:00Z", () => ended(s).length === 5);
+  await at(s, "2026-11-29T09:01:00Z", () => ended(s).length === 6);
   expect(ended(s)[0]).toMatchObject({ outcome: "stopped", limit: "context", drafts: 1 });
   expect(ended(s)[0]!.tryingAgainAt).toBeUndefined();
 });
@@ -85,9 +101,10 @@ test("its day's tokens and minutes, rolling and kept across a restart, stop a ru
   await s.close();
   closing.length = 0;
 
-  // A day's tokens spent, its grounding's among them, as the ledger kept them across the restart.
+  // A day's tokens spent, its grounding's among them (before the run, under the employee's room, which the day's tokens add up), as the ledger kept them across the restart.
   const ledger = path.join(root, "claude", "isoplan", "employees", "adams-outreach", "ledger.json");
   const spent = JSON.parse(fs.readFileSync(ledger, "utf8")) as { at: number; room: string }[];
+  expect(spent.filter((e) => e.at < Date.parse("2026-11-26T09:01:00Z")).length).toBeGreaterThan(0);
   expect(spent.every((e) => e.room === EMPLOYEE_ROOM)).toBe(true);
   fs.writeFileSync(ledger, JSON.stringify([...spent, { at: Date.parse("2026-11-27T08:00:00Z"), room: EMPLOYEE_ROOM, usage: { input: 9_000_000, output: 0, cacheRead: 0, cacheWrite: 0 } }]));
   const again = await setUpEmployee({ root, rules: [...GROUNDS, { kind: "fork", text: RUN, reply: "done" }] });
@@ -110,6 +127,35 @@ test("its day's tokens and minutes, rolling and kept across a restart, stop a ru
   await third.ready();
   await at(third, "2026-11-28T09:01:00Z", () => ended(third).length === 3);
   expect(ended(third)[0]).toMatchObject({ outcome: "stopped", limit: "day-minutes" });
+});
+
+test("a run ends at its minutes, stopped with run-minutes, keeping its draft and not tried again; one its day's minutes run out in is stopped with day-minutes", async () => {
+  const s = await started([{ kind: "fork", text: RUN, calls: [draftTo("ana@studio.example")], hang: true }], { job: { limits: { runMinutes: 1 } } });
+  // The conversation's time limit is real time: faked from here, moved on by hand.
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"], shouldAdvanceTime: true });
+  try {
+    s.clock.t = Date.parse("2026-11-26T09:01:00Z");
+    await s.e().runs!.tick();
+    await until(() => s.results().length === 1, 60000, "its draft left");
+    // 89.5 of its day's 90 minutes go by on the clock while it runs.
+    s.clock.t = Date.parse("2026-11-26T10:30:30Z");
+    vi.advanceTimersByTime(60_000);
+    await until(() => ended(s).length === 1 && !s.e().runs!.running(), 60000, "the run ended at its minutes");
+    expect(ended(s)[0]).toMatchObject({ outcome: "stopped", limit: "run-minutes", drafts: 1 });
+    expect(ended(s)[0]!.tryingAgainAt).toBeUndefined();
+    expect(s.e().drafts.waiting()).toBe(1);
+
+    // Run now, with half a minute of its day's left: cut short there.
+    s.clock.t = Date.parse("2026-11-26T10:31:00Z");
+    const run = s.e().runs!.runNow();
+    await until(() => s.results().length === 2, 60000, "its second run's call");
+    vi.advanceTimersByTime(30_000);
+    await run;
+    expect(ended(s)[0]).toMatchObject({ outcome: "stopped", limit: "day-minutes" });
+    expect(ended(s)[0]!.tryingAgainAt).toBeUndefined();
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test("held back while more drafts wait than one run leaves; decisions inside its window let it run; past it, held-back", async () => {

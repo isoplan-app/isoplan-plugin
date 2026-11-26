@@ -78,7 +78,9 @@ test("three rejections together make one fork, whose <learned> blocks wait to be
   await s.decided("rejected", s.e().drafts.toSend()[0]!.drafts[0]!.id);
   s.e().ledger.reserve({ at: s.clock.t, room: "employee", usage: { input: 9_000_000, output: 0, cacheRead: 0, cacheWrite: 0 } });
   await s.employees.tick();
-  await new Promise((r) => setTimeout(r, 1000));
+  // Its health log says it waits: learning decided that, and started nothing.
+  const health = path.join(s.claudeDir, "isoplan", "logs", "employee-adams-outreach.log");
+  await until(() => fs.existsSync(health) && fs.readFileSync(health, "utf8").includes("its day's tokens are spent"), 30000, "the wait said");
   expect(s.claude().filter((x) => x.kind === "fork" && x.text?.includes("Your owner rejected these drafts"))).toHaveLength(1);
   expect(s.e().drafts.toLearn()).toHaveLength(1);
 });
@@ -112,4 +114,35 @@ test("a new generation grounds before the next run when its job's brief changes,
   await until(() => s.e().runs !== null, 10000, "its job file back");
   await s.ready();
   expect((await runAt(s, "2026-11-30T09:01:00Z")).outcome).toBe("ran");
+});
+
+test("the runner's own minute timer starts a run that is due and releases an expired draft's claim, with no tick by hand", async () => {
+  // Its timers are the runner's, each minute, moved on by hand.
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  try {
+    const s = await setUpEmployee({ minuteTimer: true, rules: [...GROUNDS, { kind: "fork", text: RUN, calls: [draftTo("ana@agency.example")], reply: "done" }] });
+    closing.push(s.close);
+    await s.ready();
+    s.clock.t = Date.parse("2026-11-26T09:01:00Z");
+    vi.advanceTimersByTime(60000);
+    await until(() => s.e().runs!.listing().ended.length === 1 && !s.e().runs!.running(), 60000, "its run, on the minute");
+    await s.e().writer.write();
+    expect(s.onRemote().map((r) => [r.prospect, r.state])).toEqual([["ana@agency.example", "claimed"]]);
+    s.clock.t = Date.parse("2026-11-28T10:00:00Z");
+    vi.advanceTimersByTime(60000);
+    await until(() => s.onRemote().length === 0, 60000, "its claim released at expiry, on the minute");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("its file of who was contacted inside an area of one of this computer's experts of its project is warned of once, in the runner log and its health log", async () => {
+  const s = await setUpEmployee({ expertAreas: [{ expert: "adams-writing", areas: ["outreach/**"] }], job: { whoWasContacted: "outreach/who-was-contacted.csv" } });
+  closing.push(s.close);
+  await s.employees.tick();
+  await s.employees.tick();
+  const warned = s.logs.filter((l) => l.includes("its file of who was contacted, outreach/who-was-contacted.csv, is inside expert adams-writing's area outreach/**"));
+  expect(warned).toHaveLength(1);
+  const health = fs.readFileSync(path.join(s.claudeDir, "isoplan", "logs", "employee-adams-outreach.log"), "utf8");
+  expect(health).toContain("adams-writing's area outreach/**");
 });

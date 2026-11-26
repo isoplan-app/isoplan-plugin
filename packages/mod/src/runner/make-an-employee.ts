@@ -3,11 +3,15 @@
 // saying each state (`making-an-employee`): `cloning` while it finds this computer's checkout of the
 // project or clones it (project-checkout-for-expert.ts, D11's route); `setting-up-experts` while it
 // starts setting up, here, each expert of the job this computer keeps no instance of
-// (expert-instance.ts, the one click covering them); then the definition is checked against the
-// secret and personal-data patterns (a match fails it naming the field, before anything is written);
-// the job file is written whole (employee-file.ts `jobFileText`), which the registry picks up and its
-// office's link publishes; `grounding`; `ready` once it is grounded and published, and its first run
-// starts at once; or `failed` with why. A failure after the file was written removes it.
+// (expert-instance.ts, the one click covering them), waiting for their set-ups to end, so the
+// employee's grounding has their subjects and its first run can ask them; then the definition is
+// checked against the secret and personal-data patterns (a match fails it naming the field, before
+// anything is written); the job file is written whole (employee-file.ts `jobFileText`), which the
+// registry picks up and its office's link publishes; `grounding`; `ready` once it is grounded and
+// published, and its first run starts at once; or `failed` with why, the office's refusal of its job
+// included. A failure after the file was written removes it. What a failure says on the floor is
+// secret-checked, and an error that isn't one of its own words (a file this computer couldn't write)
+// says only that runner.log has it, since its words can name this computer's folders.
 
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -24,7 +28,7 @@ import type { CheckBeforeItLeaves } from "./what-was-learned-before-it-leaves.js
 export interface MakeAnEmployeeOptions {
   account: { id: string; name: string };
   employees: Pick<Employees, "refresh" | "stateOf" | "runNow" | "jobFilePath" | "get">;
-  ties: Pick<EmployeeTies, "tiedAndPublished" | "blocked">;
+  ties: Pick<EmployeeTies, "tiedAndPublished" | "blocked" | "refused">;
   /** Whether an expert file or instance file here has the key. */
   expertHasKey: (key: string) => boolean;
   /** This computer's checkout of `project`, as the office `server` takes it; null when it has none. */
@@ -34,17 +38,24 @@ export interface MakeAnEmployeeOptions {
   expertEntry: (server: string, key: string) => ExpertDirectoryEntry | null;
   hasInstance: (server: string, key: string) => boolean;
   setUpExpert: (server: string, entry: ExpertDirectoryEntry) => void;
+  /** Whether this computer's set-up of the expert has ended, ready or failed, or none is under way. */
+  expertSetUpDone: (server: string, key: string) => boolean;
   check: (thing: { text: string; files: { path: string }[] }) => Promise<CheckBeforeItLeaves>;
   scan: (text: string) => Promise<string | null>;
   log: (text: string) => void;
-  /** How long it waits for its grounding and its publish. */
-  waitMs?: number;
+  /** runner.json's `employees.makingWaitMinutes`: how long it waits for its experts' set-ups, and then for its grounding and its publish. */
+  waitMinutes: () => Promise<number>;
   pollMs?: number;
 }
 
 export interface MakeAnEmployee {
   take(server: string, m: MakeAnEmployeeMessage, send: (m: RunnerEmployeeMessage) => boolean): Promise<void>;
 }
+
+/** A making's failure in its own words, which can go to the floor. */
+class MakingFailed extends Error {}
+const FAILED_HERE = "something on this computer failed as it was made; the runner log there says what";
+const WORDS_HELD = "why it failed matched a secret pattern, so only the runner log on this computer says it";
 
 export function createMakeAnEmployee(o: MakeAnEmployeeOptions): MakeAnEmployee {
   const making = new Set<string>();
@@ -65,9 +76,20 @@ export function createMakeAnEmployee(o: MakeAnEmployeeOptions): MakeAnEmployee {
           return say("failed", (await o.scan(found.failed)) ? CLONE_WORDS_HELD : found.failed);
         }
         say("setting-up-experts");
+        const setting: string[] = [];
         for (const expert of d.job!.experts) {
           const entry = o.expertEntry(server, expert);
-          if (entry && !o.hasInstance(server, expert)) o.setUpExpert(server, entry);
+          if (!entry) continue;
+          if (!o.hasInstance(server, expert)) o.setUpExpert(server, entry);
+          setting.push(expert);
+        }
+        const waitMs = (await o.waitMinutes()) * 60000;
+        const wait = () => new Promise((r) => setTimeout(r, o.pollMs ?? 2000));
+        for (const end = Date.now() + waitMs; setting.some((k) => !o.expertSetUpDone(server, k)); await wait()) {
+          if (Date.now() > end) {
+            o.log(`employee ${key}: its experts' set-ups didn't end in time, so it grounds without waiting for ${setting.filter((k) => !o.expertSetUpDone(server, k)).join(", ")}`);
+            break;
+          }
         }
         const hit = await definitionCheck(d, o.check);
         if (hit) return say("failed", hit === "unreadable" ? "the secret or personal-data patterns can't be read on this computer, so nothing was made" : hit.why);
@@ -79,22 +101,23 @@ export function createMakeAnEmployee(o: MakeAnEmployeeOptions): MakeAnEmployee {
         o.log(`employee ${key}: made from the floor of ${server}; its job file is ${file}`);
         await o.employees.refresh(key);
         say("grounding");
-        const end = Date.now() + (o.waitMs ?? 20 * 60000);
-        for (;;) {
+        for (const end = Date.now() + waitMs; ; await wait()) {
           const state = o.employees.stateOf(key);
-          if (state?.state === "failed") throw new Error(state.why === "clone" ? "its own clone of the project couldn't be made or fetched on this computer" : "its grounding failed; this computer's health log for it says why");
+          if (state?.state === "failed") throw new MakingFailed(state.why === "clone" ? "its own clone of the project couldn't be made or fetched on this computer" : "its grounding failed; this computer's health log for it says why");
           if (state?.state === "ready" && o.ties.tiedAndPublished(key)) break;
           const blocked = o.ties.blocked(key);
-          if (blocked && blocked !== "project") throw new Error(blocked);
-          if (Date.now() > end) throw new Error("its grounding and its publish didn't finish in time; its health log says how far it got");
-          await new Promise((r) => setTimeout(r, o.pollMs ?? 2000));
+          if (blocked && blocked !== "project") throw new MakingFailed(blocked);
+          const refused = o.ties.refused(key);
+          if (refused) throw new MakingFailed(refused);
+          if (Date.now() > end) throw new MakingFailed("its grounding and its publish didn't finish in time; its health log says how far it got");
         }
         say("ready");
         void o.employees.runNow(key);
       } catch (err) {
         o.log(`employee ${key}: couldn't be made: ${(err as Error).message}`);
         if (written) await fs.rm(o.employees.jobFilePath(key), { force: true }).catch(() => {});
-        say("failed", (err as Error).message);
+        const words = err instanceof MakingFailed ? err.message : FAILED_HERE;
+        say("failed", (await o.scan(words)) ? WORDS_HELD : words);
       } finally {
         making.delete(key);
       }

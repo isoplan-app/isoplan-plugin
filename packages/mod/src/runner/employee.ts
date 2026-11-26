@@ -70,7 +70,15 @@ export interface EmployeesSettings {
   offerAfter: { daysOfTheLastSeven: number; weeksRunning: number };
   jobFromSessionsModel: string;
   jobFromSessionsTimeoutSeconds: number;
+  /** The newest sessions a job is written from. */
+  sessionsAJobIsWrittenFrom: number;
+  /** How long after no job could be written from sessions, or one didn't pass its check, it is tried again. */
+  jobFromSessionsTriedAgainAfterHours: number;
   rememberStartsDays: number;
+  /** The most rejections one fork learns from. */
+  correctionsLearnedAtOnce: number;
+  /** How long making one from the floor waits for its experts' set-ups, then for its grounding and publish. */
+  makingWaitMinutes: number;
 }
 
 export type EmployeeSettings = CapSettings & { employees: EmployeesSettings };
@@ -156,6 +164,22 @@ export interface EmployeeTrunk {
 
 export async function loadEmployeePrompt(appDir: string, name: string): Promise<string> {
   return (await fs.readFile(path.join(appDir, "prompts", `${name}.md`), "utf8")).trim();
+}
+
+/** A trunk's transcript under ~/.claude/projects, and its folder of tool results, deleted. */
+async function removeTranscript(transcripts: ReturnType<typeof createTrunkTranscripts>, trunk: string) {
+  if (!UUID.test(trunk)) return;
+  const transcript = await transcripts.transcriptOf(trunk);
+  transcripts.forget(trunk);
+  if (!transcript) return;
+  await fs.rm(transcript, { force: true, maxRetries: 5, retryDelay: 200 }).catch(() => {});
+  await fs.rm(path.join(path.dirname(transcript), trunk), { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => {});
+}
+
+/** Every generation's transcript its state names, deleted: an employee deleted with no trunk here, since its job file was gone. */
+export async function removeTrunkTranscripts(dir: string, projectsDir: string): Promise<void> {
+  const transcripts = createTrunkTranscripts(projectsDir);
+  for (const g of (await readState(dir))?.generations ?? []) await removeTranscript(transcripts, g.trunk);
 }
 
 const list = (lines: readonly string[]) => (lines.length ? lines.map((x) => `- ${x}`).join("\n") : "none");
@@ -282,12 +306,7 @@ export function createEmployeeTrunk(o: EmployeeTrunkOptions): EmployeeTrunk {
   async function discard(g: SavedGeneration) {
     indexes.delete(g.n);
     await fs.rm(path.join(o.dir, `index-${g.n}.json`), { force: true }).catch(() => {});
-    if (!UUID.test(g.trunk)) return;
-    const transcript = await transcripts.transcriptOf(g.trunk);
-    transcripts.forget(g.trunk);
-    if (!transcript) return;
-    await fs.rm(transcript, { force: true, maxRetries: 5, retryDelay: 200 }).catch(() => {});
-    await fs.rm(path.join(path.dirname(transcript), g.trunk), { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => {});
+    await removeTranscript(transcripts, g.trunk);
   }
 
   function fail(g: SavedGeneration, why: string) {

@@ -15373,7 +15373,7 @@ async function desktopProblem(bin, env, platform, arch, machine, again = "take i
 * the same name, in whichever project folder Claude Code put them. The id is the take's own, new to
 * this machine. Whether a transcript was there to delete.
 */
-async function removeTranscript(claudeDir, id) {
+async function removeTranscript$1(claudeDir, id) {
 	const projects = path.join(claudeDir, "projects");
 	let found = false;
 	for (const dir of await fs$1.readdir(projects).catch(() => [])) {
@@ -15832,7 +15832,7 @@ async function openSession(x, o) {
 			o.log(`${label}: the first turn of ${id} failed (code ${read.code}): ${read.stderr.trim().slice(-500)}`);
 			const kind = typeof said?.subtype === "string" && /^[a-z_]+$/.test(said.subtype) ? ` (${said.subtype})` : "";
 			const why = o.closed?.(id) ? CLOSED_FROM_MENU : read.timedOut ? `it was stopped after ${Math.round(readMs / 6e4)} minutes` : read.code !== 0 ? `claude exited with code ${read.code}` : said?.is_error === true ? `it ended in an error${kind}` : `it didn't say it ran session ${id}`;
-			const removed = await removeTranscript(o.claudeDir, id);
+			const removed = await removeTranscript$1(o.claudeDir, id);
 			const changed = w.changed !== null && await changedSince(o.run, dir, s.gitTimeoutSeconds * 1e3);
 			return failed(`Claude Code couldn't ${w.read} before the Claude app took it over: ${why}; this machine's runner log has more. ${removed ? "Its unfinished session was deleted." : `Its unfinished session ${id} may be left in Claude Code's session list.`} ${w.at} ${dir}.${changed ? w.changed : ""}`);
 		}
@@ -28182,11 +28182,10 @@ function jobFileText(d, repo, promoteAtTokensSet = true) {
 /** What a failed grounding says on the floor: the health log has the detail, which can name paths on this computer. */
 const GROUNDING_FAILED = "its grounding failed; this computer's health log for it says why";
 const JOB_FILE_GONE = "its job file is gone from this computer";
-/** A definition's fields as text, each checked before it leaves. */
 const FIELDS = [
 	["key", (d) => d.key],
 	["subject", (d) => d.subject],
-	["model", (d) => d.model],
+	["model", (d) => d.model ?? ""],
 	["brief", (d) => d.job.brief],
 	["rules", (d) => d.job.rules.join("\n")],
 	["documents", (d) => d.job.documents.join("\n")],
@@ -28214,6 +28213,7 @@ async function definitionCheck(d, check) {
 function createEmployeeTies(o) {
 	const files = /* @__PURE__ */ new Map();
 	const blocked = /* @__PURE__ */ new Map();
+	const refusals = /* @__PURE__ */ new Map();
 	const listeners = [];
 	let saving = Promise.resolve();
 	const changed = () => listeners.forEach((l) => l());
@@ -28302,6 +28302,7 @@ function createEmployeeTies(o) {
 		serverOf: (key) => recordServer(key) ?? (o.employees.get(key)?.file ? o.servers.find((s) => o.saysEmployees(s)) ?? null : null),
 		tiedAndPublished,
 		blocked: (key) => blocked.get(key) ?? null,
+		refused: (key) => refusals.get(key) ?? null,
 		async definitionsFor(server) {
 			const out = [];
 			const s = await o.settings();
@@ -28380,6 +28381,7 @@ function createEmployeeTies(o) {
 					},
 					lastResult: "published"
 				}));
+				refusals.delete(key);
 				o.employees.setRefused(key, null);
 				o.employees.setProject(key, sent.project.id);
 				o.employees.health(key).say("published", {
@@ -28415,6 +28417,7 @@ function createEmployeeTies(o) {
 			}
 			if (m.reason === "deleted") return remove(server, key, `deleted on the floor of ${server}, its office says`);
 			const why = m.reason === "runs-elsewhere" ? `it runs on ${m.machineName}, the computer it was first published from, so it doesn't run on this one` : m.reason === "key-taken" ? "another expert or employee has this key: rename its job file" : m.reason === "project-not-in-an-office" ? "no office there holds its project" : "its record is someone else's now";
+			refusals.set(key, why);
 			await save(key, (f) => void (f.servers[server] = {
 				...f.servers[server],
 				lastResult: m.reason,
@@ -28456,7 +28459,10 @@ function createEmployeeTies(o) {
 		}] : []),
 		heldOn: (server, key) => of(key).servers[server]?.record?.expertRecordId,
 		setUpAgain(key) {
-			o.employees.get(key)?.trunk?.retryNow();
+			const trunk = o.employees.get(key)?.trunk;
+			if (trunk) return trunk.retryNow();
+			log(key, `asked to try again, but its job file is gone from this computer, so nothing grounds until it is back in ${path.dirname(o.employees.jobFilePath(key))}`);
+			o.employees.refresh(key);
 		},
 		onChange: (l) => void listeners.push(l)
 	};
@@ -28840,6 +28846,7 @@ function createEmployeeDraftsHere(o) {
 	let answered = [];
 	let rejected = [];
 	let writing = Promise.resolve();
+	let deciding = Promise.resolve();
 	const save = () => {
 		const copy = structuredClone({
 			version: 1,
@@ -28854,6 +28861,13 @@ function createEmployeeDraftsHere(o) {
 		return writing;
 	};
 	const iso = () => new Date(now()).toISOString();
+	const othersHold = (prospect, draft) => drafts.some((d) => d.draft.id !== draft && d.draft.to && prospectOf(d.draft.to.address) === prospect && !d.heldBySecretCheck && !d.someoneElseHad && (unended(d) || isWaiting(d, now()))) || rejected.some((r) => r.prospect === prospect && r.draft !== draft);
+	const release = (prospect, draft) => othersHold(prospect, draft) ? [] : [{
+		op: "release",
+		prospect,
+		draft,
+		at: iso()
+	}];
 	async function leave(run, input, batch, answers) {
 		const mine = drafts.filter((d) => d.run === run);
 		if (mine.length >= batch) return `This run's ${batch} drafts are left: end the run now.`;
@@ -28912,7 +28926,7 @@ function createEmployeeDraftsHere(o) {
 		askedExperts: Object.keys(d.answers).sort(),
 		expiresAt: d.expiresAt
 	});
-	async function decide(m) {
+	async function decideNow(m) {
 		if (m.by.id !== o.account().id) return { refused: "not-yours" };
 		const done = answered.find((a) => a.id === m.draft);
 		const d = drafts.find((x) => x.draft.id === m.draft);
@@ -28972,7 +28986,7 @@ function createEmployeeDraftsHere(o) {
 			d.learning = {
 				employee: false,
 				experts: [],
-				tries: 0
+				tries: {}
 			};
 			o.writer.write();
 		} else {
@@ -28990,6 +29004,11 @@ function createEmployeeDraftsHere(o) {
 		o.onDecided?.(d);
 		return answer;
 	}
+	const decide = (m) => {
+		const next = deciding.then(() => decideNow(m));
+		deciding = next.catch(() => {});
+		return next;
+	};
 	return {
 		async load() {
 			const read = await readJson$1(file);
@@ -29015,13 +29034,9 @@ function createEmployeeDraftsHere(o) {
 			if (e.outcome !== "failed") {
 				const going = rejected.filter((r) => r.runs.includes(run));
 				rejected = rejected.filter((r) => !going.includes(r));
-				await o.writer.add(going.map((r) => ({
-					op: "release",
-					prospect: r.prospect,
-					draft: r.draft,
-					at: iso()
-				})));
-				if (going.length) o.writer.write();
+				const releasing = going.flatMap((r) => release(r.prospect, r.draft));
+				await o.writer.add(releasing);
+				if (releasing.length) o.writer.write();
 			}
 			drafts = drafts.filter((d) => !(d.run === run && (d.heldBySecretCheck || d.someoneElseHad)));
 			await save();
@@ -29050,14 +29065,9 @@ function createEmployeeDraftsHere(o) {
 			for (const d of drafts) {
 				if (!d.expiresAt || d.released || d.decision || Date.parse(d.expiresAt) > t) continue;
 				d.released = true;
-				if (d.draft.to) releasing.push({
-					op: "release",
-					prospect: prospectOf(d.draft.to.address),
-					draft: d.draft.id,
-					at: iso()
-				});
+				if (d.draft.to) releasing.push(...release(prospectOf(d.draft.to.address), d.draft.id));
 			}
-			drafts = drafts.filter((d) => !(d.expiresAt && Date.parse(d.expiresAt) + 2592e6 < t && !d.learning));
+			drafts = drafts.filter((d) => !(d.expiresAt && Date.parse(d.expiresAt) + 2592e6 < t));
 			answered = answered.filter((a) => Date.parse(a.at) + KEPT_AFTER_MS > t);
 			if (releasing.length) await o.writer.add(releasing);
 			await save();
@@ -29067,23 +29077,26 @@ function createEmployeeDraftsHere(o) {
 		async learned(ids, part, ok) {
 			for (const d of drafts) {
 				if (!ids.includes(d.draft.id) || !d.learning) continue;
-				if (!ok) d.learning.tries++;
-				else if (part === "employee") d.learning.employee = true;
-				else if (!d.learning.experts.includes(part)) d.learning.experts.push(part);
-				if (d.learning.tries >= 2) d.learning = {
-					employee: true,
-					experts: [...d.decision?.teach ?? []],
-					tries: d.learning.tries
-				};
+				const tries = ok ? 0 : d.learning.tries[part] = (d.learning.tries[part] ?? 0) + 1;
+				if (ok || tries >= 2) {
+					if (part === "employee") d.learning.employee = true;
+					else if (!d.learning.experts.includes(part)) d.learning.experts.push(part);
+				}
 			}
 			drafts = drafts.filter((d) => !(d.learning && d.learning.employee && (d.decision?.teach ?? []).every((k) => d.learning.experts.includes(k))));
 			await save();
 		},
 		releaseAll() {
-			return drafts.filter((d) => d.draft.to && !d.decision).map((d) => ({
-				op: "release",
+			const held = [...drafts.filter((d) => d.draft.to).map((d) => ({
 				prospect: prospectOf(d.draft.to.address),
-				draft: d.draft.id,
+				draft: d.draft.id
+			})), ...rejected.map((r) => ({
+				prospect: r.prospect,
+				draft: r.draft
+			}))];
+			return held.filter((x, i) => held.findIndex((y) => y.prospect === x.prospect) === i).map((x) => ({
+				op: "release",
+				...x,
 				at: iso()
 			}));
 		},
@@ -29291,6 +29304,29 @@ const NOT_A_RUN_DRAFT = "Not now: this isn't a run of your job, so leave no draf
 async function loadEmployeePrompt(appDir, name) {
 	return (await fs$1.readFile(path.join(appDir, "prompts", `${name}.md`), "utf8")).trim();
 }
+/** A trunk's transcript under ~/.claude/projects, and its folder of tool results, deleted. */
+async function removeTranscript(transcripts, trunk) {
+	if (!UUID.test(trunk)) return;
+	const transcript = await transcripts.transcriptOf(trunk);
+	transcripts.forget(trunk);
+	if (!transcript) return;
+	await fs$1.rm(transcript, {
+		force: true,
+		maxRetries: 5,
+		retryDelay: 200
+	}).catch(() => {});
+	await fs$1.rm(path.join(path.dirname(transcript), trunk), {
+		recursive: true,
+		force: true,
+		maxRetries: 5,
+		retryDelay: 200
+	}).catch(() => {});
+}
+/** Every generation's transcript its state names, deleted: an employee deleted with no trunk here, since its job file was gone. */
+async function removeTrunkTranscripts(dir, projectsDir) {
+	const transcripts = createTrunkTranscripts(projectsDir);
+	for (const g of (await readState(dir))?.generations ?? []) await removeTranscript(transcripts, g.trunk);
+}
 const list = (lines) => lines.length ? lines.map((x) => `- ${x}`).join("\n") : "none";
 function createEmployeeTrunk(o) {
 	const now = o.now ?? Date.now;
@@ -29473,21 +29509,7 @@ function createEmployeeTrunk(o) {
 	async function discard(g) {
 		indexes.delete(g.n);
 		await fs$1.rm(path.join(o.dir, `index-${g.n}.json`), { force: true }).catch(() => {});
-		if (!UUID.test(g.trunk)) return;
-		const transcript = await transcripts.transcriptOf(g.trunk);
-		transcripts.forget(g.trunk);
-		if (!transcript) return;
-		await fs$1.rm(transcript, {
-			force: true,
-			maxRetries: 5,
-			retryDelay: 200
-		}).catch(() => {});
-		await fs$1.rm(path.join(path.dirname(transcript), g.trunk), {
-			recursive: true,
-			force: true,
-			maxRetries: 5,
-			retryDelay: 200
-		}).catch(() => {});
+		await removeTranscript(transcripts, g.trunk);
 	}
 	function fail(g, why) {
 		g.state = "failed";
@@ -29889,9 +29911,17 @@ function limitsOf(f, s) {
 }
 /** The weighted tokens of the employee's last 24 hours. */
 const dayTokensSpent = (ledger, now, s) => ledger.entries(now).filter((e) => e.room === EMPLOYEE_ROOM).reduce((n, e) => n + weighted(e.usage, s), 0);
-/** One run: `run` its id, for the scheduled time `scheduledFor`. */
-async function runOnce(d, run, scheduledFor) {
+/** One run: `run` its id, for the scheduled time `scheduledFor`; `closed`, whether the runner is stopping. */
+async function runOnce(d, run, scheduledFor, closed = () => false) {
 	const startedAt = d.now();
+	const leftToTheNextStart = {
+		outcome: "failed",
+		why: "the runner stopped during the run",
+		drafts: 0,
+		heldBySecretCheck: 0,
+		someoneElseHad: 0,
+		startedAt
+	};
 	const f = d.file();
 	const s = await d.settings();
 	const limits = limitsOf(f, s.employees);
@@ -29920,6 +29950,7 @@ async function runOnce(d, run, scheduledFor) {
 		alreadySent: alreadySent(d.drafts, run)
 	});
 	const refreshed = await d.trunk.refresh();
+	if (closed()) return leftToTheNextStart;
 	if (refreshed) return failed(refreshed);
 	const zone = zoneOf(f.job.schedule);
 	const carried = await d.drafts.carry(run);
@@ -29962,6 +29993,7 @@ async function runOnce(d, run, scheduledFor) {
 			return limit ? `it reached its limit, ${limit}` : null;
 		}
 	});
+	if (closed()) return leftToTheNextStart;
 	if (!c.ok && c.failure.kind === "timed-out") limit = limits.runMinutes <= minutesLeft ? "run-minutes" : "day-minutes";
 	const end = await endOfRun(d, run, c.ok ? "ran" : limit ? "stopped" : "failed");
 	if (c.ok) return {
@@ -30035,6 +30067,7 @@ function createEmployeeRuns(o) {
 	let ticking = null;
 	let timer = null;
 	let stopped = false;
+	let closed = false;
 	let writing = Promise.resolve();
 	const save = () => {
 		const copy = structuredClone(state);
@@ -30067,7 +30100,7 @@ function createEmployeeRuns(o) {
 		o.onChange();
 		let out;
 		try {
-			out = await o.run(run, scheduledFor);
+			out = await o.run(run, scheduledFor, () => closed);
 		} catch (err) {
 			out = {
 				outcome: "failed",
@@ -30078,7 +30111,7 @@ function createEmployeeRuns(o) {
 				startedAt: since
 			};
 		}
-		if (stopped) return;
+		if (closed) return;
 		const endedAt = now();
 		s().dayMinutes = [...s().dayMinutes.filter((x) => endedAt - x.at < DAY$1), {
 			at: endedAt,
@@ -30110,9 +30143,36 @@ function createEmployeeRuns(o) {
 		o.onChange();
 	}
 	const go = (scheduledFor, again) => {
+		if (running || stopped) return running ?? Promise.resolve();
 		running = start(scheduledFor, again).finally(() => running = null);
 		return running;
 	};
+	async function endLeftover(left) {
+		o.log(`its run ${left.run} was under way when the runner stopped, so its end is done now`);
+		const counts = await o.endLeftover(left.run);
+		if (closed) return;
+		const endedAt = now();
+		const tryAgainAt = left.wasTheTryAgain ? null : endedAt + await o.tryAgainAfterMinutes() * 6e4;
+		const retries = tryAgainAt !== null && tryAgainAt < windowEnd(left.scheduledFor);
+		end({
+			run: left.run,
+			scheduledFor: left.scheduledFor,
+			startedAt: left.since,
+			endedAt,
+			outcome: "failed",
+			...counts,
+			why: "the runner stopped during the run",
+			...retries && { tryingAgainAt: tryAgainAt },
+			...left.wasTheTryAgain && { wasTheTryAgain: true }
+		});
+		s().running = null;
+		s().tryAgain = retries ? {
+			scheduledFor: left.scheduledFor,
+			at: tryAgainAt
+		} : null;
+		await save();
+		o.onChange();
+	}
 	async function jobChanged() {
 		if (!state || s().scheduleKey === scheduleKey(schedule())) return;
 		Object.assign(s(), {
@@ -30183,31 +30243,10 @@ function createEmployeeRuns(o) {
 			};
 			if (!read) await save();
 			const left = s().running;
-			if (left) {
-				o.log(`its run ${left.run} was under way when the runner stopped, so its end is done now`);
-				const counts = await o.endLeftover(left.run);
-				const endedAt = now();
-				const tryAgainAt = left.wasTheTryAgain ? null : endedAt + await o.tryAgainAfterMinutes() * 6e4;
-				const retries = tryAgainAt !== null && tryAgainAt < windowEnd(left.scheduledFor);
-				end({
-					run: left.run,
-					scheduledFor: left.scheduledFor,
-					startedAt: left.since,
-					endedAt,
-					outcome: "failed",
-					...counts,
-					why: "the runner stopped during the run",
-					...retries && { tryingAgainAt: tryAgainAt },
-					...left.wasTheTryAgain && { wasTheTryAgain: true }
-				});
-				s().running = null;
-				s().tryAgain = retries ? {
-					scheduledFor: left.scheduledFor,
-					at: tryAgainAt
-				} : null;
-				await save();
-				o.onChange();
-			}
+			if (left) running = endLeftover(left).catch((err) => o.log(`the end of its run ${left.run} failed: ${err.message}`)).finally(() => {
+				running = null;
+				tick();
+			});
 			if (o.tickMs !== null) {
 				timer = setInterval(() => void tick(), o.tickMs ?? 6e4);
 				timer.unref?.();
@@ -30251,6 +30290,11 @@ function createEmployeeRuns(o) {
 			stopped = true;
 			if (timer) clearInterval(timer);
 		},
+		close() {
+			stopped = closed = true;
+			if (timer) clearInterval(timer);
+		},
+		settled: async () => void await running,
 		written: () => writing
 	};
 }
@@ -30452,12 +30496,15 @@ function createWhoWasContactedWriter(o) {
 			await new Promise((r) => setTimeout(r, delayMs(attempt)));
 		}
 	}
-	function said(r) {
-		problem = r.pushed ? null : {
-			detail: r.detail,
-			...r.refused && { refused: true }
-		};
-		if (!r.pushed) o.log(`the file of who was contacted wasn't written: ${r.detail}`);
+	async function said(r) {
+		if (r.pushed) problem = null;
+		else {
+			o.log(`the file of who was contacted wasn't written: ${r.detail}`);
+			problem = {
+				detail: await o.scan(r.detail) ? WHY_HELD : r.detail,
+				...r.refused && { refused: true }
+			};
+		}
 		return r;
 	}
 	return {
@@ -30493,8 +30540,6 @@ function createWhoWasContactedWriter(o) {
 }
 //#endregion
 //#region src/runner/employees.ts
-/** The most corrections one fork learns from: a burst of rejections makes one fork, not ten. */
-const MAX_LEARNED_AT_ONCE = 10;
 function createEmployees(o) {
 	const now = o.now ?? Date.now;
 	const here = /* @__PURE__ */ new Map();
@@ -30506,6 +30551,8 @@ function createEmployees(o) {
 	const chains = /* @__PURE__ */ new Map();
 	const saidKeyClash = /* @__PURE__ */ new Set();
 	const learning = /* @__PURE__ */ new Set();
+	const warnedOfAreas = /* @__PURE__ */ new Set();
+	const ending = /* @__PURE__ */ new Map();
 	const timers = [];
 	let binding = null;
 	let tied = () => null;
@@ -30565,6 +30612,7 @@ function createEmployees(o) {
 			}),
 			employeeName: () => employeeDisplayName(key),
 			timeoutMs: o.gitTimeoutMs,
+			scan: o.scan,
 			log: (t) => o.log(`employee ${key}: ${t}`),
 			tries: async () => (await settings()).employees.whoWasContactedPushTries,
 			...o.writeDelayMs && { delayMs: o.writeDelayMs },
@@ -30647,7 +30695,7 @@ function createEmployees(o) {
 			waiting: () => e.drafts.waiting(),
 			draftsPerRun: async () => limitsOf(file(), (await o.settings()).employees).draftsPerRun,
 			tryAgainAfterMinutes: async () => (await o.settings()).employees.tryAgainAfterMinutes,
-			run: (run, scheduledFor) => runOnce(deps, run, scheduledFor),
+			run: (run, scheduledFor, closed) => runOnce(deps, run, scheduledFor, closed),
 			endLeftover: (run) => endOfRun(deps, run, "failed"),
 			scan: o.scan,
 			...o.now && { now: o.now },
@@ -30661,10 +30709,25 @@ function createEmployees(o) {
 	function stopRunning(e) {
 		e.trunk?.stop();
 		e.runs?.stop();
+		if (e.runs) ending.set(e.key, e.runs.settled());
 		e.trunk = null;
 		e.runs = null;
 	}
+	function warnOfAreas(e) {
+		if (!e.file || !o.expertAreasOf) return;
+		const tracker = e.file.job.whoWasContacted ?? cachedSettings?.employees.whoWasContacted ?? "who-was-contacted.csv";
+		for (const { expert, areas } of o.expertAreasOf(e.key)) {
+			const area = areas.find((a) => areaCovers([a], tracker));
+			const said = `${e.key}\n${expert}\n${area}\n${tracker}`;
+			if (!area || warnedOfAreas.has(said)) continue;
+			warnedOfAreas.add(said);
+			const why = `its file of who was contacted, ${tracker}, is inside expert ${expert}'s area ${area}, so that expert reads prospects' details as it grounds: move the file out of the area, or the area off the file`;
+			o.log(`employee ${e.key}: ${why}`);
+			e.health.say("file", { warning: why });
+		}
+	}
 	async function tickOf(e) {
+		warnOfAreas(e);
 		await e.drafts.tidy().catch(() => {});
 		learn(e).catch((err) => o.log(`employee ${e.key}: couldn't learn from its owner's corrections: ${err.message}`));
 		await e.runs?.tick();
@@ -30681,19 +30744,20 @@ function createEmployees(o) {
 				});
 				return;
 			}
-			const mine = e.drafts.toLearn().filter((d) => !d.learning.employee).slice(0, MAX_LEARNED_AT_ONCE);
+			const atOnce = s.employees.correctionsLearnedAtOnce;
+			const mine = e.drafts.toLearn().filter((d) => !d.learning.employee).slice(0, atOnce);
 			if (mine.length) {
 				const r = await e.trunk.learnFromCorrections(mine.map((d) => ({
 					correction: d.decision.correction,
 					text: d.draft.text,
 					at: d.decision.at
 				})));
-				if (r !== "waiting") await e.drafts.learned(mine.map((d) => d.draft.id), "employee", r === "learned");
+				if (r !== "waiting") await e.drafts.learned(mine.map((d) => d.draft.id), "employee", r !== "failed");
 			}
 			const byExpert = /* @__PURE__ */ new Map();
 			for (const d of e.drafts.toLearn()) for (const k of d.decision?.teach ?? []) if (!d.learning.experts.includes(k)) byExpert.set(k, [...byExpert.get(k) ?? [], d]);
 			for (const [expert, list] of byExpert) {
-				const batch = list.slice(0, MAX_LEARNED_AT_ONCE);
+				const batch = list.slice(0, atOnce);
 				const r = o.teach ? await o.teach(expert, batch.map((d) => ({
 					correction: d.decision.correction,
 					draftText: d.draft.text,
@@ -30741,6 +30805,7 @@ function createEmployees(o) {
 		if (!e) here.set(key, e = await make(key, file));
 		const was = e.file;
 		e.file = file;
+		warnOfAreas(e);
 		if (!e.trunk) await startRunning(e);
 		else if (JSON.stringify(was) !== JSON.stringify(file)) {
 			e.trunk.update();
@@ -30806,14 +30871,18 @@ function createEmployees(o) {
 			await queue(key, async () => {
 				const e = here.get(key);
 				if (!e) return;
+				const trunk = e.trunk;
 				stopRunning(e);
+				await ending.get(key);
+				ending.delete(key);
 				const releasing = e.drafts.releaseAll();
 				if (releasing.length) {
 					await e.writer.add(releasing);
 					const r = await e.writer.write();
 					if (!r.pushed) o.log(`employee ${key}: its claims couldn't be released in the file of who was contacted as it was deleted: ${r.detail}`);
 				}
-				await e.trunk?.remove();
+				if (trunk) await trunk.remove();
+				else await removeTrunkTranscripts(dir(key), o.projectsDir);
 				learned.get(key)?.forget();
 				learned.delete(key);
 				here.delete(key);
@@ -30862,7 +30931,7 @@ function createEmployees(o) {
 			for (const t of timers) clearInterval(t);
 			for (const e of here.values()) {
 				e.trunk?.close();
-				e.runs?.stop();
+				e.runs?.close();
 			}
 		}
 	};
@@ -30955,6 +31024,8 @@ function createJobFromSessionsModelCall(o) {
 //#endregion
 //#region src/runner/jobs-started-by-hand.ts
 const DAY = 864e5;
+/** This plugin's own commands' prefix (.claude-plugin/plugin.json's name): a handoff or a connection is no job. */
+const ISOPLAN_COMMANDS = "isoplan:";
 /** A prompt as it is matched: lower case, white space collapsed, its first 2000 characters. */
 const normalisedPrompt = (text) => text.toLowerCase().replace(/\s+/g, " ").trim().slice(0, 2e3);
 const localDay = (t) => {
@@ -30963,6 +31034,7 @@ const localDay = (t) => {
 };
 /** Whether `name` is one of the person's skills or commands for a session in `cwd`. */
 function personsSkill(name, claudeDir, cwd) {
+	if (name.toLowerCase().startsWith(ISOPLAN_COMMANDS)) return false;
 	if (name.includes(":")) return true;
 	const places = [path.join(claudeDir, "skills", name), path.join(claudeDir, "commands", `${name}.md`)];
 	for (let dir = cwd, n = 0; n < 4; n++, dir = path.dirname(dir)) {
@@ -31013,12 +31085,12 @@ function createJobsStartedByHand(o) {
 		},
 		async seen(s) {
 			if (starts.some((x) => x.session === s.bare)) return;
-			let job = null;
+			let started = null;
 			for (const m of s.messages) {
 				if ("command" in m) {
 					if (personsSkill(m.command, o.claudeDir, s.cwd)) {
-						job = {
-							job: `skill:${m.command}`,
+						started = {
+							startedWith: `skill:${m.command}`,
 							skill: m.command
 						};
 						break;
@@ -31027,32 +31099,36 @@ function createJobsStartedByHand(o) {
 				}
 				const opening = m.prompt.trimStart().toLowerCase();
 				if ((await o.helperPrompts()).some((p) => p && opening.startsWith(p.toLowerCase()))) return;
-				job = { job: `prompt:${createHash("sha256").update(normalisedPrompt(m.prompt)).digest("hex")}` };
+				started = { startedWith: `prompt:${createHash("sha256").update(normalisedPrompt(m.prompt)).digest("hex")}` };
 				break;
 			}
-			if (!job) return;
+			if (!started) return;
 			const settings = await o.settings();
 			starts = starts.filter((x) => now() - x.at < settings.rememberStartsDays * DAY);
 			const start = {
 				session: s.bare,
 				day: localDay(s.at),
 				at: s.at,
-				...job,
+				...started,
 				server: s.server,
 				project: s.project.id.toLowerCase(),
 				cwd: s.cwd
 			};
 			starts.push(start);
 			await save();
-			const same = starts.filter((x) => x.job === job.job).sort((a, b) => b.at - a.at);
+			const same = starts.filter((x) => x.startedWith === started.startedWith).sort((a, b) => b.at - a.at);
 			const rhythm = rhythmOf(same, now(), settings.offerAfter);
-			if (rhythm) o.onRhythm(job.job, rhythm, same);
+			if (rhythm) o.onRhythm(started.startedWith, rhythm, same);
 		},
-		starts: (job) => starts.filter((x) => x.job === job).sort((a, b) => b.at - a.at)
+		starts: (startedWith) => starts.filter((x) => x.startedWith === startedWith).sort((a, b) => b.at - a.at)
 	};
 }
 //#endregion
 //#region src/runner/make-an-employee.ts
+/** A making's failure in its own words, which can go to the floor. */
+var MakingFailed = class extends Error {};
+const FAILED_HERE = "something on this computer failed as it was made; the runner log there says what";
+const WORDS_HELD = "why it failed matched a secret pattern, so only the runner log on this computer says it";
 function createMakeAnEmployee(o) {
 	const making = /* @__PURE__ */ new Set();
 	return { async take(server, m, send) {
@@ -31082,9 +31158,18 @@ function createMakeAnEmployee(o) {
 				return say("failed", await o.scan(found.failed) ? CLONE_WORDS_HELD : found.failed);
 			}
 			say("setting-up-experts");
+			const setting = [];
 			for (const expert of d.job.experts) {
 				const entry = o.expertEntry(server, expert);
-				if (entry && !o.hasInstance(server, expert)) o.setUpExpert(server, entry);
+				if (!entry) continue;
+				if (!o.hasInstance(server, expert)) o.setUpExpert(server, entry);
+				setting.push(expert);
+			}
+			const waitMs = await o.waitMinutes() * 6e4;
+			const wait = () => new Promise((r) => setTimeout(r, o.pollMs ?? 2e3));
+			for (const end = Date.now() + waitMs; setting.some((k) => !o.expertSetUpDone(server, k)); await wait()) if (Date.now() > end) {
+				o.log(`employee ${key}: its experts' set-ups didn't end in time, so it grounds without waiting for ${setting.filter((k) => !o.expertSetUpDone(server, k)).join(", ")}`);
+				break;
 			}
 			const hit = await definitionCheck(d, o.check);
 			if (hit) return say("failed", hit === "unreadable" ? "the secret or personal-data patterns can't be read on this computer, so nothing was made" : hit.why);
@@ -31096,22 +31181,23 @@ function createMakeAnEmployee(o) {
 			o.log(`employee ${key}: made from the floor of ${server}; its job file is ${file}`);
 			await o.employees.refresh(key);
 			say("grounding");
-			const end = Date.now() + (o.waitMs ?? 12e5);
-			for (;;) {
+			for (const end = Date.now() + waitMs;; await wait()) {
 				const state = o.employees.stateOf(key);
-				if (state?.state === "failed") throw new Error(state.why === "clone" ? "its own clone of the project couldn't be made or fetched on this computer" : "its grounding failed; this computer's health log for it says why");
+				if (state?.state === "failed") throw new MakingFailed(state.why === "clone" ? "its own clone of the project couldn't be made or fetched on this computer" : "its grounding failed; this computer's health log for it says why");
 				if (state?.state === "ready" && o.ties.tiedAndPublished(key)) break;
 				const blocked = o.ties.blocked(key);
-				if (blocked && blocked !== "project") throw new Error(blocked);
-				if (Date.now() > end) throw new Error("its grounding and its publish didn't finish in time; its health log says how far it got");
-				await new Promise((r) => setTimeout(r, o.pollMs ?? 2e3));
+				if (blocked && blocked !== "project") throw new MakingFailed(blocked);
+				const refused = o.ties.refused(key);
+				if (refused) throw new MakingFailed(refused);
+				if (Date.now() > end) throw new MakingFailed("its grounding and its publish didn't finish in time; its health log says how far it got");
 			}
 			say("ready");
 			o.employees.runNow(key);
 		} catch (err) {
 			o.log(`employee ${key}: couldn't be made: ${err.message}`);
 			if (written) await fs$1.rm(o.employees.jobFilePath(key), { force: true }).catch(() => {});
-			say("failed", err.message);
+			const words = err instanceof MakingFailed ? err.message : FAILED_HERE;
+			say("failed", await o.scan(words) ? WORDS_HELD : words);
 		} finally {
 			making.delete(key);
 		}
@@ -31120,8 +31206,6 @@ function createMakeAnEmployee(o) {
 //#endregion
 //#region src/runner/offers-to-make-an-employee.ts
 const KEPT_AFTER_IT_ENDED_MS = 2592e6;
-/** The newest sessions a job is written from. */
-const SESSIONS_WRITTEN_FROM = 5;
 /** The floor's link that opens an offer, from the office's data-layer address. */
 function offerUrl(server, id) {
 	const url = new URL(server);
@@ -31164,14 +31248,18 @@ async function sessionTexts(projectsDir, session) {
 function createOffersToMakeAnEmployee(o) {
 	const now = o.now ?? Date.now;
 	let offers = [];
+	let offeredFor = [];
+	let noJob = [];
 	let writing = Promise.resolve();
 	const busy = /* @__PURE__ */ new Set();
 	const save = () => {
-		const copy = structuredClone(offers);
-		writing = writing.then(() => writeJson(o.file, {
+		const copy = structuredClone({
 			version: 1,
-			offers: copy
-		})).catch((err) => o.log(`couldn't write ${o.file}: ${err.message}`));
+			offers,
+			offeredFor,
+			noJob
+		});
+		writing = writing.then(() => writeJson(o.file, copy)).catch((err) => o.log(`couldn't write ${o.file}: ${err.message}`));
 		return writing;
 	};
 	const line = (x) => ({
@@ -31195,29 +31283,29 @@ function createOffersToMakeAnEmployee(o) {
 			save();
 		}
 	};
-	const asDefinition = (j, project) => ({
-		key: j.key,
-		project,
-		subject: j.subject,
-		model: "sonnet",
-		promoteAtTokens: 8e4,
-		areas: [],
-		job: j.job
-	});
 	return {
 		async load() {
 			const read = await readJson$1(o.file);
-			if (read?.version === 1 && Array.isArray(read.offers)) offers = read.offers;
-			offers = offers.filter((x) => !x.endedAt || now() - x.endedAt < KEPT_AFTER_IT_ENDED_MS || x.ended === "made" || x.ended === "dismissed" || x.ended === "no-job");
+			if (read?.version === 1) {
+				if (Array.isArray(read.offers)) offers = read.offers;
+				if (Array.isArray(read.offeredFor)) offeredFor = read.offeredFor;
+				if (Array.isArray(read.noJob)) noJob = read.noJob;
+			}
+			const old = offers.filter((x) => x.endedAt !== void 0 && now() - x.endedAt >= KEPT_AFTER_IT_ENDED_MS);
+			offeredFor = [.../* @__PURE__ */ new Set([...offeredFor, ...old.map((x) => x.startedWith)])];
+			offers = offers.filter((x) => !old.includes(x));
 		},
-		async rhythm(job, rhythm, starts) {
-			if (busy.has(job) || offers.some((x) => x.job === job) || o.madeHere(job)) return;
-			busy.add(job);
+		async rhythm(startedWith, rhythm, starts) {
+			if (busy.has(startedWith) || offers.some((x) => x.startedWith === startedWith) || offeredFor.includes(startedWith) || o.madeHere(startedWith)) return;
+			const s = await o.settings();
+			noJob = noJob.filter((x) => now() - x.at < s.jobFromSessionsTriedAgainAfterHours * 36e5);
+			if (noJob.some((x) => x.startedWith === startedWith)) return;
+			busy.add(startedWith);
 			try {
 				const newest = starts[0];
 				const office = await o.officeFor(newest.project, newest.cwd);
 				if (!office) return;
-				const sessions = starts.slice(0, SESSIONS_WRITTEN_FROM);
+				const sessions = starts.slice(0, s.sessionsAJobIsWrittenFrom);
 				const skill = newest.skill;
 				const skillFile = skill ? await skillText(o.claudeDir, newest.cwd, skill) : null;
 				const texts = await Promise.all(sessions.map(async (s) => ({
@@ -31232,30 +31320,27 @@ function createOffersToMakeAnEmployee(o) {
 					sessions: texts,
 					experts: await o.expertsAsked(sessions.map((s) => s.session))
 				});
-				const base = {
-					id: randomBytes(12).toString("base64url"),
-					job,
+				const id = randomBytes(12).toString("base64url");
+				const hit = written ? await definitionCheck(written, o.check) : null;
+				if (!written || hit) {
+					o.log(`no offer to make an employee for a job started by hand on a rhythm, tried again in ${s.jobFromSessionsTriedAgainAfterHours} hours: ${!written ? "no job could be written from its sessions" : hit === "unreadable" ? "the patterns can't be read" : hit.why}`);
+					noJob.push({
+						startedWith,
+						at: now()
+					});
+					await save();
+					return;
+				}
+				const offer = {
+					id,
+					startedWith,
 					...skill && { skill: skill.toLowerCase() },
 					rhythm,
 					server: office.server,
 					project: office.project.id,
 					session: newest.session,
 					at: now(),
-					sent: false
-				};
-				const hit = written ? await definitionCheck(asDefinition(written, office.project), o.check) : null;
-				if (!written || hit) {
-					o.log(`no offer to make an employee for a job started by hand on a rhythm: ${!written ? "no job could be written from its sessions" : hit === "unreadable" ? "the patterns can't be read" : hit.why}`);
-					offers.push({
-						...base,
-						ended: "no-job",
-						endedAt: now()
-					});
-					await save();
-					return;
-				}
-				const offer = {
-					...base,
+					sent: false,
 					jobFromSessions: written
 				};
 				offers.push(offer);
@@ -31264,7 +31349,7 @@ function createOffersToMakeAnEmployee(o) {
 				send(offer);
 				o.hooked(offer.session)?.send(line(offer));
 			} finally {
-				busy.delete(job);
+				busy.delete(startedWith);
 			}
 		},
 		opened(server) {
@@ -31300,7 +31385,7 @@ function createOffersToMakeAnEmployee(o) {
 				id: x.project,
 				name: x.project.split("/").pop() ?? x.project
 			};
-			const hit = await definitionCheck(asDefinition(j, project), o.check);
+			const hit = await definitionCheck(j, o.check);
 			if (hit) return o.log(`the job of offer ${x.id} didn't pass its check again, so it isn't sent: ${hit === "unreadable" ? "the patterns can't be read" : hit.why}`), void answer();
 			answer({
 				key: j.key,
@@ -31311,7 +31396,7 @@ function createOffersToMakeAnEmployee(o) {
 		},
 		get: (id) => {
 			const x = offers.find((y) => y.id === id);
-			return x ? { job: x.job } : null;
+			return x ? { startedWith: x.startedWith } : null;
 		},
 		rehooked(session) {
 			for (const x of offers) if (x.session === session && !x.ended && x.jobFromSessions) o.hooked(session)?.send(line(x));
@@ -31332,6 +31417,27 @@ async function skillText(claudeDir, cwd, name) {
 		if (text !== null) return text.slice(0, 2e4);
 	}
 	return null;
+}
+//#endregion
+//#region src/runner/what-was-learned-of-employees.ts
+/** The instances, records of what was learned and health logs an office's what-was-learned link reads: the experts' and the employees'. */
+function whatWasLearnedOfExpertsAndEmployees(o) {
+	return {
+		instances: { tiedRecords: (server) => [...o.instances.tiedRecords(server), ...o.employeeTies.tiedRecords(server)] },
+		whatWasLearned: (key) => o.employees.get(key) ? o.employees.whatWasLearned(key) : o.experts.whatWasLearned(key),
+		health: (key) => o.employees.get(key) ? o.employees.health(key) : o.experts.health(key)
+	};
+}
+/** Each employee's record of what it learned, bound to its ties, told when they change, and to the offices' what-was-learned links. */
+function bindWhatEmployeesLearned(employees, ties, servers, links) {
+	employees.bindWhatWasLearned((key) => ({
+		tied: () => ties.tiedRecordsOf(key),
+		held: (server) => ties.heldOn(server, key),
+		servers,
+		catchUp: (server, expertRecordId) => links.get(server)?.catchUp(expertRecordId) ?? "cannot",
+		waiting: () => links.forEach((l) => l.sendWaiting())
+	}));
+	ties.onChange(() => employees.tiesMayHaveChanged());
 }
 //#endregion
 //#region src/pipe/server.ts
@@ -32360,7 +32466,7 @@ async function worker() {
 	const servers = answering.map((office) => office.server);
 	let askForARun = null;
 	const expertHasKey = (key) => hosted.running(key) !== null || [hosted.expertFilePath(key), hosted.instanceFilePath(key)].some((p) => fs.existsSync(p));
-	const hired = createEmployees({
+	const employeesOnThisComputer = createEmployees({
 		employeesDir,
 		clonesFolder: clones.folder,
 		logsDir: path.join(isoplanDir, "logs"),
@@ -32374,10 +32480,18 @@ async function worker() {
 		tools: employeeTools,
 		account,
 		expertHasKey,
-		expertsOf: (key) => (hired.get(key)?.file?.job.experts ?? []).map((k) => ({
+		expertsOf: (key) => (employeesOnThisComputer.get(key)?.file?.job.experts ?? []).map((k) => ({
 			key: k,
 			subject: hosted.running(k)?.file.subject ?? "not set up on this computer yet"
 		})),
+		expertAreasOf: (key) => {
+			const project = employeesOnThisComputer.get(key)?.project;
+			if (!project) return [];
+			return hosted.all().flatMap((x) => servers.some((s) => instances.heldOn(s, x.key)?.record?.definition.project.id === project) ? [{
+				expert: x.key,
+				areas: x.file.areas
+			}] : []);
+		},
 		ask: async (key, run, expert, question, deadline) => {
 			const server = employeeTies.serverOf(key);
 			if (!server || !askForARun) return { text: `Expert ${expert}: Isoplan's runner can't ask it now. Carry on without it.` };
@@ -32395,10 +32509,10 @@ async function worker() {
 		track: registry.track,
 		log
 	});
-	employees = hired;
-	await hired.start();
+	employees = employeesOnThisComputer;
+	await employeesOnThisComputer.start();
 	const employeeTies = createEmployeeTies({
-		employees: hired,
+		employees: employeesOnThisComputer,
 		servers,
 		account,
 		saysEmployees: (server) => recordLinks.get(server)?.directory()?.employees === true,
@@ -32439,7 +32553,7 @@ async function worker() {
 			send: (m) => live(index)(m),
 			checkMs: first.approvedRefreshMinutes * 6e4,
 			employeeTies,
-			onEmployeesChange: (listener) => hired.onChange(() => listener())
+			onEmployeesChange: (listener) => employeesOnThisComputer.onChange(() => listener())
 		});
 		link.onDirectory(() => offers.afterDirectory(office.server));
 		recordLinks.set(office.server, link);
@@ -32450,9 +32564,12 @@ async function worker() {
 		const link = createWhatWasLearnedLink({
 			server: office.server,
 			recordLink,
-			instances: { tiedRecords: (server) => [...instances.tiedRecords(server), ...employeeTies.tiedRecords(server)] },
-			whatWasLearned: (key) => hired.get(key) ? hired.whatWasLearned(key) : hosted.whatWasLearned(key),
-			health: (key) => hired.get(key) ? hired.health(key) : hosted.health(key),
+			...whatWasLearnedOfExpertsAndEmployees({
+				instances,
+				experts: hosted,
+				employees: employeesOnThisComputer,
+				employeeTies
+			}),
 			check: checkBeforeItLeaves,
 			send: (m) => live(index)(m),
 			log,
@@ -32469,14 +32586,7 @@ async function worker() {
 		waiting: () => learnedLinks.forEach((l) => l.sendWaiting())
 	}));
 	instances.onChange(() => hosted.tiesMayHaveChanged());
-	hired.bindWhatWasLearned((key) => ({
-		tied: () => employeeTies.tiedRecordsOf(key),
-		held: (server) => employeeTies.heldOn(server, key),
-		servers,
-		catchUp: (server, expertRecordId) => learnedLinks.get(server)?.catchUp(expertRecordId) ?? "cannot",
-		waiting: () => learnedLinks.forEach((l) => l.sendWaiting())
-	}));
-	employeeTies.onChange(() => hired.tiesMayHaveChanged());
+	bindWhatEmployeesLearned(employeesOnThisComputer, employeeTies, servers, learnedLinks);
 	const expertRights = createExpertRightsOnThisComputer({
 		instances,
 		store: expertRecordsPerOffice,
@@ -32512,7 +32622,7 @@ async function worker() {
 		employeeLinks.set(office.server, createEmployeeLink({
 			server: office.server,
 			recordLink: recordLinks.get(office.server),
-			employees: hired,
+			employees: employeesOnThisComputer,
 			ties: employeeTies,
 			send: (m) => live(index)(m),
 			log,
@@ -32535,6 +32645,7 @@ async function worker() {
 		projectsDir: path.join(claudeDir, "projects"),
 		claudeDir,
 		account,
+		settings: async () => (await settings()).employees,
 		officeFor,
 		send: (server, m) => employeeLinks.get(server)?.sendNow(m) ?? false,
 		write: async (input) => {
@@ -32560,14 +32671,14 @@ async function worker() {
 		claudeDir,
 		settings: async () => (await settings()).employees,
 		helperPrompts: async () => (await config()).helperPrompts,
-		onRhythm: (job, rhythm, starts) => void offersToMakeAnEmployee.rhythm(job, rhythm, starts).catch((err) => log(`couldn't offer to make an employee: ${err.message}`)),
+		onRhythm: (startedWith, rhythm, starts) => void offersToMakeAnEmployee.rhythm(startedWith, rhythm, starts).catch((err) => log(`couldn't offer to make an employee: ${err.message}`)),
 		log
 	});
 	await jobsStartedByHand.load();
 	jobsStartedByHandOnceStarted = jobsStartedByHand;
 	const makeAnEmployee = createMakeAnEmployee({
 		account,
-		employees: hired,
+		employees: employeesOnThisComputer,
 		ties: employeeTies,
 		expertHasKey,
 		checkoutOf: (server, project) => checkoutFor(indexOf(server), project),
@@ -32578,6 +32689,11 @@ async function worker() {
 			return !!found && found.kind !== "set-up-failed";
 		},
 		setUpExpert: (server, entry) => void instances.setUp(server, entry).catch((err) => log(`expert ${entry.key}: couldn't set it up: ${err.message}`)),
+		expertSetUpDone: (server, key) => {
+			const found = instances.lookUp(server, key, null);
+			return found?.kind !== "setting-up" && (found?.kind !== "running" || found.running.expert.hosted().state !== "starting");
+		},
+		waitMinutes: async () => (await settings()).employees.makingWaitMinutes,
 		check: checkBeforeItLeaves,
 		scan: scanText,
 		log
@@ -32679,7 +32795,7 @@ async function worker() {
 			const { pairing, runner } = answerers[answering.indexOf(office)];
 			const records = recordLinks.get(office.server);
 			const learned = learnedLinks.get(office.server);
-			const hiredHere = employeeLinks.get(office.server);
+			const employeeLink = employeeLinks.get(office.server);
 			log(`the runner's worker ${process.pid} is answering for this machine through ${office.server}`);
 			status.opening(office.server);
 			return createLink({
@@ -32698,11 +32814,11 @@ async function worker() {
 					drive.linked(office.server);
 					records.onOpen();
 					learned.onOpen();
-					hiredHere.onOpen();
+					employeeLink.onOpen();
 					expertCreationSuggestions.linked(answering.indexOf(office));
 					readPairing(pairingPath(claudeDir)).then((all) => status.email(office.server, pairingEntry(all, office.server, account.id)?.email));
 				},
-				onClose: () => (status.closed(office.server), drive.unlinked(office.server), records.onClose(), learned.onClose(), hiredHere.onClose(), expertCreationSuggestions.linked(answering.indexOf(office))),
+				onClose: () => (status.closed(office.server), drive.unlinked(office.server), records.onClose(), learned.onClose(), employeeLink.onClose(), expertCreationSuggestions.linked(answering.indexOf(office))),
 				onNotWanted: () => (status.stopped(office.server, "not-wanted"), said.notWanted()),
 				onPairingEnded: () => (status.stopped(office.server, "unpaired"), said.unpaired()),
 				hello: {
@@ -32724,9 +32840,9 @@ async function worker() {
 			});
 		},
 		paired: async (office) => !!pairingEntry(await readPairing(pairingPath(claudeDir)), office.server, account.id)?.credential,
-		idle: () => answerers.every((a) => a.runner.idle()) && reporting.reporting().length === 0 && !pipe?.all().length && hosted.idle() && hired.idle() && expertQuestions.idle() && expertCreationSuggestions.idle(),
+		idle: () => answerers.every((a) => a.runner.idle()) && reporting.reporting().length === 0 && !pipe?.all().length && hosted.idle() && employeesOnThisComputer.idle() && expertQuestions.idle() && expertCreationSuggestions.idle(),
 		lit: async () => anyRoomSince(io, path.join(claudeDir, "projects"), Date.now() - askableMs(await config().catch(() => first))),
-		keep: async () => drive.held() > 0 || hired.anyTied() || (await settings()).startAtLogin,
+		keep: async () => drive.held() > 0 || employeesOnThisComputer.anyTied() || (await settings()).startAtLogin,
 		gone: new Promise((resolve) => process.stdin.on("end", resolve).on("error", resolve).resume()),
 		log,
 		checkMs: CHECK_MS,
@@ -32738,7 +32854,7 @@ async function worker() {
 	for (const link of recordLinks.values()) link.stop();
 	for (const link of learnedLinks.values()) link.stop();
 	for (const link of employeeLinks.values()) link.stop();
-	hired.close();
+	employeesOnThisComputer.close();
 	await employeeTools.stop();
 	expertQuestions.close();
 	await expertRecordsPerOffice.written();

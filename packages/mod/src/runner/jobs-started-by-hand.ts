@@ -4,7 +4,8 @@
 // - A session's job is its first message from its person (data-layer/claude-code.ts firstMessages):
 //   a command counts only when it is one of the person's skills or commands (~/.claude/skills/<x>/,
 //   ~/.claude/commands/<x>.md, the repo's .claude/skills/<x>/ or .claude/commands/<x>.md, or a
-//   plugin's, `<plugin>:<x>`, which no built-in is named like); any other command is a built-in
+//   plugin's, `<plugin>:<x>`, which no built-in is named like, but Isoplan's own, such as
+//   /isoplan:take, which are no job); any other command is a built-in
 //   (/model, /effort) and is skipped, so the first message left decides. A skill start is its name;
 //   a prompt is its text normalised (lower case, white space collapsed, the first 2000 characters),
 //   hashed with sha256, so two prompts that differ in a word never match. A helper prompt
@@ -22,6 +23,8 @@ import type { FirstMessage } from "../data-layer/claude-code.js";
 import { readJson, writeJson } from "./expert-state.js";
 
 const DAY = 24 * 3600000;
+/** This plugin's own commands' prefix (.claude-plugin/plugin.json's name): a handoff or a connection is no job. */
+const ISOPLAN_COMMANDS = "isoplan:";
 
 export type Rhythm = { kind: "days"; days: number } | { kind: "weeks"; weeks: number };
 
@@ -30,8 +33,8 @@ export interface StartedByHand {
   /** Its first local day, YYYY-MM-DD. */
   day: string;
   at: number;
-  /** `skill:<name>` or `prompt:<sha256>`. */
-  job: string;
+  /** What its person started it with: `skill:<name>` or `prompt:<sha256>`. */
+  startedWith: string;
   skill?: string;
   server: string;
   project: string;
@@ -44,15 +47,15 @@ export interface JobsStartedByHandOptions {
   settings: () => Promise<{ offerAfter: { daysOfTheLastSeven: number; weeksRunning: number }; rememberStartsDays: number }>;
   helperPrompts: () => Promise<readonly string[]>;
   now?: () => number;
-  /** A job's rhythm crossed its threshold: its starts, newest first. */
-  onRhythm: (job: string, rhythm: Rhythm, starts: StartedByHand[]) => void;
+  /** What its person started by hand crossed its rhythm's threshold: its starts, newest first. */
+  onRhythm: (startedWith: string, rhythm: Rhythm, starts: StartedByHand[]) => void;
   log: (text: string) => void;
 }
 
 export interface JobsStartedByHand {
   load(): Promise<void>;
   seen(s: { server: string; bare: string; cwd: string; project: { id: string }; at: number; messages: FirstMessage[] }): Promise<void>;
-  starts(job: string): StartedByHand[];
+  starts(startedWith: string): StartedByHand[];
 }
 
 /** A prompt as it is matched: lower case, white space collapsed, its first 2000 characters. */
@@ -64,6 +67,7 @@ const localDay = (t: number) => {
 
 /** Whether `name` is one of the person's skills or commands for a session in `cwd`. */
 export function personsSkill(name: string, claudeDir: string, cwd: string): boolean {
+  if (name.toLowerCase().startsWith(ISOPLAN_COMMANDS)) return false;
   if (name.includes(":")) return true;
   const places = [path.join(claudeDir, "skills", name), path.join(claudeDir, "commands", `${name}.md`)];
   for (let dir = cwd, n = 0; n < 4; n++, dir = path.dirname(dir)) {
@@ -107,30 +111,30 @@ export function createJobsStartedByHand(o: JobsStartedByHandOptions): JobsStarte
     },
     async seen(s) {
       if (starts.some((x) => x.session === s.bare)) return;
-      let job: { job: string; skill?: string } | null = null;
+      let started: { startedWith: string; skill?: string } | null = null;
       for (const m of s.messages) {
         if ("command" in m) {
           if (personsSkill(m.command, o.claudeDir, s.cwd)) {
-            job = { job: `skill:${m.command}`, skill: m.command };
+            started = { startedWith: `skill:${m.command}`, skill: m.command };
             break;
           }
           continue;
         }
         const opening = m.prompt.trimStart().toLowerCase();
         if ((await o.helperPrompts()).some((p) => p && opening.startsWith(p.toLowerCase()))) return;
-        job = { job: `prompt:${createHash("sha256").update(normalisedPrompt(m.prompt)).digest("hex")}` };
+        started = { startedWith: `prompt:${createHash("sha256").update(normalisedPrompt(m.prompt)).digest("hex")}` };
         break;
       }
-      if (!job) return;
+      if (!started) return;
       const settings = await o.settings();
       starts = starts.filter((x) => now() - x.at < settings.rememberStartsDays * DAY);
-      const start: StartedByHand = { session: s.bare, day: localDay(s.at), at: s.at, ...job, server: s.server, project: s.project.id.toLowerCase(), cwd: s.cwd };
+      const start: StartedByHand = { session: s.bare, day: localDay(s.at), at: s.at, ...started, server: s.server, project: s.project.id.toLowerCase(), cwd: s.cwd };
       starts.push(start);
       await save();
-      const same = starts.filter((x) => x.job === job.job).sort((a, b) => b.at - a.at);
+      const same = starts.filter((x) => x.startedWith === started.startedWith).sort((a, b) => b.at - a.at);
       const rhythm = rhythmOf(same, now(), settings.offerAfter);
-      if (rhythm) o.onRhythm(job.job, rhythm, same);
+      if (rhythm) o.onRhythm(started.startedWith, rhythm, same);
     },
-    starts: (job) => starts.filter((x) => x.job === job).sort((a, b) => b.at - a.at),
+    starts: (startedWith) => starts.filter((x) => x.startedWith === startedWith).sort((a, b) => b.at - a.at),
   };
 }

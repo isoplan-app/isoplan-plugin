@@ -910,7 +910,8 @@ test("D18: a fork that starts during an addition reads the trunk at the uuid bef
 
 test("taught from an employee's rejected drafts: a fork of its junior with each correction and its answers then, whose <learned> rests on the files those answers cited, with their commits, and goes the way of what a fork learns; nothing learned when it says nothing; its usage in its own ledger", async () => {
   const LEARNED = "<learned>Rule or fact: a question waits in the relay until its answer comes. Why: the relay holds it in flight. Files: src/relay.ts</learned>";
-  const t = await setUp({ rules: [...BASE, { kind: "fork", text: "An employee asked you", reply: LEARNED }] });
+  // The correction fork's usage is told apart by its context.
+  const t = await setUp({ rules: [...BASE, { kind: "fork", text: "An employee asked you", reply: LEARNED, context: 77777 }] });
   await until(() => t.expert.hosted().state === "ready");
   const correction = { correction: "The relay keeps questions until answered.", draftText: "Questions are dropped at once.", answers: [{ question: "How long is a question kept?", answer: "Until it is answered.", files: [{ path: "src/relay.ts", commit: C1 }, { path: "src/other.ts" }] }] };
   expect(await t.expert.learnFromCorrections([correction])).toBe("learned");
@@ -920,8 +921,9 @@ test("taught from an employee's rejected drafts: a fork of its junior with each 
   const waiting = JSON.parse(fs.readFileSync(path.join(t.dir, "what-was-learned-waiting-to-be-sent.json"), "utf8")).things;
   expect(waiting.map((x: { files: unknown }) => x.files)).toEqual([[{ path: "src/relay.ts", commit: C1 }]]);
   await until(() => turns(t, "append").some((l) => l.text?.includes("a question waits in the relay")));
-  const ledger = JSON.parse(fs.readFileSync(path.join(t.dir, "ledger.json"), "utf8")) as { room: string }[];
-  expect(ledger.some((e) => e.room === "expert")).toBe(true);
+  // The correction fork's usage is in the expert's own ledger.
+  const ledger = () => JSON.parse(fs.readFileSync(path.join(t.dir, "ledger.json"), "utf8")) as { room: string; usage: { cacheRead: number } }[];
+  await until(() => ledger().some((e) => e.room === "expert" && e.usage.cacheRead === 77767));
 
   t.rules([...BASE, { kind: "fork", text: "An employee asked you", reply: "nothing" }]);
   expect(await t.expert.learnFromCorrections([correction])).toBe("none");

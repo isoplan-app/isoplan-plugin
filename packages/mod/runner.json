@@ -61,7 +61,11 @@
     "offerAfter": { "daysOfTheLastSeven": 4, "weeksRunning": 3 },
     "jobFromSessionsModel": "sonnet",
     "jobFromSessionsTimeoutSeconds": 120,
-    "rememberStartsDays": 30
+    "sessionsAJobIsWrittenFrom": 5,
+    "jobFromSessionsTriedAgainAfterHours": 24,
+    "rememberStartsDays": 30,
+    "correctionsLearnedAtOnce": 10,
+    "makingWaitMinutes": 20
   },
   "clonesFolder": "",
   "expertCreationSuggestions": {

@@ -12,7 +12,10 @@
 //   expert file or instance file here has doesn't run.
 // - A job file removed by hand stops its runs on this computer and nothing else: its folder, its
 //   record and its drafts stay, decisions still apply, and its listing says `jobFileGone`; put back,
-//   it carries on. Deleting it for good is the floor's (`remove`).
+//   it carries on. Deleting it for good is the floor's (`remove`): its run under way ends first, then
+//   every claim it holds is released and pushed, then its trunks' transcripts, clones and folder go.
+// - Its file of who was contacted inside an area of one of this computer's experts of its project is
+//   warned of once, in runner.log and its health log: that expert reads prospects' details as it grounds.
 // - Its trunks are known to `isEmployeeSession`, so none is ever reported; `anyTied` keeps the
 //   runner up between runs.
 
@@ -21,24 +24,21 @@ import path from "node:path";
 import type { EmployeeDraftDecidedMessage, EmployeeRunsMessage } from "@isoplan/protocol";
 import { openLedger, type Ledger } from "./caps.js";
 import type { Spawn, Track } from "./claude.js";
-import { createEmployeeDraftsHere, type Answer, type EmployeeDraftsHere, type KeptDraft, type RunAnswer } from "./employee-drafts-here.js";
+import { createEmployeeDraftsHere, type DecisionApplied, type EmployeeDraftsHere, type KeptDraft, type RunAnswer } from "./employee-drafts-here.js";
 import { parseEmployeeFile, type EmployeeFile } from "./employee-file.js";
 import { dayTokensSpent, endOfRun, limitsOf, runOnce, type EmployeeRunDeps } from "./employee-run.js";
 import { createEmployeeRuns, type EmployeeRuns } from "./employee-runs.js";
 import type { EmployeeTools } from "./employee-tools.js";
-import { createEmployeeTrunk, type EmployeeSettings, type EmployeeTrunk, type TrunkState } from "./employee.js";
+import { createEmployeeTrunk, removeTrunkTranscripts, type EmployeeSettings, type EmployeeTrunk, type TrunkState } from "./employee.js";
 import { inside } from "./expert-claude.js";
 import { watchExpertFiles, type ExpertFiles } from "./expert-files.js";
 import { createHealthLog, type HealthLog } from "./expert-health.js";
 import type { RunGit } from "../handoff/git.js";
-import { employeeDisplayName } from "@isoplan/protocol";
+import { areaCovers, employeeDisplayName } from "@isoplan/protocol";
 import { createWhatWasLearnedForOneExpert, type WhatWasLearnedBinding, type WhatWasLearnedForOneExpert } from "./what-was-learned-for-one-expert.js";
 import { createWhoWasContactedWriter, type WhoWasContactedWriter } from "./who-was-contacted-writer.js";
 
 type Row = EmployeeRunsMessage["employees"][number];
-
-/** The most corrections one fork learns from: a burst of rejections makes one fork, not ten. */
-const MAX_LEARNED_AT_ONCE = 10;
 
 export interface EmployeesOptions {
   /** <claudeDir>/isoplan/employees: the job files, and each employee's folder. */
@@ -60,6 +60,8 @@ export interface EmployeesOptions {
   expertHasKey: (key: string) => boolean;
   /** The job's experts, as the directory of its record's office has them. */
   expertsOf: (key: string) => { key: string; subject: string }[];
+  /** This computer's experts of the employee's project, with their areas. */
+  expertAreasOf?: (key: string) => { expert: string; areas: string[] }[];
   /** Teaches the expert `expert` on this computer from rejected drafts and its answers in their runs: `waiting` while it can't now (no instance ready, its day's tokens spent). */
   teach?: (expert: string, corrections: { correction: string; draftText: string; answers: RunAnswer[] }[]) => Promise<"learned" | "none" | "failed" | "waiting">;
   /** A run's question to one of the job's experts. */
@@ -104,7 +106,7 @@ export interface Employees {
   rowOf(key: string): Omit<Row, "key" | "expertRecordId"> | null;
   /** Something of an employee changed: its runs, its drafts, its state. */
   onChange(listener: (key: string) => void): void;
-  decide(key: string, m: EmployeeDraftDecidedMessage): Promise<Answer>;
+  decide(key: string, m: EmployeeDraftDecidedMessage): Promise<DecisionApplied>;
   /** Its job file was written or changed here: read it now. */
   refresh(key: string): Promise<void>;
   /** Its first run, now, outside its schedule. */
@@ -141,6 +143,9 @@ export function createEmployees(o: EmployeesOptions): Employees {
   const chains = new Map<string, Promise<void>>();
   const saidKeyClash = new Set<string>();
   const learning = new Set<string>();
+  const warnedOfAreas = new Set<string>();
+  // The run under way of an employee whose runs were stopped, until it has ended.
+  const ending = new Map<string, Promise<void>>();
   const timers: ReturnType<typeof setInterval>[] = [];
   let binding: ((key: string) => WhatWasLearnedBinding) | null = null;
   let tied: (key: string) => string | null = () => null;
@@ -186,6 +191,7 @@ export function createEmployees(o: EmployeesOptions): Employees {
       me: () => ({ sender: o.account.name || o.account.id, employee: key }),
       employeeName: () => employeeDisplayName(key),
       timeoutMs: o.gitTimeoutMs,
+      scan: o.scan,
       log: (t) => o.log(`employee ${key}: ${t}`),
       tries: async () => (await settings()).employees.whoWasContactedPushTries,
       ...(o.writeDelayMs && { delayMs: o.writeDelayMs }),
@@ -269,7 +275,7 @@ export function createEmployees(o: EmployeesOptions): Employees {
       waiting: () => e.drafts.waiting(),
       draftsPerRun: async () => limitsOf(file(), (await o.settings()).employees).draftsPerRun,
       tryAgainAfterMinutes: async () => (await o.settings()).employees.tryAgainAfterMinutes,
-      run: (run, scheduledFor) => runOnce(deps, run, scheduledFor),
+      run: (run, scheduledFor, closed) => runOnce(deps, run, scheduledFor, closed),
       endLeftover: (run) => endOfRun(deps, run, "failed"),
       scan: o.scan,
       ...(o.now && { now: o.now }),
@@ -284,18 +290,35 @@ export function createEmployees(o: EmployeesOptions): Employees {
   function stopRunning(e: EmployeeHere) {
     e.trunk?.stop();
     e.runs?.stop();
+    if (e.runs) ending.set(e.key, e.runs.settled());
     e.trunk = null;
     e.runs = null;
   }
 
+  // Its file of who was contacted inside an area of one of this computer's experts of its project: said once.
+  function warnOfAreas(e: EmployeeHere) {
+    if (!e.file || !o.expertAreasOf) return;
+    const tracker = e.file.job.whoWasContacted ?? cachedSettings?.employees.whoWasContacted ?? "who-was-contacted.csv";
+    for (const { expert, areas } of o.expertAreasOf(e.key)) {
+      const area = areas.find((a) => areaCovers([a], tracker));
+      const said = `${e.key}\n${expert}\n${area}\n${tracker}`;
+      if (!area || warnedOfAreas.has(said)) continue;
+      warnedOfAreas.add(said);
+      const why = `its file of who was contacted, ${tracker}, is inside expert ${expert}'s area ${area}, so that expert reads prospects' details as it grounds: move the file out of the area, or the area off the file`;
+      o.log(`employee ${e.key}: ${why}`);
+      e.health.say("file", { warning: why });
+    }
+  }
+
   async function tickOf(e: EmployeeHere) {
+    warnOfAreas(e);
     await e.drafts.tidy().catch(() => {});
     void learn(e).catch((err: Error) => o.log(`employee ${e.key}: couldn't learn from its owner's corrections: ${err.message}`));
     await e.runs?.tick();
   }
 
   // Rejections into what the employee learned, and into each expert its owner chose to teach: one
-  // fork at a time per employee, at most MAX_LEARNED_AT_ONCE corrections each, inside its day's tokens.
+  // fork at a time per employee, at most runner.json's correctionsLearnedAtOnce each, inside its day's tokens.
   async function learn(e: EmployeeHere) {
     if (learning.has(e.key) || !e.trunk || !e.file) return;
     learning.add(e.key);
@@ -305,15 +328,16 @@ export function createEmployees(o: EmployeesOptions): Employees {
         if (e.drafts.toLearn().length) e.health.say("learned", { from: "corrections", waiting: "its day's tokens are spent" });
         return;
       }
-      const mine = e.drafts.toLearn().filter((d) => !d.learning!.employee).slice(0, MAX_LEARNED_AT_ONCE);
+      const atOnce = s.employees.correctionsLearnedAtOnce;
+      const mine = e.drafts.toLearn().filter((d) => !d.learning!.employee).slice(0, atOnce);
       if (mine.length) {
         const r = await e.trunk.learnFromCorrections(mine.map((d) => ({ correction: d.decision!.correction!, text: d.draft.text, at: d.decision!.at })));
-        if (r !== "waiting") await e.drafts.learned(mine.map((d) => d.draft.id), "employee", r === "learned");
+        if (r !== "waiting") await e.drafts.learned(mine.map((d) => d.draft.id), "employee", r !== "failed");
       }
       const byExpert = new Map<string, KeptDraft[]>();
       for (const d of e.drafts.toLearn()) for (const k of d.decision?.teach ?? []) if (!d.learning!.experts.includes(k)) byExpert.set(k, [...(byExpert.get(k) ?? []), d]);
       for (const [expert, list] of byExpert) {
-        const batch = list.slice(0, MAX_LEARNED_AT_ONCE);
+        const batch = list.slice(0, atOnce);
         const r = o.teach ? await o.teach(expert, batch.map((d) => ({ correction: d.decision!.correction!, draftText: d.draft.text, answers: d.answers[expert] ?? [] }))) : "waiting";
         if (r !== "waiting") await e.drafts.learned(batch.map((d) => d.draft.id), expert, r !== "failed");
       }
@@ -359,6 +383,7 @@ export function createEmployees(o: EmployeesOptions): Employees {
     if (!e) here.set(key, (e = await make(key, file)));
     const was = e.file;
     e.file = file;
+    warnOfAreas(e);
     if (!e.trunk) await startRunning(e);
     else if (JSON.stringify(was) !== JSON.stringify(file)) {
       e.trunk.update();
@@ -423,14 +448,19 @@ export function createEmployees(o: EmployeesOptions): Employees {
       await queue(key, async () => {
         const e = here.get(key);
         if (!e) return;
+        const trunk = e.trunk;
         stopRunning(e);
+        // Its run under way ends first, its fork ended, so no claim of that run is pushed after the release.
+        await ending.get(key);
+        ending.delete(key);
         const releasing = e.drafts.releaseAll();
         if (releasing.length) {
           await e.writer.add(releasing);
           const r = await e.writer.write();
           if (!r.pushed) o.log(`employee ${key}: its claims couldn't be released in the file of who was contacted as it was deleted: ${r.detail}`);
         }
-        await e.trunk?.remove();
+        if (trunk) await trunk.remove();
+        else await removeTrunkTranscripts(dir(key), o.projectsDir);
         learned.get(key)?.forget();
         learned.delete(key);
         here.delete(key);
@@ -469,7 +499,7 @@ export function createEmployees(o: EmployeesOptions): Employees {
       for (const t of timers) clearInterval(t);
       for (const e of here.values()) {
         e.trunk?.close();
-        e.runs?.stop();
+        e.runs?.close();
       }
     },
   };
