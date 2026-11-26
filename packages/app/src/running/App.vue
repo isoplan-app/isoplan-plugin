@@ -3,17 +3,10 @@
 // then the processes there that belong to no session. It asks the app again only while it is open.
 // End asks the app to end a process, or every one in a folder, only once a person confirms here, and
 // the confirmation says whether Isoplan started it (#144). The app checks again before it ends any.
-import { Electroview } from "electrobun/view";
 import { onMounted, onUnmounted, ref } from "vue";
 import type { FolderLine, ProcessLine, RunningView } from "../bun/running.ts";
 import { askAgainMs } from "../shared/ask-again.ts";
-import type { RunningRPC } from "../shared/running-rpc.ts";
-
-// How long the app may take to answer (listing the processes can take a few seconds), and how long the
-// window waits before asking again until an answer gives its own pace.
-const REQUEST_MS = 15000;
-const rpc = Electroview.defineRPC<RunningRPC>({ maxRequestTime: REQUEST_MS, handlers: { requests: {}, messages: {} } });
-new Electroview({ rpc });
+import { REQUEST_MS, rpc } from "./rpc.ts";
 
 const view = ref<RunningView | null>(null);
 // Whether the last ask went unanswered, so what shows is from before.
