@@ -209,8 +209,8 @@ export const HelloMessageSchema = z.object({
  * runner can open them, and `orca` and `desktop` only where `orca` and `desktop` are said. The server
  * sends a start with a `mode` only to a runner that says `starts`, and only one of its places: a
  * runner from before 0.10.0 drops the field it doesn't know and would run the session from the floor.
- * `experts` (protocol 0.13.0): this runner hosts experts. It answers `hosting` with `experts`, and
- * takes `answer-expert` requests; the server sends neither to a runner that didn't say it.
+ * `experts` (protocol 0.13.0 to 0.16.0, the relay of experts' questions through the server) is gone:
+ * a 0.17.0 runner never says it, and an older runner's hello still parses, with it dropped.
  * `hiddenStarts` (protocol 0.14.0, isoplan-app#315): this runner can start a session from the floor
  * hidden (a start's `hidden`), in a clone Isoplan keeps for itself. The server sends `hidden` only to
  * a runner that says it: a runner from before 0.14.0 drops the field it doesn't know and would start
@@ -222,6 +222,10 @@ export const HelloMessageSchema = z.object({
  * `expert-creation-suggestion-dismissals`, `draft-office-wide-expert-creation-suggestion`,
  * `create-expert-from-suggestion` and `expert-creation-suggestion-ended`; the server sends none of
  * these to a runner that didn't say it.
+ * `expertInstances` (protocol 0.17.0, isoplan-app#340): this runner keeps instances of experts set
+ * up from their expert records and answers its own sessions' questions from them; it sends and
+ * takes the messages of "Expert records and instances" (see `expert-directory`). The server sends
+ * none of them to a runner that didn't say it.
  */
 export const RunnerHelloMessageSchema = z.object({
   type: z.literal("runner"),
@@ -234,9 +238,9 @@ export const RunnerHelloMessageSchema = z.object({
   drive: z.boolean().optional(),
   claude: ClaudeCliSchema.optional(),
   starts: z.array(StartModeSchema).max(4).optional(),
-  experts: z.literal(true).optional(),
   hiddenStarts: z.literal(true).optional(),
   canCreateExpertsFromSuggestions: z.literal(true).optional(),
+  expertInstances: z.literal(true).optional(),
 });
 
 /** All of the session's facts. Sent on connect and on repair. */
@@ -269,12 +273,12 @@ export const MAX_OWNER_MESSAGE_LENGTH = 20000;
  */
 export const OwnerMessageRefusalSchema = z.enum(["not-owner", "detached", "no-submit", "ended", "dropped", "no-answer"]);
 
-// Experts (protocol 0.13.0): read-only agents a machine's runner hosts, each grounded in one repo,
-// which any session in an office that holds that repo may ask (ask_expert), from any machine,
-// through the office server. These shared pieces come before the reply, refusal and request schemas,
-// which use them.
+// Experts (protocol 0.13.0): read-only agents, each grounded in one repo, which any session in an
+// office that holds that repo may ask (ask_expert). From 0.17.0 each computer keeps its own instance
+// of an expert, set up from its expert record, and answers its own sessions' questions from it (see
+// "Expert records and instances"). These shared pieces come before the messages that use them.
 
-/** The most experts a runner lists, or a session is told it may ask (protocol 0.13.0). */
+/** The most experts a session is told it may ask (protocol 0.13.0). */
 export const MAX_EXPERTS = 20;
 /** The longest subject an expert lists: what to ask it about, and before which changes. */
 export const MAX_EXPERT_SUBJECT_LENGTH = 1000;
@@ -290,22 +294,23 @@ export const ExpertNameSchema = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/, "l
 const Commit = z.string().regex(/^([0-9a-f]{40}|[0-9a-f]{64})$/, "a full commit hash");
 const Subject = z.string().trim().min(1).max(MAX_EXPERT_SUBJECT_LENGTH);
 
-/** Every situation ask_expert tells its agent about, by a stable code. */
+/**
+ * Every situation ask_expert tells its agent about, by a stable code. `EXPERT_NOT_SET_UP` (protocol
+ * 0.17.0): this computer has no instance of the expert yet, so its set-up is offered. No 0.17.0 side
+ * sends `EXPERT_QUEUED` or `EXPERT_DROPPED`; an office from before 0.17.0 may still send them in a
+ * late end. `EXPERT_QUESTION_HELD` is gone (0.17.0): a runner made it, and no office ever sent it.
+ */
 export const ExpertCodeSchema = z.enum([
   "EXPERT_RUNNER_UNREACHABLE",
   "EXPERT_UNKNOWN",
   "EXPERT_CAP",
-  "EXPERT_QUESTION_HELD",
   "EXPERT_PLUGIN_OLD",
+  "EXPERT_NOT_SET_UP",
   "EXPERT_QUEUED",
   "EXPERT_STARTING",
   "EXPERT_FORK_FAILED",
   "EXPERT_DROPPED",
 ]);
-/** `starting`: no generation of it has passed its proof question yet; `ready`: its junior answers; `failed`: its last grounding failed and none answers. */
-export const ExpertStateSchema = z.enum(["starting", "ready", "failed"]);
-/** The host's caps, from the expert file: questions per asking session per day, open questions per asking session, the expert's daily token budget. */
-export const ExpertCapSchema = z.enum(["asker-day", "asker-open", "expert-tokens"]);
 
 /** The most folders or globs an expert's area names (protocol 0.15.0). */
 export const MAX_AREA_PATHS = 20;
@@ -318,33 +323,11 @@ export const expertDisplayName = (key: string) =>
   [...key.split("-").filter(Boolean).map((word) => word[0]!.toUpperCase() + word.slice(1)), "Expert"].join(" ");
 
 /**
- * One expert a runner hosts, as it lists it to an office server whose list takes its repo. `senior`
- * (protocol 0.14.0): it has a senior generation, which its junior can ask (see `expert-senior`);
- * absent from an older runner. `areas` (protocol 0.15.0): the folders and globs of its repo it
- * covers, from its file, so the office never suggests creating an expert on a folder one already covers;
- * absent from an older runner, or when its file names none. An older server ignores both.
+ * One expert a session may ask: `repo` is its project's short name, `host` a person's name: the
+ * hosting person's until 0.17.0, and from 0.17.0 the expert's owner's, kept so an older plugin still
+ * parses it.
  */
-export const ExpertListingSchema = z.object({
-  name: ExpertNameSchema,
-  project: ProjectSchema,
-  subject: Subject,
-  state: ExpertStateSchema,
-  senior: z.boolean().optional(),
-  areas: z.array(AreaPathSchema).max(MAX_AREA_PATHS).optional(),
-});
-/** One expert a session may ask: `repo` is its project's short name, `host` the hosting person's name. */
 export const ExpertRightSchema = z.object({ name: ExpertNameSchema, subject: Subject, repo: z.string().min(1), host: z.string() });
-
-/**
- * Why the host's runner won't answer an expert question, beside an `unavailable` refusal's `detail`:
- * one of the expert file's caps is reached (`frees`, when it frees), the fork couldn't answer, or this
- * machine hosts no expert by that name now.
- */
-export const ExpertRefusalSchema = z.discriminatedUnion("code", [
-  z.object({ code: z.literal("EXPERT_CAP"), cap: ExpertCapSchema, limit: z.number().int().positive(), frees: z.iso.datetime({ offset: true }).optional() }),
-  z.object({ code: z.literal("EXPERT_FORK_FAILED") }),
-  z.object({ code: z.literal("EXPERT_UNKNOWN") }),
-]);
 
 /** A cap on the answers a machine gives: a room's per hour, the owner's per day, or the owner's tokens per day. */
 export const CapSchema = z.enum(["room-hour", "owner-day", "owner-tokens"]);
@@ -367,9 +350,6 @@ export const ReplyMessageSchema = z.discriminatedUnion("kind", [
   z.object({ type: z.literal("reply"), v: Version, id: RequestId, kind: z.literal("owner-message"), queued: z.literal(true).optional() }),
   // The handoff's session is in front in Orca now (protocol 0.3.8); one that couldn't be is refused `unavailable`.
   z.object({ type: z.literal("reply"), v: Version, id: RequestId, kind: z.literal("focus") }),
-  // The expert's answer (protocol 0.13.0), its citation block and changed-since marks already in
-  // `answer`; `commit` and `branch` are what the answer describes: the expert's read checkout then.
-  z.object({ type: z.literal("reply"), v: Version, id: RequestId, kind: z.literal("answer-expert"), answer: z.string().min(1).max(MAX_EXPERT_ANSWER_LENGTH), commit: Commit, branch: BranchName }),
 ]);
 
 /**
@@ -401,9 +381,7 @@ export const RefusalMessageSchema = z.discriminatedUnion("reason", [
     unchecked: z.array(z.string().min(1)).optional(),
   }),
   // `code` (protocol 0.8.0 on): on an owner-message's refusal, why, for the floor to tell apart.
-  // `expert` (protocol 0.13.0 on): on an answer-expert's refusal, why the host won't answer it, which
-  // ends the question; without it, the server asks again later.
-  z.object({ type: z.literal("refusal"), v: Version, id: RequestId, reason: z.literal("unavailable"), detail: z.string().min(1), code: OwnerMessageRefusalSchema.optional(), expert: ExpertRefusalSchema.optional() }),
+  z.object({ type: z.literal("refusal"), v: Version, id: RequestId, reason: z.literal("unavailable"), detail: z.string().min(1), code: OwnerMessageRefusalSchema.optional() }),
 ]);
 
 /**
@@ -492,42 +470,6 @@ export const AskedAckMessageSchema = z.object({
 });
 
 /**
- * The experts this runner hosts (protocol 0.13.0), as it lists them to this office server, each one
- * whose repo the server's approved list takes. Sent only by a runner that said `experts`, only while
- * its link is up (never through the reply outbox), and never on a connection before that
- * connection's first `hosting`. The runner works the listing out again on every `hosting`, on every
- * change to its experts and every few minutes, and sends it when it differs from the last one it
- * sent on the connection; the first on a connection is always sent, even an empty one. It sends none
- * while it has no approved list. Each one replaces the last. Names are unique.
- */
-export const ExpertsMessageSchema = z
-  .object({
-    type: z.literal("experts"),
-    v: Version,
-    experts: z.array(ExpertListingSchema).max(MAX_EXPERTS),
-  })
-  .superRefine((message, context) => {
-    const seen = new Set<string>();
-    message.experts.forEach((expert, i) => {
-      if (seen.has(expert.name)) context.addIssue({ code: "custom", path: ["experts", i, "name"], message: `the name ${expert.name} is listed once only` });
-      seen.add(expert.name);
-    });
-  });
-
-/**
- * The junior answering the `answer-expert` request `id` has asked its senior (protocol 0.14.0), so
- * the floor can show the senior joining the question's meeting. It carries no text: nothing of the
- * question or of what the junior asked. Sent once per request, when the junior first asks, only to a
- * server whose `hosting` says `expertSenior`, and only while the link is up (never through the reply
- * outbox): a server from before 0.14.0, which doesn't say it, is never sent one.
- */
-export const ExpertSeniorMessageSchema = z.object({
-  type: z.literal("expert-senior"),
-  v: Version,
-  id: RequestId,
-});
-
-/**
  * A session asks an expert a question (protocol 0.13.0), on its own short link with the session's
  * hello, as ask-room is. `key` is the tool call's id: asked again under it, it is the same question.
  * `blocking`: the agent waits a few seconds for the answer. The server answers `asked`, or an error
@@ -535,6 +477,8 @@ export const ExpertSeniorMessageSchema = z.object({
  * pairing codes, as for ask-room). It is a message of its own, not an ask-room with an expert, so a
  * server from before experts refuses it rather than asking a room. The session then polls it with
  * ask-check and acks its end with asked-ack, as for a room question.
+ * From 0.17.0 a server answers it only with an error `EXPERT_PLUGIN_OLD`, and a 0.17.0 plugin never
+ * sends it: it asks its own computer's instance of the expert (see `expert-question`).
  */
 export const AskExpertMessageSchema = z.object({
   type: z.literal("ask-expert"),
@@ -664,6 +608,201 @@ export const ExpertCreationProgressMessageSchema = z.object({
   state: ExpertCreationProgressStateSchema,
   detail: Detail.optional(),
 });
+
+// Expert records and instances (protocol 0.17.0, isoplan-app#340): an expert's definition is kept in
+// its expert record on the office server, which its owner's runner publishes from the expert file
+// (`expert-definition`). Every computer whose sessions ask the expert keeps its own instance of it,
+// set up from the record, and answers those questions itself: neither a question nor its answer
+// leaves the computer, and the server is told only a record of each with no words
+// (`expert-question`). A runner that can says `expertInstances` in its hello. The server sends such
+// a runner `expert-directory` once that hello is let in, even an empty one, and whenever it changes,
+// and sends none of the family to a runner that didn't say it. The runner sends nothing of the
+// family on a connection before that connection's first `expert-directory`, so a server from before
+// 0.17.0, which sends none, is never sent any. A runner sends the family only while its link is up,
+// and counts a message sent only once it went: one that didn't, and one it must send again on a new
+// connection, goes after that connection's first `expert-directory`. The server takes a repeat as
+// the same message, so sending one again is always safe.
+// Ownership is told, never worked out on the runner: the server marks what is this runner's
+// person's own with `yours`, and names a person to the runner as the account that runner said hello
+// as (`by`), since with sign-in on the server's id for a person isn't the Claude account the runner
+// knows itself by.
+
+/** The most expert records an `expert-directory` or an `expert-instance-states` names. */
+export const MAX_EXPERT_RECORDS = 1000;
+/** The most times an `expert-questions-asked-on-your-other-computers` lists for the last day. */
+export const MAX_EXPERT_QUESTION_TIMES_IN_THE_LAST_DAY = 1000;
+
+/** A definition's revision in its expert record: 1 when the record is made, one more at each change. */
+const Revision = z.number().int().positive();
+/**
+ * Which expert record: made by the server when the record is made, so a record made again under the
+ * key of a deleted one is told apart from the old one.
+ */
+export const ExpertRecordIdSchema = z.uuid();
+/** The record and revision a computer last had of the definition it publishes. */
+const BasedOn = z.object({ expertRecordId: ExpertRecordIdSchema, revision: Revision });
+
+/**
+ * What every computer's instance of an expert shares, as its owner's expert file says it: its key;
+ * its project, one with a remote, never a folder on one computer (`local:`); its subject; the model
+ * it grounds with; the context, in tokens, at which its junior is promoted (`promoteAtTokens`); the
+ * folders and globs of its repo it covers (`areas`); and its proof question with the answer expected.
+ * The rest of an expert file is that computer's own, and never leaves it.
+ */
+export const ExpertDefinitionSchema = z.object({
+  key: ExpertNameSchema,
+  project: ProjectSchema.refine((project) => !project.id.toLowerCase().startsWith("local:"), "a project with a remote: an expert's definition never names a folder on one computer"),
+  subject: Subject,
+  model: Model,
+  promoteAtTokens: z.number().int().positive(),
+  areas: z.array(AreaPathSchema).max(MAX_AREA_PATHS),
+  proof: Proof,
+});
+
+/**
+ * Where this computer's instance of the expert `key` stands, set up from (or, on its owner's
+ * computer, published as) the record `expertRecordId`: `setting-up`, with its `step` (`cloning`,
+ * finding this computer's checkout of the project or cloning it; `grounding`; `proof`); `ready`, its
+ * junior answers; or `failed`, with its `failure`: `clone`, the project couldn't be cloned, with
+ * git's words in `detail`, secret-checked on this computer; `proof`, its proof question failed;
+ * `key-used-here`, this computer has its own expert with that key, whose publish was refused
+ * `key-taken`, so the record can't be set up here until that one is renamed; `other`, with why in
+ * `detail`. `senior`: it has a senior generation, which its junior can ask. `groundingTokens`: its
+ * junior's context after grounding. No definition field: the record has it.
+ */
+export const ExpertInstanceStateSchema = z.object({
+  key: ExpertNameSchema,
+  expertRecordId: ExpertRecordIdSchema,
+  state: z.enum(["setting-up", "ready", "failed"]),
+  step: z.enum(["cloning", "grounding", "proof"]).optional(),
+  senior: z.literal(true).optional(),
+  groundingTokens: z.number().int().positive().optional(),
+  failure: z.object({ why: z.enum(["clone", "proof", "key-used-here", "other"]), detail: Detail.optional() }).optional(),
+});
+
+/**
+ * One expert record in an `expert-directory`: one whose project an office holds. `owner` is the
+ * expert's owner, `yours` marks a record this runner's person owns, `revision` is its definition's
+ * revision now, and `groundingTokens` a junior's context after grounding, as an instance last said.
+ */
+export const ExpertDirectoryEntrySchema = z.object({
+  key: ExpertNameSchema,
+  expertRecordId: ExpertRecordIdSchema,
+  project: ProjectSchema,
+  owner: Account,
+  yours: z.literal(true).optional(),
+  revision: Revision,
+  groundingTokens: z.number().int().positive().optional(),
+});
+
+/** Adds an issue for each entry of the list `field` that names a key an earlier entry named. */
+const checkEachKeyOnce = (field: string, entries: { key: string }[], context: z.RefinementCtx) => {
+  const seen = new Set<string>();
+  entries.forEach((entry, i) => {
+    if (seen.has(entry.key)) context.addIssue({ code: "custom", path: [field, i, "key"], message: `the key ${entry.key} is named once only` });
+    seen.add(entry.key);
+  });
+};
+
+/**
+ * The owner's runner publishes the expert's definition from the expert file (protocol 0.17.0), after
+ * checking it for secrets on this computer (a match sends nothing). `basedOn`: the record and
+ * revision this computer last had of it from this server; absent for a file never published there.
+ * Sent on each new connection while the file differs from that revision, and on each change. The
+ * server answers `expert-definition-result`; the same definition and `basedOn` again get the same
+ * result.
+ */
+export const ExpertDefinitionMessageSchema = z.object({
+  type: z.literal("expert-definition"),
+  v: Version,
+  definition: ExpertDefinitionSchema,
+  basedOn: BasedOn.optional(),
+});
+
+/**
+ * Send this computer the record `expertRecordId` of the expert `key` (protocol 0.17.0), answered
+ * with `expert-record`. Sent only once this computer has a checkout or clone of the record's
+ * project, and again after each new connection's first `expert-directory` while it is still wanted.
+ */
+export const ExpertRecordWantedMessageSchema = z.object({
+  type: z.literal("expert-record-wanted"),
+  v: Version,
+  key: ExpertNameSchema,
+  expertRecordId: ExpertRecordIdSchema,
+});
+
+/**
+ * Every instance on this computer of this server's expert records whose project this server takes
+ * (protocol 0.17.0), the whole list each time: the first on each connection always, even an empty
+ * one, then only when it differs. An instance set up from one office server is never named to
+ * another. Each key once.
+ */
+export const ExpertInstanceStatesMessageSchema = z
+  .object({
+    type: z.literal("expert-instance-states"),
+    v: Version,
+    instances: z.array(ExpertInstanceStateSchema).max(MAX_EXPERT_RECORDS),
+  })
+  .superRefine((message, context) => checkEachKeyOnce("instances", message.instances, context));
+
+/**
+ * A question this computer's session asked the expert `key` (protocol 0.17.0), as a record with no
+ * words: never the question's or the answer's text. `id` is the tool call's id, `session` the asking
+ * session as its hello names it (`claude-code:<id>`), `blocking` whether its agent waited, `state`
+ * where it stands (`asking`, `answered` or `dropped`, with its `code`), `senior` that its junior asked
+ * its senior, and `askedAt` and `endedAt` when it was asked and ended. Sent at each change of state,
+ * and again after each new connection's first `expert-directory` until its end has gone. The same
+ * `id` and `state` again is the same record.
+ */
+export const ExpertQuestionMessageSchema = z.object({
+  type: z.literal("expert-question"),
+  v: Version,
+  id: z.string().min(1).max(100),
+  key: ExpertNameSchema,
+  expertRecordId: ExpertRecordIdSchema,
+  session: z.string().min(1),
+  blocking: z.boolean(),
+  state: z.enum(["asking", "answered", "dropped"]),
+  code: ExpertCodeSchema.optional(),
+  senior: z.literal(true).optional(),
+  askedAt: z.iso.datetime({ offset: true }),
+  endedAt: z.iso.datetime({ offset: true }).optional(),
+});
+
+/**
+ * An agent on this computer asked the expert `key`, of which this computer has no instance, so its
+ * person is offered to set it up (protocol 0.17.0, ADR 0013). Sent once per computer per record,
+ * ever, and again after each new connection's first `expert-directory` until it has gone. A repeat
+ * for the same record, person and computer changes nothing. No text of the question.
+ */
+export const ExpertSetUpOfferedMessageSchema = z.object({
+  type: z.literal("expert-set-up-offered"),
+  v: Version,
+  key: ExpertNameSchema,
+  expertRecordId: ExpertRecordIdSchema,
+});
+
+/**
+ * This computer's instance of the expert `key`, whose record isn't its person's own, failed its proof
+ * question at `revision` until its tries ran out (protocol 0.17.0), for the expert's owner to see:
+ * `answer`, what its fork answered, secret-checked on this computer, or `answerHeld`, that it matched
+ * a secret pattern and so isn't sent. Exactly one of the two. Sent once per revision, and again after
+ * each new connection's first `expert-directory` until it has gone. A repeat for the same record,
+ * computer and revision changes nothing.
+ */
+export const ExpertProofFailedMessageSchema = z
+  .object({
+    type: z.literal("expert-proof-failed"),
+    v: Version,
+    key: ExpertNameSchema,
+    expertRecordId: ExpertRecordIdSchema,
+    revision: Revision,
+    answer: z.string().min(1).max(MAX_EXPERT_ANSWER_LENGTH).optional(),
+    answerHeld: z.literal(true).optional(),
+  })
+  .superRefine((message, context) => {
+    if ((message.answer === undefined) === (message.answerHeld === undefined)) context.addIssue({ code: "custom", path: ["answer"], message: "the fork's answer, or answerHeld: one of the two" });
+  });
 
 const driven = { type: z.literal("driven"), v: Version };
 
@@ -835,12 +974,16 @@ export const DataLayerMessageSchema = z.discriminatedUnion("type", [
   AskCheckMessageSchema,
   AskedAckMessageSchema,
   DrivenMessageSchema,
-  ExpertsMessageSchema,
   AskExpertMessageSchema,
-  ExpertSeniorMessageSchema,
   ExpertCreationSuggestionMessageSchema,
   RunnerExpertCreationSuggestionEndedMessageSchema,
   ExpertCreationProgressMessageSchema,
+  ExpertDefinitionMessageSchema,
+  ExpertRecordWantedMessageSchema,
+  ExpertInstanceStatesMessageSchema,
+  ExpertQuestionMessageSchema,
+  ExpertSetUpOfferedMessageSchema,
+  ExpertProofFailedMessageSchema,
 ]);
 
 // Office server → data layer.
@@ -953,22 +1096,6 @@ export const RequestMessageSchema = z.discriminatedUnion("kind", [
     kind: z.literal("focus"),
     handoff: HandoffId,
   }),
-  // A session asks one of this runner's experts (protocol 0.13.0), sent only to a runner that said
-  // `experts`. `questionId` is the server's id for the question: the same across every request sent
-  // for it, so the host answers it once, and the id its health log names. `asker` is the asking
-  // session's id, which the expert file's caps count by; `from` is the asking person.
-  z.object({
-    type: z.literal("request"),
-    v: Version,
-    id: RequestId,
-    kind: z.literal("answer-expert"),
-    expert: ExpertNameSchema,
-    questionId: RequestId,
-    question: z.string().trim().min(1).max(MAX_QUESTION_LENGTH),
-    blocking: z.boolean(),
-    from: Account,
-    asker: z.string().min(1),
-  }),
 ]);
 
 /**
@@ -1051,7 +1178,8 @@ export const HandedOverMessageSchema = z.object({
  * An answered or dropped question is sent again down the session's own link until it is acked.
  * A question asked of an expert (protocol 0.13.0) has `expert`, and `owner` is the host's name; its
  * `code` says where it stands for ask_expert, and an answered one has the `commit` and `branch` its
- * answer describes.
+ * answer describes. From 0.17.0 no office sends one for an expert's question, which the asker's own
+ * runner answers, though an office from before 0.17.0 may still send a late end.
  */
 export const AskedMessageSchema = z.object({
   type: z.literal("asked"),
@@ -1092,22 +1220,6 @@ export const ExpertRightsMessageSchema = z.object({
   type: z.literal("expert-rights"),
   v: Version,
   experts: z.array(ExpertRightSchema).max(MAX_EXPERTS),
-});
-
-/**
- * Which of this runner's experts the server shows in at least one office (protocol 0.13.0), sent only
- * to a runner that said `experts`: once its hello is let in (as the server last kept them, or none),
- * after each `experts` message, and whenever the offices change. The runner sends no `experts` on a
- * connection before that connection's first `hosting`, so a server from before experts, which sends
- * none, is never sent one.
- * `expertSenior` (protocol 0.14.0): this server reads `expert-senior`, so the runner may send it. A
- * server that reads it says it on every `hosting`; the runner goes by the connection's last one.
- */
-export const HostingMessageSchema = z.object({
-  type: z.literal("hosting"),
-  v: Version,
-  listed: z.array(ExpertNameSchema).max(MAX_EXPERTS),
-  expertSenior: z.literal(true).optional(),
 });
 
 const drive = { type: z.literal("drive"), v: Version, id: DriveId, by: Account };
@@ -1317,6 +1429,125 @@ export const ServerExpertCreationSuggestionEndedMessageSchema = z.discriminatedU
   z.object({ ...expertCreationSuggestionEnded, why: z.enum(["dismissed", "refused", "expired"]) }),
 ]);
 
+/**
+ * Every expert record whose project an office on this server holds (protocol 0.17.0), the whole list
+ * each time, each marked `yours` for this runner's person, and the caps of asks.json that the
+ * asker's runner checks over its person's questions on all their computers (`asking`): open
+ * questions per person per expert, questions per person in the last day, and the hours after which
+ * a question still unanswered ends. Sent to a runner that said `expertInstances` once its hello is
+ * let in, even an empty one, and whenever it changes; the first on a connection opens the family on
+ * it (see "Expert records and instances"). Each key once.
+ */
+export const ExpertDirectoryMessageSchema = z
+  .object({
+    type: z.literal("expert-directory"),
+    v: Version,
+    experts: z.array(ExpertDirectoryEntrySchema).max(MAX_EXPERT_RECORDS),
+    asking: z.object({
+      openPerPersonPerExpert: z.number().int().positive(),
+      perPersonPerDay: z.number().int().positive(),
+      maxAgeHours: z.number().positive(),
+    }),
+  })
+  .superRefine((message, context) => checkEachKeyOnce("experts", message.experts, context));
+
+/**
+ * The expert record `expertRecordId` at `revision`, with its definition (protocol 0.17.0): in answer
+ * to `expert-record-wanted`, and sent unasked when the revision changes to every linked runner whose
+ * `expert-instance-states` has that record at `grounding` or `proof`, `ready`, or failed for a reason
+ * other than `clone` or `key-used-here`; a runner still cloning asks once it has the project.
+ * `owner` is the expert's owner, and `yours` marks it as this runner's person's own.
+ */
+export const ExpertRecordMessageSchema = z.object({
+  type: z.literal("expert-record"),
+  v: Version,
+  expertRecordId: ExpertRecordIdSchema,
+  revision: Revision,
+  owner: Account,
+  yours: z.literal(true).optional(),
+  definition: ExpertDefinitionSchema,
+});
+
+const expertDefinitionResult = { type: z.literal("expert-definition-result"), v: Version, key: ExpertNameSchema };
+const expertDefinitionRefused = { ...expertDefinitionResult, outcome: z.literal("refused") };
+
+/**
+ * The answer to `expert-definition` for the expert `key` (protocol 0.17.0): `published`, as the record
+ * `expertRecordId` at `revision` (a definition unchanged keeps its revision); or `refused`, for its
+ * `reason`: `edited-elsewhere`, the record changed since the revision `basedOn` named, so the runner
+ * writes the record's `definition`, at `revision`, into the expert file; `key-taken`, another
+ * person's expert has the key; `not-owner`, the record `basedOn` named is now another person's, its
+ * owner changed; `project-not-in-an-office`, no office on this server holds its project; `deleted`,
+ * the record `basedOn` named was deleted on the floor.
+ */
+export const ExpertDefinitionResultMessageSchema = z.discriminatedUnion("outcome", [
+  z.object({ ...expertDefinitionResult, outcome: z.literal("published"), expertRecordId: ExpertRecordIdSchema, revision: Revision }),
+  z.discriminatedUnion("reason", [
+    z.object({ ...expertDefinitionRefused, reason: z.literal("edited-elsewhere"), expertRecordId: ExpertRecordIdSchema, revision: Revision, definition: ExpertDefinitionSchema }),
+    z.object({ ...expertDefinitionRefused, reason: z.enum(["key-taken", "not-owner", "project-not-in-an-office", "deleted"]) }),
+  ]),
+]);
+
+/**
+ * The expert record `expertRecordId` of the expert `key` was deleted on the floor, by `by` (protocol
+ * 0.17.0): sent to every linked runner then, and to each runner that links within the 30 days after.
+ * A runner acts on it only where its files are tied to that record, never another record of the key.
+ */
+export const ExpertDeletedMessageSchema = z.object({
+  type: z.literal("expert-deleted"),
+  v: Version,
+  key: ExpertNameSchema,
+  expertRecordId: ExpertRecordIdSchema,
+  by: Account,
+});
+
+/**
+ * Set up this computer's instance of the expert `key` from the record `expertRecordId` (protocol
+ * 0.17.0): its person's one click on the floor, or Try again after a failure (`again`, which grounds
+ * it again now). Sent to that person's own runner on the computer they chose; `by` is the account
+ * that runner said hello as, which the runner checks is its own, starting nothing otherwise. Nothing
+ * is queued: the server refuses at once when that runner isn't linked. How the set-up goes, the
+ * runner says in `expert-instance-states`.
+ */
+export const SetUpExpertInstanceMessageSchema = z.object({
+  type: z.literal("set-up-expert-instance"),
+  v: Version,
+  request: RequestId,
+  key: ExpertNameSchema,
+  expertRecordId: ExpertRecordIdSchema,
+  by: Account,
+  again: z.literal(true).optional(),
+});
+
+/**
+ * The offer to set up the expert `key` on this computer, from the record `expertRecordId`, ended
+ * (protocol 0.17.0): `dismissed` on the floor; `expired`; `set-up`, an instance of it is listed; or
+ * `gone`, the record was deleted or its project left every office. Sent to that person's runner on
+ * that computer when it ends, and on each link for every offer of that computer that ended in the 30
+ * days after it was offered.
+ */
+export const ExpertSetUpOfferEndedMessageSchema = z.object({
+  type: z.literal("expert-set-up-offer-ended"),
+  v: Version,
+  key: ExpertNameSchema,
+  expertRecordId: ExpertRecordIdSchema,
+  why: z.enum(["dismissed", "expired", "set-up", "gone"]),
+});
+
+/**
+ * This runner's person's questions to experts on their other computers (protocol 0.17.0), from the
+ * records those computers' runners sent (`expert-question`): `open`, how many are open per expert,
+ * and `askedAtInTheLastDay`, when each of the last day's was asked. The runner adds its own and
+ * checks the directory's `asking` caps against the total. Sent after the directory on each link, and
+ * whenever those records change.
+ */
+export const ExpertQuestionsAskedOnYourOtherComputersMessageSchema = z.object({
+  type: z.literal("expert-questions-asked-on-your-other-computers"),
+  v: Version,
+  open: z.array(z.object({ key: ExpertNameSchema, count: z.number().int().positive() })).max(MAX_EXPERT_RECORDS),
+  askedAtInTheLastDay: z.array(z.iso.datetime({ offset: true })).max(MAX_EXPERT_QUESTION_TIMES_IN_THE_LAST_DAY),
+});
+
 export const OfficeServerMessageSchema = z.discriminatedUnion("type", [
   RepairMessageSchema,
   WelcomeMessageSchema,
@@ -1333,11 +1564,17 @@ export const OfficeServerMessageSchema = z.discriminatedUnion("type", [
   DriveMessageSchema,
   DrivePolicyMessageSchema,
   ExpertRightsMessageSchema,
-  HostingMessageSchema,
   CreateExpertFromSuggestionMessageSchema,
   DraftOfficeWideExpertCreationSuggestionMessageSchema,
   ExpertCreationSuggestionDismissalsMessageSchema,
   ServerExpertCreationSuggestionEndedMessageSchema,
+  ExpertDirectoryMessageSchema,
+  ExpertRecordMessageSchema,
+  ExpertDefinitionResultMessageSchema,
+  ExpertDeletedMessageSchema,
+  SetUpExpertInstanceMessageSchema,
+  ExpertSetUpOfferEndedMessageSchema,
+  ExpertQuestionsAskedOnYourOtherComputersMessageSchema,
 ]);
 
 export type HandoffRepo = z.infer<typeof HandoffRepoSchema>;
@@ -1381,17 +1618,26 @@ export type DrivenMessage = z.infer<typeof DrivenMessageSchema>;
 export type DrivenKind = DrivenMessage["kind"];
 export type DriveRefusal = Extract<DrivenMessage, { kind: "refused" }>;
 export type DriveRefusalReason = DriveRefusal["reason"];
-export type ExpertListing = z.infer<typeof ExpertListingSchema>;
 export type ExpertRight = z.infer<typeof ExpertRightSchema>;
 export type ExpertCode = z.infer<typeof ExpertCodeSchema>;
-export type ExpertState = z.infer<typeof ExpertStateSchema>;
-export type ExpertCap = z.infer<typeof ExpertCapSchema>;
-export type ExpertRefusal = z.infer<typeof ExpertRefusalSchema>;
-export type ExpertsMessage = z.infer<typeof ExpertsMessageSchema>;
 export type AskExpertMessage = z.infer<typeof AskExpertMessageSchema>;
 export type ExpertRightsMessage = z.infer<typeof ExpertRightsMessageSchema>;
-export type HostingMessage = z.infer<typeof HostingMessageSchema>;
-export type ExpertSeniorMessage = z.infer<typeof ExpertSeniorMessageSchema>;
+export type ExpertDefinition = z.infer<typeof ExpertDefinitionSchema>;
+export type ExpertInstanceState = z.infer<typeof ExpertInstanceStateSchema>;
+export type ExpertDirectoryEntry = z.infer<typeof ExpertDirectoryEntrySchema>;
+export type ExpertDefinitionMessage = z.infer<typeof ExpertDefinitionMessageSchema>;
+export type ExpertRecordWantedMessage = z.infer<typeof ExpertRecordWantedMessageSchema>;
+export type ExpertInstanceStatesMessage = z.infer<typeof ExpertInstanceStatesMessageSchema>;
+export type ExpertQuestionMessage = z.infer<typeof ExpertQuestionMessageSchema>;
+export type ExpertSetUpOfferedMessage = z.infer<typeof ExpertSetUpOfferedMessageSchema>;
+export type ExpertProofFailedMessage = z.infer<typeof ExpertProofFailedMessageSchema>;
+export type ExpertDirectoryMessage = z.infer<typeof ExpertDirectoryMessageSchema>;
+export type ExpertRecordMessage = z.infer<typeof ExpertRecordMessageSchema>;
+export type ExpertDefinitionResultMessage = z.infer<typeof ExpertDefinitionResultMessageSchema>;
+export type ExpertDeletedMessage = z.infer<typeof ExpertDeletedMessageSchema>;
+export type SetUpExpertInstanceMessage = z.infer<typeof SetUpExpertInstanceMessageSchema>;
+export type ExpertSetUpOfferEndedMessage = z.infer<typeof ExpertSetUpOfferEndedMessageSchema>;
+export type ExpertQuestionsAskedOnYourOtherComputersMessage = z.infer<typeof ExpertQuestionsAskedOnYourOtherComputersMessageSchema>;
 export type ExpertCreationSuggestionMessage = z.infer<typeof ExpertCreationSuggestionMessageSchema>;
 export type ExpertCreationSuggestionRepetition = z.infer<typeof ExpertCreationSuggestionRepetitionSchema>;
 export type RunnerExpertCreationSuggestionEndedMessage = z.infer<typeof RunnerExpertCreationSuggestionEndedMessageSchema>;
