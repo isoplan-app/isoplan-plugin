@@ -7,6 +7,7 @@ import {
   MAX_DETAIL_LENGTH,
   MAX_DRIVE_ID_LENGTH,
   MAX_EXPERT_ANSWER_LENGTH,
+  MAX_EXPERT_RECORDS,
   MAX_EXPERT_SUBJECT_LENGTH,
   MAX_EXPERTS,
   MAX_FOLDER_LENGTH,
@@ -137,7 +138,20 @@ const room = "room:claude-code:s1";
 const driving = "claude-code:0b5c4d3e-0000-4000-8000-000000000001";
 const isoplan = { id: "github.com/isoplan-app/isoplan", name: "isoplan" };
 const commit = "0123456789abcdef0123456789abcdef01234567";
-const expertListing = { name: "adr-0004", project: isoplan, subject: "What session text may leave a machine (ADR 0004). Ask before you send data off one.", state: "ready" };
+const expertRecordId = "3f1c9a2e-5b7d-4e8f-9a0b-1c2d3e4f5a6b";
+const pairingRecordId = "9b8e7d6c-1a2b-4c3d-8e9f-0a1b2c3d4e5f";
+const expertDefinition = {
+  key: "adr-0004",
+  project: isoplan,
+  subject: "What session text may leave a machine (ADR 0004). Ask before you send data off one.",
+  model: "sonnet",
+  promoteAtTokens: 150000,
+  areas: ["docs/adr", "CONTEXT.md"],
+  proof: { question: "May a session's title leave the machine?", answer: "Yes: the title is a fact." },
+};
+const expertInstance = { key: "adr-0004", expertRecordId, state: "ready", senior: true, groundingTokens: 42000 };
+const expertDirectoryEntry = { key: "adr-0004", expertRecordId, project: isoplan, owner: adam, yours: true, revision: 2, groundingTokens: 42000 };
+const asking = { openPerPersonPerExpert: 3, perPersonPerDay: 30, maxAgeHours: 72 };
 const expertCreationSuggestion = {
   type: "expert-creation-suggestion",
   v,
@@ -274,21 +288,34 @@ const valid = {
   "driven claude installing": { type: "driven", v, kind: "claude", claude: "missing", doing: "installing", progress: "Downloading Claude Code...", id: "c1" },
   "driven claude signing in": { type: "driven", v, kind: "claude", claude: "signed-out", doing: "signing-in", url: "https://claude.ai/oauth/authorize?code=true", id: "c2" },
   "driven claude failed": { type: "driven", v, kind: "claude", claude: "missing", failed: "The installer stopped with code 1.", id: "c1" },
-  "runner that hosts experts": { type: "runner", v, account: adam, machine: { name: "sevengill" }, experts: true },
-  experts: { type: "experts", v, experts: [expertListing] },
-  hosting: { type: "hosting", v, listed: ["adr-0004"] },
-  "expert-rights": { type: "expert-rights", v, experts: [{ name: "adr-0004", subject: expertListing.subject, repo: "isoplan", host: "Adam" }] },
+  "runner that keeps expert instances": { type: "runner", v, account: adam, machine: { name: "sevengill" }, expertInstances: true },
+  "expert-rights": { type: "expert-rights", v, experts: [{ name: "adr-0004", subject: expertDefinition.subject, repo: "isoplan", host: "Adam" }] },
   "ask-expert": { type: "ask-expert", v, expert: "adr-0004", question: "May a session's title leave the machine?", blocking: true, key: "toolu_02" },
-  "request answer-expert": { type: "request", v, id: "expert-x-0123456789-a1b2c3", kind: "answer-expert", expert: "adr-0004", questionId: "x-0123456789", question: "May a session's title leave the machine?", blocking: false, from: sam, asker: "claude-code:s2" },
-  "reply answer-expert": { type: "reply", v, id: "expert-x-0123456789-a1b2c3", kind: "answer-expert", answer: "Yes: the title is a fact.\n\nCited, on main at 0123456:\n- docs/adr/0004-what-leaves-a-machine.md", commit, branch: "main" },
-  "refusal of an answer-expert": { type: "refusal", v, id: "expert-x-0123456789-a1b2c3", reason: "unavailable", detail: "Over this expert's cap.", expert: { code: "EXPERT_CAP", cap: "asker-day", limit: 30, frees: "2026-11-18T09:00:00.000Z" } },
   "asked of an expert": { type: "asked", v, question: "x-0123456789", text: "May a session's title leave the machine?", state: "answered", answer: "Yes.", owner: "Adam", key: "toolu_02", expert: "adr-0004", commit, branch: "main" },
-  "experts with a senior": { type: "experts", v, experts: [{ ...expertListing, senior: true }] },
-  "hosting that reads expert-senior": { type: "hosting", v, listed: ["adr-0004"], expertSenior: true },
-  "expert-senior": { type: "expert-senior", v, id: "expert-x-0123456789-a1b2c3" },
+  "expert-definition": { type: "expert-definition", v, definition: expertDefinition },
+  "expert-definition based on a revision": { type: "expert-definition", v, definition: expertDefinition, basedOn: { expertRecordId, revision: 2 } },
+  "expert-record-wanted": { type: "expert-record-wanted", v, key: "adr-0004", expertRecordId },
+  "expert-instance-states": { type: "expert-instance-states", v, instances: [expertInstance, { key: "pairing", expertRecordId: pairingRecordId, state: "setting-up", step: "grounding" }] },
+  "expert-instance-states failed": { type: "expert-instance-states", v, instances: [{ key: "adr-0004", expertRecordId, state: "failed", failure: { why: "clone", detail: "fatal: could not read Username for 'https://github.com': terminal prompts disabled" } }] },
+  "expert-question": { type: "expert-question", v, id: "toolu_02", key: "adr-0004", expertRecordId, session: "claude-code:s2", blocking: true, state: "asking", askedAt: at },
+  "expert-question answered": { type: "expert-question", v, id: "toolu_02", key: "adr-0004", expertRecordId, session: "claude-code:s2", blocking: true, state: "answered", senior: true, askedAt: at, endedAt: "2026-10-20T09:00:12.000Z" },
+  "expert-question not set up": { type: "expert-question", v, id: "toolu_03", key: "adr-0004", expertRecordId, session: "claude-code:s2", blocking: false, state: "dropped", code: "EXPERT_NOT_SET_UP", askedAt: at, endedAt: at },
+  "expert-set-up-offered": { type: "expert-set-up-offered", v, key: "adr-0004", expertRecordId },
+  "expert-proof-failed": { type: "expert-proof-failed", v, key: "adr-0004", expertRecordId, revision: 2, answer: "No: a title is session text." },
+  "expert-proof-failed held": { type: "expert-proof-failed", v, key: "adr-0004", expertRecordId, revision: 2, answerHeld: true },
+  "expert-directory": { type: "expert-directory", v, experts: [expertDirectoryEntry, { key: "pairing", expertRecordId: pairingRecordId, project: isoplan, owner: sam, revision: 1 }], asking },
+  "expert-record": { type: "expert-record", v, expertRecordId, revision: 2, owner: adam, yours: true, definition: expertDefinition },
+  "expert-definition-result published": { type: "expert-definition-result", v, key: "adr-0004", outcome: "published", expertRecordId, revision: 2 },
+  "expert-definition-result edited-elsewhere": { type: "expert-definition-result", v, key: "adr-0004", outcome: "refused", reason: "edited-elsewhere", expertRecordId, revision: 3, definition: { ...expertDefinition, model: "opus" } },
+  "expert-definition-result key-taken": { type: "expert-definition-result", v, key: "adr-0004", outcome: "refused", reason: "key-taken" },
+  "expert-deleted": { type: "expert-deleted", v, key: "adr-0004", expertRecordId, by: sam },
+  "set-up-expert-instance": { type: "set-up-expert-instance", v, request: "set-up-x-0123456789", key: "adr-0004", expertRecordId, by: sam },
+  "set-up-expert-instance again": { type: "set-up-expert-instance", v, request: "set-up-x-0123456790", key: "adr-0004", expertRecordId, by: sam, again: true },
+  "expert-set-up-offer-ended": { type: "expert-set-up-offer-ended", v, key: "adr-0004", expertRecordId, why: "dismissed" },
+  "expert-questions-asked-on-your-other-computers": { type: "expert-questions-asked-on-your-other-computers", v, open: [{ key: "adr-0004", count: 2 }], askedAtInTheLastDay: [at, "2026-10-20T08:00:00.000Z"] },
   "runner that starts hidden sessions": { type: "runner", v, account: adam, machine: { name: "sevengill" }, drive: true, hiddenStarts: true },
   "drive start hidden": { type: "drive", v, kind: "start", id: "d13", by: adam, folder: "/Users/sam/code/isoplan", branch: "feat/dark-mode", project: isoplan, instruction: "Add a dark mode.", permissions: "auto", hidden: true },
-  "runner that can create experts from suggestions": { type: "runner", v, account: adam, machine: { name: "sevengill" }, experts: true, canCreateExpertsFromSuggestions: true },
+  "runner that can create experts from suggestions": { type: "runner", v, account: adam, machine: { name: "sevengill" }, canCreateExpertsFromSuggestions: true, expertInstances: true },
   "expert-creation-suggestion": expertCreationSuggestion,
   "expert-creation-suggestion office-wide": { ...expertCreationSuggestion, id: "draft-x-0123456789", scope: "office" },
   "expert-creation-suggestion-ended from the runner": { type: "expert-creation-suggestion-ended", v, id: "o-4f9c2a", why: "withdrawn" },
@@ -300,7 +327,6 @@ const valid = {
   "expert-creation-suggestion-ended made": { type: "expert-creation-suggestion-ended", v, id: "o-4f9c2a", why: "made", key: "pairing-tokens" },
   "expert-creation-suggestion-ended expired": { type: "expert-creation-suggestion-ended", v, id: "o-4f9c2a", why: "expired" },
   "expert-creation-suggestion-ended refused": { type: "expert-creation-suggestion-ended", v, id: "o-4f9c2a", why: "refused" },
-  "experts with areas": { type: "experts", v, experts: [{ ...expertListing, areas: ["docs/adr", "CONTEXT.md"] }] },
 };
 
 const parsers = {
@@ -395,18 +421,31 @@ const parsers = {
   "driven claude installing": parseDataLayerMessage,
   "driven claude signing in": parseDataLayerMessage,
   "driven claude failed": parseDataLayerMessage,
-  "runner that hosts experts": parseDataLayerMessage,
-  experts: parseDataLayerMessage,
-  hosting: parseOfficeServerMessage,
+  "runner that keeps expert instances": parseDataLayerMessage,
   "expert-rights": parseOfficeServerMessage,
   "ask-expert": parseDataLayerMessage,
-  "request answer-expert": parseOfficeServerMessage,
-  "reply answer-expert": parseDataLayerMessage,
-  "refusal of an answer-expert": parseDataLayerMessage,
   "asked of an expert": parseOfficeServerMessage,
-  "experts with a senior": parseDataLayerMessage,
-  "hosting that reads expert-senior": parseOfficeServerMessage,
-  "expert-senior": parseDataLayerMessage,
+  "expert-definition": parseDataLayerMessage,
+  "expert-definition based on a revision": parseDataLayerMessage,
+  "expert-record-wanted": parseDataLayerMessage,
+  "expert-instance-states": parseDataLayerMessage,
+  "expert-instance-states failed": parseDataLayerMessage,
+  "expert-question": parseDataLayerMessage,
+  "expert-question answered": parseDataLayerMessage,
+  "expert-question not set up": parseDataLayerMessage,
+  "expert-set-up-offered": parseDataLayerMessage,
+  "expert-proof-failed": parseDataLayerMessage,
+  "expert-proof-failed held": parseDataLayerMessage,
+  "expert-directory": parseOfficeServerMessage,
+  "expert-record": parseOfficeServerMessage,
+  "expert-definition-result published": parseOfficeServerMessage,
+  "expert-definition-result edited-elsewhere": parseOfficeServerMessage,
+  "expert-definition-result key-taken": parseOfficeServerMessage,
+  "expert-deleted": parseOfficeServerMessage,
+  "set-up-expert-instance": parseOfficeServerMessage,
+  "set-up-expert-instance again": parseOfficeServerMessage,
+  "expert-set-up-offer-ended": parseOfficeServerMessage,
+  "expert-questions-asked-on-your-other-computers": parseOfficeServerMessage,
   "runner that starts hidden sessions": parseDataLayerMessage,
   "drive start hidden": parseOfficeServerMessage,
   "runner that can create experts from suggestions": parseDataLayerMessage,
@@ -421,7 +460,6 @@ const parsers = {
   "expert-creation-suggestion-ended made": parseOfficeServerMessage,
   "expert-creation-suggestion-ended expired": parseOfficeServerMessage,
   "expert-creation-suggestion-ended refused": parseOfficeServerMessage,
-  "experts with areas": parseDataLayerMessage,
 } satisfies Record<keyof typeof valid, (value: unknown) => ParseResult<unknown>>;
 
 // Each message with one field made wrong, and the path the error should name.
@@ -517,18 +555,31 @@ const broken: Record<keyof typeof valid, [unknown, string]> = {
   "driven claude installing": [{ ...valid["driven claude installing"], doing: "updating" }, "doing"],
   "driven claude signing in": [{ ...valid["driven claude signing in"], url: "http://claude.ai/oauth/authorize" }, "url"],
   "driven claude failed": [{ ...valid["driven claude failed"], claude: "gone" }, "claude"],
-  "runner that hosts experts": [{ ...valid["runner that hosts experts"], experts: false }, "experts"],
-  experts: [{ ...valid.experts, experts: [{ ...expertListing, state: "busy" }] }, "experts[0].state"],
-  hosting: [{ ...valid.hosting, listed: ["ADR 0004"] }, "listed[0]"],
+  "runner that keeps expert instances": [{ ...valid["runner that keeps expert instances"], expertInstances: false }, "expertInstances"],
   "expert-rights": [{ ...valid["expert-rights"], experts: [{ ...valid["expert-rights"].experts[0], repo: "" }] }, "experts[0].repo"],
   "ask-expert": [{ ...valid["ask-expert"], blocking: "yes" }, "blocking"],
-  "request answer-expert": [{ ...valid["request answer-expert"], questionId: "" }, "questionId"],
-  "reply answer-expert": [{ ...valid["reply answer-expert"], commit: "0123456" }, "commit"],
-  "refusal of an answer-expert": [{ ...valid["refusal of an answer-expert"], expert: { code: "EXPERT_CAP", cap: "asker-week", limit: 30 } }, "expert.cap"],
   "asked of an expert": [{ ...valid["asked of an expert"], code: "EXPERT_LOST" }, "code"],
-  "experts with a senior": [{ ...valid["experts with a senior"], experts: [{ ...expertListing, senior: "yes" }] }, "experts[0].senior"],
-  "hosting that reads expert-senior": [{ ...valid["hosting that reads expert-senior"], expertSenior: false }, "expertSenior"],
-  "expert-senior": [{ ...valid["expert-senior"], id: "" }, "id"],
+  "expert-definition": [{ ...valid["expert-definition"], definition: { ...expertDefinition, promoteAtTokens: 0 } }, "definition.promoteAtTokens"],
+  "expert-definition based on a revision": [{ ...valid["expert-definition based on a revision"], basedOn: { expertRecordId, revision: 0 } }, "basedOn.revision"],
+  "expert-record-wanted": [{ ...valid["expert-record-wanted"], expertRecordId: "adr-0004" }, "expertRecordId"],
+  "expert-instance-states": [{ ...valid["expert-instance-states"], instances: [{ ...expertInstance, state: "starting" }] }, "instances[0].state"],
+  "expert-instance-states failed": [{ ...valid["expert-instance-states failed"], instances: [{ ...valid["expert-instance-states failed"].instances[0], failure: { why: "network" } }] }, "instances[0].failure.why"],
+  "expert-question": [{ ...valid["expert-question"], state: "queued" }, "state"],
+  "expert-question answered": [{ ...valid["expert-question answered"], endedAt: "in a minute" }, "endedAt"],
+  "expert-question not set up": [{ ...valid["expert-question not set up"], code: "EXPERT_QUESTION_HELD" }, "code"],
+  "expert-set-up-offered": [{ ...valid["expert-set-up-offered"], key: "ADR 0004" }, "key"],
+  "expert-proof-failed": [{ ...valid["expert-proof-failed"], revision: 1.5 }, "revision"],
+  "expert-proof-failed held": [{ ...valid["expert-proof-failed held"], answerHeld: false }, "answerHeld"],
+  "expert-directory": [{ ...valid["expert-directory"], asking: { ...asking, maxAgeHours: 0 } }, "asking.maxAgeHours"],
+  "expert-record": [{ ...valid["expert-record"], owner: { name: "Adam" } }, "owner.id"],
+  "expert-definition-result published": [{ ...valid["expert-definition-result published"], revision: 0 }, "revision"],
+  "expert-definition-result edited-elsewhere": [{ ...valid["expert-definition-result edited-elsewhere"], expertRecordId: "x" }, "expertRecordId"],
+  "expert-definition-result key-taken": [{ ...valid["expert-definition-result key-taken"], reason: "taken" }, "reason"],
+  "expert-deleted": [{ ...valid["expert-deleted"], by: { name: "Sam" } }, "by.id"],
+  "set-up-expert-instance": [{ ...valid["set-up-expert-instance"], request: "" }, "request"],
+  "set-up-expert-instance again": [{ ...valid["set-up-expert-instance again"], again: false }, "again"],
+  "expert-set-up-offer-ended": [{ ...valid["expert-set-up-offer-ended"], why: "ignored" }, "why"],
+  "expert-questions-asked-on-your-other-computers": [{ ...valid["expert-questions-asked-on-your-other-computers"], open: [{ key: "adr-0004", count: 0 }] }, "open[0].count"],
   "runner that starts hidden sessions": [{ ...valid["runner that starts hidden sessions"], hiddenStarts: false }, "hiddenStarts"],
   "drive start hidden": [{ ...valid["drive start hidden"], hidden: "yes" }, "hidden"],
   "runner that can create experts from suggestions": [{ ...valid["runner that can create experts from suggestions"], canCreateExpertsFromSuggestions: false }, "canCreateExpertsFromSuggestions"],
@@ -543,7 +594,6 @@ const broken: Record<keyof typeof valid, [unknown, string]> = {
   "expert-creation-suggestion-ended made": [{ ...valid["expert-creation-suggestion-ended made"], key: undefined }, "key"],
   "expert-creation-suggestion-ended expired": [{ ...valid["expert-creation-suggestion-ended expired"], why: "withdrawn" }, "why"],
   "expert-creation-suggestion-ended refused": [{ ...valid["expert-creation-suggestion-ended refused"], why: "no-draft" }, "why"],
-  "experts with areas": [{ ...valid["experts with areas"], experts: [{ ...expertListing, areas: ["../x"] }] }, "experts[0].areas[0]"],
 };
 
 describe.each(Object.keys(valid) as (keyof typeof valid)[])("%s", (type) => {
@@ -989,76 +1039,49 @@ describe("driven sessions", () => {
 });
 
 describe("experts", () => {
-  const listing = (experts: unknown[]) => parseDataLayerMessage({ ...valid.experts, experts });
   const rights = (experts: unknown[]) => parseOfficeServerMessage({ ...valid["expert-rights"], experts });
+  const definition = (changed: object) => parseDataLayerMessage({ ...valid["expert-definition"], definition: { ...expertDefinition, ...changed } });
 
-  test("an expert's name is lowercase letters, digits and dashes, starting with a letter or digit, at most 63", () => {
-    for (const name of ["a", "adr-0004", "0-day", "a".repeat(63)]) expect(listing([{ ...expertListing, name }])).toMatchObject({ ok: true });
-    for (const name of ["", "-adr", "ADR", "adr_0004", "adr 0004", "a".repeat(64)]) expect(listing([{ ...expertListing, name }])).toMatchObject({ ok: false, kind: "invalid" });
+  test("an expert's key is lowercase letters, digits and dashes, starting with a letter or digit, at most 63", () => {
+    for (const key of ["a", "adr-0004", "0-day", "a".repeat(63)]) expect(definition({ key })).toMatchObject({ ok: true });
+    for (const key of ["", "-adr", "ADR", "adr_0004", "adr 0004", "a".repeat(64)]) expect(definition({ key })).toMatchObject({ ok: false, kind: "invalid" });
     expect(parseDataLayerMessage({ ...valid["ask-expert"], expert: "Adr" })).toMatchObject({ ok: false, kind: "invalid" });
-    expect(parseOfficeServerMessage({ ...valid.hosting, listed: ["a".repeat(64)] })).toMatchObject({ ok: false, kind: "invalid" });
+    expect(parseOfficeServerMessage({ ...valid["expert-deleted"], key: "a".repeat(64) })).toMatchObject({ ok: false, kind: "invalid" });
   });
 
-  test("a subject is 1 to MAX_EXPERT_SUBJECT_LENGTH characters once trimmed, in a listing and in rights", () => {
+  test("a subject is 1 to MAX_EXPERT_SUBJECT_LENGTH characters once trimmed, in a definition and in rights", () => {
     const right = valid["expert-rights"].experts[0]!;
-    expect(listing([{ ...expertListing, subject: "x".repeat(MAX_EXPERT_SUBJECT_LENGTH) }])).toMatchObject({ ok: true });
+    expect(definition({ subject: "x".repeat(MAX_EXPERT_SUBJECT_LENGTH) })).toMatchObject({ ok: true });
     expect(rights([{ ...right, subject: "x".repeat(MAX_EXPERT_SUBJECT_LENGTH) }])).toMatchObject({ ok: true });
     for (const subject of ["   ", "x".repeat(MAX_EXPERT_SUBJECT_LENGTH + 1)]) {
-      expect(listing([{ ...expertListing, subject }])).toMatchObject({ ok: false, kind: "invalid" });
+      expect(definition({ subject })).toMatchObject({ ok: false, kind: "invalid" });
       expect(rights([{ ...right, subject }])).toMatchObject({ ok: false, kind: "invalid" });
     }
   });
 
-  test("a listing names each expert once, and lists at most MAX_EXPERTS", () => {
-    const result = listing([expertListing, { ...expertListing, state: "starting" }]);
-    expect(result).toMatchObject({ ok: false, kind: "invalid" });
-    expect(!result.ok && result.error).toContain("experts[1].name");
-    const many = Array.from({ length: MAX_EXPERTS + 1 }, (_, i) => ({ ...expertListing, name: `expert-${i}` }));
-    expect(listing(many.slice(0, MAX_EXPERTS))).toMatchObject({ ok: true });
-    expect(listing(many)).toMatchObject({ ok: false, kind: "invalid" });
-    expect(rights(many.map(({ name }) => ({ ...valid["expert-rights"].experts[0], name })))).toMatchObject({ ok: false, kind: "invalid" });
+  test("a session is told of at most MAX_EXPERTS experts", () => {
+    const many = Array.from({ length: MAX_EXPERTS + 1 }, (_, i) => ({ ...valid["expert-rights"].experts[0], name: `expert-${i}` }));
+    expect(rights(many.slice(0, MAX_EXPERTS))).toMatchObject({ ok: true });
+    expect(rights(many)).toMatchObject({ ok: false, kind: "invalid" });
   });
 
-  test("a runner with no experts, and a session that may ask none, say so with empty lists", () => {
+  test("a session that may ask no expert, an office with no expert records and a computer with no instances say so with empty lists", () => {
     for (const [message, parse] of [
-      [{ ...valid.experts, experts: [] }, parseDataLayerMessage],
       [{ ...valid["expert-rights"], experts: [] }, parseOfficeServerMessage],
-      [{ ...valid.hosting, listed: [] }, parseOfficeServerMessage],
+      [{ ...valid["expert-directory"], experts: [] }, parseOfficeServerMessage],
+      [{ ...valid["expert-instance-states"], instances: [] }, parseDataLayerMessage],
     ] as const)
       expect(parse(message)).toEqual({ ok: true, message });
   });
 
-  test("an expert's answer is 1 to MAX_EXPERT_ANSWER_LENGTH characters, with a full commit hash and a branch", () => {
-    const reply = valid["reply answer-expert"];
-    expect(parseDataLayerMessage({ ...reply, answer: "x".repeat(MAX_EXPERT_ANSWER_LENGTH) })).toMatchObject({ ok: true });
-    for (const wrong of [{ answer: "" }, { answer: "x".repeat(MAX_EXPERT_ANSWER_LENGTH + 1) }, { commit: undefined }, { branch: "" }]) {
-      expect(parseDataLayerMessage({ ...reply, ...wrong })).toMatchObject({ ok: false, kind: "invalid" });
-    }
-  });
-
   test("an expert question is 1 to MAX_QUESTION_LENGTH characters once trimmed, always with a key and whether it blocks", () => {
     const ask = valid["ask-expert"];
-    const request = valid["request answer-expert"];
     expect(parseDataLayerMessage({ ...ask, question: "x".repeat(MAX_QUESTION_LENGTH) })).toMatchObject({ ok: true });
     for (const question of ["   ", "x".repeat(MAX_QUESTION_LENGTH + 1)]) {
       expect(parseDataLayerMessage({ ...ask, question })).toMatchObject({ ok: false, kind: "invalid" });
-      expect(parseOfficeServerMessage({ ...request, question })).toMatchObject({ ok: false, kind: "invalid" });
     }
     for (const wrong of [{ key: undefined }, { key: "" }, { key: "x".repeat(101) }, { blocking: undefined }]) {
       expect(parseDataLayerMessage({ ...ask, ...wrong })).toMatchObject({ ok: false, kind: "invalid" });
-    }
-    for (const wrong of [{ asker: "" }, { blocking: undefined }, { from: { name: "Sam" } }]) {
-      expect(parseOfficeServerMessage({ ...request, ...wrong })).toMatchObject({ ok: false, kind: "invalid" });
-    }
-  });
-
-  test("an answer-expert refusal names why the host won't answer, and a cap's limit is above 0", () => {
-    const refusal = valid["refusal of an answer-expert"];
-    for (const expert of [{ code: "EXPERT_FORK_FAILED" }, { code: "EXPERT_UNKNOWN" }, { code: "EXPERT_CAP", cap: "asker-open", limit: 3 }, { code: "EXPERT_CAP", cap: "expert-tokens", limit: 2000000, frees: "2026-11-18T10:00:00+01:00" }]) {
-      expect(parseDataLayerMessage({ ...refusal, expert })).toEqual({ ok: true, message: { ...refusal, expert } });
-    }
-    for (const expert of [{ code: "EXPERT_DROPPED" }, { code: "EXPERT_CAP", cap: "asker-day" }, { code: "EXPERT_CAP", cap: "asker-day", limit: 0 }, { code: "EXPERT_CAP", cap: "asker-day", limit: 3, frees: "tomorrow" }]) {
-      expect(parseDataLayerMessage({ ...refusal, expert })).toMatchObject({ ok: false, kind: "invalid" });
     }
   });
 
@@ -1080,6 +1103,81 @@ describe("experts", () => {
   test("a session that asks experts says so with true, and never with false", () => {
     expect(parseDataLayerMessage({ ...valid.full, facts: { ...facts, session: { ...facts.session, asksExperts: true } } })).toMatchObject({ ok: true });
     expect(parseDataLayerMessage({ ...valid.full, facts: { ...facts, session: { ...facts.session, asksExperts: false } } })).toMatchObject({ ok: false, kind: "invalid" });
+  });
+});
+
+describe("expert records and instances", () => {
+  test("a directory, and a computer's instance states, name each key once, and at most MAX_EXPERT_RECORDS", () => {
+    const directory = (experts: unknown[]) => parseOfficeServerMessage({ ...valid["expert-directory"], experts });
+    const states = (instances: unknown[]) => parseDataLayerMessage({ ...valid["expert-instance-states"], instances });
+    for (const [result, path] of [
+      [directory([expertDirectoryEntry, { ...expertDirectoryEntry, expertRecordId: pairingRecordId }]), "experts[1].key"],
+      [states([expertInstance, { ...expertInstance, expertRecordId: pairingRecordId, state: "failed", failure: { why: "key-used-here" } }]), "instances[1].key"],
+    ] as const) {
+      expect(result).toMatchObject({ ok: false, kind: "invalid" });
+      expect(!result.ok && result.error).toContain(path);
+    }
+    const keys = Array.from({ length: MAX_EXPERT_RECORDS + 1 }, (_, i) => `expert-${i}`);
+    expect(directory(keys.slice(0, MAX_EXPERT_RECORDS).map((key) => ({ ...expertDirectoryEntry, key })))).toMatchObject({ ok: true });
+    expect(directory(keys.map((key) => ({ ...expertDirectoryEntry, key })))).toMatchObject({ ok: false, kind: "invalid" });
+    expect(states(keys.slice(0, MAX_EXPERT_RECORDS).map((key) => ({ ...expertInstance, key })))).toMatchObject({ ok: true });
+    expect(states(keys.map((key) => ({ ...expertInstance, key })))).toMatchObject({ ok: false, kind: "invalid" });
+  });
+
+  test("a definition never names a folder on one computer: its project has a remote, whatever the case of local:", () => {
+    const local = { id: "local:sevengill/C:/w/isoplan", name: "isoplan" };
+    for (const project of [local, { ...local, id: "LOCAL:sevengill/C:/w/isoplan" }]) {
+      for (const result of [
+        parseDataLayerMessage({ ...valid["expert-definition"], definition: { ...expertDefinition, project } }),
+        parseOfficeServerMessage({ ...valid["expert-record"], definition: { ...expertDefinition, project } }),
+      ]) {
+        expect(result).toMatchObject({ ok: false, kind: "invalid" });
+        expect(!result.ok && result.error).toContain("definition.project");
+      }
+    }
+  });
+
+  test("the relay's messages no longer parse (0.17.0): experts, hosting, expert-senior and answer-expert; an older runner's hello still parses, its experts dropped", () => {
+    const question = "May a session's title leave the machine?";
+    for (const result of [
+      parseDataLayerMessage({ type: "experts", v, experts: [{ name: "adr-0004", project: isoplan, subject: expertDefinition.subject, state: "ready" }] }),
+      parseDataLayerMessage({ type: "expert-senior", v, id: "expert-x-0123456789-a1b2c3" }),
+      parseDataLayerMessage({ type: "reply", v, id: "expert-x-0123456789-a1b2c3", kind: "answer-expert", answer: "Yes.", commit, branch: "main" }),
+      parseOfficeServerMessage({ type: "hosting", v, listed: ["adr-0004"] }),
+      parseOfficeServerMessage({ type: "request", v, id: "expert-x-0123456789-a1b2c3", kind: "answer-expert", expert: "adr-0004", questionId: "x-0123456789", question, blocking: false, from: sam, asker: "claude-code:s2" }),
+    ]) {
+      expect(result).toMatchObject({ ok: false, kind: "invalid" });
+    }
+    const { expertInstances: _, ...older } = valid["runner that keeps expert instances"];
+    expect(parseDataLayerMessage({ ...older, experts: true })).toEqual({ ok: true, message: older });
+  });
+
+  test("an asked may end EXPERT_NOT_SET_UP, or EXPERT_QUEUED from an office before 0.17.0, and never EXPERT_QUESTION_HELD", () => {
+    const { answer: _, commit: __, branch: ___, ...asked } = valid["asked of an expert"];
+    const dropped = { ...asked, state: "dropped", note: "The Adr 0004 Expert isn't set up on this computer yet." };
+    for (const code of ["EXPERT_NOT_SET_UP", "EXPERT_QUEUED"]) expect(parseOfficeServerMessage({ ...dropped, code })).toEqual({ ok: true, message: { ...dropped, code } });
+    const result = parseOfficeServerMessage({ ...dropped, code: "EXPERT_QUESTION_HELD" });
+    expect(result).toMatchObject({ ok: false, kind: "invalid" });
+    expect(!result.ok && result.error).toContain("code");
+  });
+
+  test("a failed proof sends the fork's answer, 1 to MAX_EXPERT_ANSWER_LENGTH characters, or that it was held: exactly one of the two", () => {
+    const failed = valid["expert-proof-failed"];
+    expect(parseDataLayerMessage({ ...failed, answer: "x".repeat(MAX_EXPERT_ANSWER_LENGTH) })).toMatchObject({ ok: true });
+    for (const wrong of [{ answerHeld: true }, { answer: undefined }, { answer: "" }, { answer: "x".repeat(MAX_EXPERT_ANSWER_LENGTH + 1) }]) {
+      expect(parseDataLayerMessage({ ...failed, ...wrong })).toMatchObject({ ok: false, kind: "invalid" });
+    }
+  });
+
+  test("a publish refused as edited-elsewhere carries the record's definition, for the runner to write; the other refusals need none", () => {
+    const { definition: _, ...withoutDefinition } = valid["expert-definition-result edited-elsewhere"];
+    const result = parseOfficeServerMessage(withoutDefinition);
+    expect(result).toMatchObject({ ok: false, kind: "invalid" });
+    expect(!result.ok && result.error).toContain("definition");
+    for (const reason of ["key-taken", "not-owner", "project-not-in-an-office", "deleted"]) {
+      const refused = { ...valid["expert-definition-result key-taken"], reason };
+      expect(parseOfficeServerMessage(refused)).toEqual({ ok: true, message: refused });
+    }
   });
 });
 
@@ -1111,7 +1209,7 @@ describe("expert creation suggestions", () => {
     }
   });
 
-  test("an area names 1 to MAX_AREA_PATHS paths, in an expert creation suggestion and in create-expert-from-suggestion; a listing's at most MAX_AREA_PATHS", () => {
+  test("an area names 1 to MAX_AREA_PATHS paths, in an expert creation suggestion and in create-expert-from-suggestion; an expert's definition 0 to MAX_AREA_PATHS", () => {
     const paths = (n: number) => Array.from({ length: n }, (_, i) => `packages/p${i}`);
     for (const [parse, make] of [
       [parseDataLayerMessage, (area: string[]) => ({ ...expertCreationSuggestion, area })],
@@ -1120,9 +1218,9 @@ describe("expert creation suggestions", () => {
       expect(parse(make(paths(MAX_AREA_PATHS)))).toMatchObject({ ok: true });
       for (const n of [0, MAX_AREA_PATHS + 1]) expect(parse(make(paths(n)))).toMatchObject({ ok: false, kind: "invalid" });
     }
-    const listing = (areas: string[]) => parseDataLayerMessage({ ...valid.experts, experts: [{ ...expertListing, areas }] });
-    expect(listing([])).toMatchObject({ ok: true });
-    expect(listing(paths(MAX_AREA_PATHS + 1))).toMatchObject({ ok: false, kind: "invalid" });
+    const definition = (areas: string[]) => parseDataLayerMessage({ ...valid["expert-definition"], definition: { ...expertDefinition, areas } });
+    expect(definition([])).toMatchObject({ ok: true });
+    expect(definition(paths(MAX_AREA_PATHS + 1))).toMatchObject({ ok: false, kind: "invalid" });
   });
 
   test("an expert creation suggestion's id keeps to what a link can carry, wherever it is named", () => {
