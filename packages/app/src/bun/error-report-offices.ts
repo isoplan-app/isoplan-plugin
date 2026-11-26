@@ -3,7 +3,8 @@
 // address to another computer, each with this computer's pairing token for it. The token is the
 // one /isoplan:repos uses (packages/mod/src/repos/repos.ts commandPairing): the kept one while it is
 // current, else one renewed with the credential and kept for every process. It never pairs the
-// computer nor drops a credential; an office it holds no credential for gets no report.
+// computer nor drops a credential; an office it holds no credential for gets the report with no
+// token, which only an office with sign-in off, on this computer, takes.
 
 import fs from "node:fs/promises";
 import path from "node:path";

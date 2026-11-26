@@ -1,6 +1,9 @@
-// The desktop app's errors, reported to every office this computer is paired with (isoplan-app#375,
-// ADR 0004): POST <office>/data-layer/errors, with this computer's pairing token for that office,
-// as the office's list of repos is asked for (packages/mod/src/data-layer/approved.ts). The body is
+// The desktop app's errors, reported to every office this computer is paired with, and to one with
+// sign-in off on this computer (isoplan-app#375, ADR 0004): POST <office>/data-layer/errors, with this computer's pairing token for that office,
+// as the office's list of repos is asked for (packages/mod/src/data-layer/approved.ts). An office
+// this computer holds no pairing for is sent the report with no token, as that list is asked for:
+// an office with sign-in off takes it from its own machine, and one with sign-in on answers 401, and
+// the report is dropped without a word, as this computer was never paired with it. The body is
 // { message, stack?, release, os }: what error-report-scrub.ts leaves of the error, with every match
 // of the plugin's secret scan cut out (packages/mod/src/runner/scan.ts, E8), the app's version and
 // the computer's system. While the secret patterns can't be read nothing is sent.
@@ -23,7 +26,7 @@ export const osOf = (platform: string): ReportOs => (platform === "win32" ? "win
 /** The most of `release` an office keeps. */
 const RELEASE_MAX = 40;
 
-/** One office the reports may go to, and this computer's pairing token for it: undefined while it isn't paired, null once its pairing has ended. */
+/** One office the reports may go to, and this computer's pairing token for it: undefined while it isn't paired (the report goes without one), null once its pairing has ended. */
 export interface ReportOffice {
   /** Its data-layer address, ws:// or wss://. */
   server: string;
@@ -75,17 +78,17 @@ export function createErrorReports({ release, os, who, patterns, offices, log, f
     let answer: number | string;
     try {
       const token = await tokenOf(office);
-      if (token === undefined) return;
       if (token === null) return tell(server, `the app's error reports aren't sent to ${server}: it says this computer's pairing with it has ended`);
       const response = await send(httpUrl(server, "/errors"), {
         method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+        headers: { "content-type": "application/json", ...(token !== undefined && { authorization: `Bearer ${token}` }) },
         body,
         // The token never follows a redirect to another address.
         redirect: "error",
         signal: AbortSignal.timeout(15000),
       });
       answer = response.status;
+      if (token === undefined && answer === 401) return;
     } catch (err) {
       answer = text(err);
     }

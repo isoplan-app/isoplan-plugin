@@ -31,8 +31,10 @@ function reporter(options: Partial<ErrorReportsOptions> = {}) {
   const sent: { url: string; init: RequestInit }[] = [];
   const logs: string[] = [];
   let status: number | Error = 204;
+  // Both offices sign people in, so a call without a token is answered 401.
   const fetch: ReportFetch = async (url, init) => {
     sent.push({ url, init });
+    if (!(init.headers as Record<string, string>).authorization) return { status: 401 };
     if (status instanceof Error) throw status;
     return { status };
   };
@@ -52,21 +54,37 @@ function reporter(options: Partial<ErrorReportsOptions> = {}) {
 }
 
 test("an error goes to each paired office with its token, scrubbed and with secrets cut", async () => {
-  const { reports, sent } = reporter();
+  const { reports, sent, logs } = reporter();
   await reports.report({ message: "Error: key AKIAIOSFODNN7EXAMPLE for adamr@example.com", stack: "Error: key\n    at run (C:\\Users\\adamr\\w\\take.ts:120:5)" });
-  // B isn't paired, so it gets nothing.
-  expect(sent).toHaveLength(1);
-  const [{ url, init }] = sent as [{ url: string; init: RequestInit }];
-  expect(url).toBe("https://a.example.com/data-layer/errors");
+  expect(sent.map(({ url }) => url).sort()).toEqual(["https://a.example.com/data-layer/errors", "https://b.example.com/data-layer/errors"]);
+  const { init } = sent.find(({ url }) => url.startsWith("https://a."))!;
+  const toB = sent.find(({ url }) => url.startsWith("https://b."))!;
   expect(init).toMatchObject({ method: "POST", redirect: "error", headers: { "content-type": "application/json", authorization: "Bearer token-a" } });
   expect(JSON.parse(String(init.body))).toEqual({ message: "Error: key [secret cut] for <email>", stack: "at run (take.ts:120:5)", release: "0.1.0", os: "windows" });
+  // B isn't paired, so it is sent no token, answers 401, and the report is dropped without a word.
+  expect(toB.init.headers).toEqual({ "content-type": "application/json" });
+  expect(logs).toEqual([]);
+});
+
+test("an office with sign-in off, which takes reports from its own machine, gets them with no token", async () => {
+  const sent: { url: string; init: RequestInit }[] = [];
+  const { reports, logs } = reporter({
+    offices: async () => [{ server: "ws://localhost:8080/data-layer", token: async () => undefined }],
+    fetch: async (url, init) => (sent.push({ url, init }), { status: 204 }),
+  });
+  await reports.report({ message: "Error: one" });
+  expect(sent).toHaveLength(1);
+  expect(sent[0]!.url).toBe("http://localhost:8080/data-layer/errors");
+  expect(sent[0]!.init.headers).toEqual({ "content-type": "application/json" });
+  expect(logs).toEqual([]);
 });
 
 test("the same error again within the minute isn't sent", async () => {
   const { reports, sent } = reporter();
   await reports.report({ message: "Error: once" });
   await reports.report({ message: "Error: once" });
-  expect(sent).toHaveLength(1);
+  // Once to each office.
+  expect(sent).toHaveLength(2);
 });
 
 test("nothing is sent while the secret patterns can't be read, and the log says so once", async () => {
@@ -82,11 +100,11 @@ test("a report an office doesn't take is dropped and logged once, never sent aga
   answer(404);
   await reports.report({ message: "Error: one" });
   await reports.report({ message: "Error: two" });
-  expect(sent).toHaveLength(2);
+  expect(sent).toHaveLength(4);
   expect(logs).toEqual([`${A} doesn't take the app's error reports yet (it answered 404), so they are dropped until it is updated`]);
   answer(new Error("fetch failed"));
   await expect(reports.report({ message: "Error: three" })).resolves.toBeUndefined();
-  expect(sent).toHaveLength(3);
+  expect(sent).toHaveLength(6);
   expect(logs.at(-1)).toBe(`couldn't send the app's error report to ${A}, so it is dropped: fetch failed`);
 });
 
