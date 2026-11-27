@@ -94,7 +94,7 @@ import { alive, HOLD_OFF_MS, lockHolder, lockPath, readLock, refreshLock, releas
 import { approvedPath, cachedRepos, createApproved, createSessionGate, type Approved, type Dormancy, type SessionGate } from "./approved.js";
 import { forOffice } from "./attribution.js";
 import { candidatesOf, inRepos } from "./home.js";
-import { createClaudeCode, type FileReading, type SourceRead } from "./claude-code.js";
+import { createClaudeCode, type FileReading, type FirstMessage, type SourceRead } from "./claude-code.js";
 import { loadConfig, officesOf, type Config, type Office } from "./config.js";
 import { detachedStop } from "./detached.js";
 import { createGit, pathKey, type Where } from "./git.js";
@@ -235,6 +235,8 @@ export interface ReportSessionOptions {
   areas?: (seen: SessionAreas) => void;
   /** Whether the person's message corrected the agent, the runner's local model's word, or null while unknown (claude-code.ts ReadInput). */
   corrected?: (key: string, text: string, reply: string | null) => boolean | null;
+  /** Each pass, once per office that takes the session's repo: its person's first messages, for the runner's offers to make an employee (isoplan-app#341). Never sent. */
+  startedByHand?: (s: { server: string; bare: string; cwd: string; project: Project; at: number; messages: FirstMessage[] }) => void;
 }
 
 /** How it ended: why, as its log says; and without a hooks module, a hold-off for the runner to keep. */
@@ -827,6 +829,18 @@ async function reporting(o: ReportSessionOptions, c: Containment): Promise<Ended
           o.areas({ server: run.office.server, session: facts.session.id, bare: sessionId, project: run.home, checkout: facts.session.checkout ?? cwd, window: contextWindow, model, areas, said: read.said ?? (async () => []), readings });
         } catch (err) {
           emit({ type: "log", text: `couldn't look at this session's areas for an expert creation suggestion: ${await c.message(err)}` });
+        }
+      }
+    }
+    // The person's first messages, for the runner's offers to make an employee: only where an office takes the repo.
+    const first = read.firstMessages;
+    if (o.startedByHand && first?.messages.length) {
+      for (const run of taking) {
+        if (!run.home || !run.gate.current()) continue;
+        try {
+          o.startedByHand({ server: run.office.server, bare: sessionId, cwd, project: run.home, at: first.at, messages: first.messages });
+        } catch (err) {
+          emit({ type: "log", text: `couldn't look at how this session started for an offer to make an employee: ${await c.message(err)}` });
         }
       }
     }

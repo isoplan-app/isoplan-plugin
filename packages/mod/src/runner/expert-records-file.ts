@@ -34,6 +34,8 @@ export interface ExpertRecordOnOneServer {
   lastResult?: PublishResult;
   setUp?: { expertRecordId: string; startedAt: number; failed?: { why: "clone" | "other"; detail: string } };
   proofFailed?: { revision: number; answer?: string; answerHeld?: true; sent: boolean };
+  /** An employee's (isoplan-app#341): the definition its refusal was for, so the same one isn't sent again until its job file changes. */
+  refusedFor?: string;
 }
 
 export interface ExpertRecordsFile {

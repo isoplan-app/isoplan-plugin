@@ -16,6 +16,7 @@ import type { RunnerExpertRecordMessage, ServerExpertRecordMessage } from "../da
 import type { DataLayerLine } from "../lines.js";
 import { approvedPath } from "../data-layer/approved.js";
 import { BASE, FAKE_CLAUDE, fakeGit, type Rule } from "./expert-fixture.js";
+import type { EmployeeTies } from "./employee-ties.js";
 import { createExpertInstanceSetUpOffers } from "./expert-instance-set-up-offer.js";
 import { createExpertInstances } from "./expert-instance.js";
 import { createExpertQuestionsAskedHere, type ExpertQuestionsAskedHereSettings } from "./expert-questions-asked-here.js";
@@ -27,6 +28,8 @@ import { createExperts } from "./experts.js";
 import { loadPatterns } from "./scan.js";
 import { createCheckBeforeItLeaves } from "./what-was-learned-before-it-leaves.js";
 import { createWhatWasLearnedLink, type WhatWasLearnedLink } from "./what-was-learned-link.js";
+import { bindWhatEmployeesLearned, whatWasLearnedOfExpertsAndEmployees } from "./what-was-learned-of-employees.js";
+import type { Employees } from "./employees.js";
 
 export const SERVER = "ws://127.0.0.1:4799/data-layer";
 export const OTHER_SERVER = "ws://127.0.0.1:4798/data-layer";
@@ -69,6 +72,11 @@ export interface ComputerOptions {
   projectOf?: (folder: string) => Project | null | undefined;
   /** How often the links look again: the record link's listing, and what instances learned waiting. */
   checkMs?: number;
+  /** This computer's employees' ties, given to each record link as the runner gives them (isoplan-app#341). */
+  employeeTies?: EmployeeTies;
+  onEmployeesChange?: (listener: () => void) => void;
+  /** This computer's employees, whose records' what-was-learned the links carry as main.ts has them: with employeeTies. */
+  employees?: Employees;
 }
 
 export async function computer(o: ComputerOptions = {}) {
@@ -185,6 +193,8 @@ export async function computer(o: ComputerOptions = {}) {
       log,
       send: (m) => (up.get(server) ? (sent.get(server)!.push(m), true) : false),
       checkMs: o.checkMs ?? 3600000,
+      ...(o.employeeTies && { employeeTies: o.employeeTies }),
+      ...(o.onEmployeesChange && { onEmployeesChange: o.onEmployeesChange }),
     });
     link.onDirectory(() => offers.afterDirectory(server));
     links.set(server, link);
@@ -192,10 +202,12 @@ export async function computer(o: ComputerOptions = {}) {
   const check = createCheckBeforeItLeaves({ secretPatterns: async () => [{ name: "test secret", regex: /SECRET/ }], personalDataPatterns: () => loadPatterns(path.join(modDir, "personal-data-patterns.json"), path.join(isoplanDir, "personal-data-patterns.json"), log) });
   const learnedLinks = new Map<string, WhatWasLearnedLink>();
   for (const server of servers) {
-    const link = createWhatWasLearnedLink({ server, recordLink: links.get(server)!, instances, whatWasLearned: (key) => experts.whatWasLearned(key), health: (key) => experts.health(key), check, send: (m) => (up.get(server) ? (sent.get(server)!.push(m), true) : false), log, checkMs: o.checkMs ?? 3600000 });
+    const sources = o.employees && o.employeeTies ? whatWasLearnedOfExpertsAndEmployees({ instances, experts, employees: o.employees, employeeTies: o.employeeTies }) : { instances, whatWasLearned: (key: string) => experts.whatWasLearned(key), health: (key: string) => experts.health(key) };
+    const link = createWhatWasLearnedLink({ server, recordLink: links.get(server)!, ...sources, check, send: (m) => (up.get(server) ? (sent.get(server)!.push(m), true) : false), log, checkMs: o.checkMs ?? 3600000 });
     links.get(server)!.onWhatWasLearned((m) => link.take(m));
     learnedLinks.set(server, link);
   }
+  if (o.employees && o.employeeTies) bindWhatEmployeesLearned(o.employees, o.employeeTies, servers, learnedLinks);
   const rights = createExpertRightsOnThisComputer({ instances, store, person: () => account.name, projectOf: (server, folder) => home(folder, takes(server) ?? new Set()), send: (session, line) => hooked(session)?.send(line), log });
   const asking = createExpertQuestionsAskedHere({
     file: path.join(isoplanDir, "runner", "expert-questions-asked-here.json"),

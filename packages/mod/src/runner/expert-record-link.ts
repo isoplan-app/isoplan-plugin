@@ -29,7 +29,8 @@
 
 import { ExpertDefinitionSchema, ExpertInstanceStatesMessageSchema, PROTOCOL_VERSION, type ExpertDefinition, type ExpertDirectoryEntry, type ExpertDirectoryMessage, type ExpertInstanceStatesMessage, type ExpertQuestionsAskedOnYourOtherComputersMessage, type ExpertSetUpOfferEndedMessage, type Project } from "@isoplan/protocol";
 import type { Approved } from "../data-layer/approved.js";
-import type { RunnerExpertRecordMessage, ServerExpertRecordMessage } from "../data-layer/link.js";
+import type { RunnerExpertRecordMessage, ServerEmployeeMessage, ServerExpertRecordMessage } from "../data-layer/link.js";
+import type { EmployeeTies } from "./employee-ties.js";
 import { definitionOf, sameDefinition } from "./expert-instance-file.js";
 import type { ExpertInstances } from "./expert-instance.js";
 import type { ExpertRecordsPerOffice } from "./expert-records-per-office.js";
@@ -54,6 +55,10 @@ export interface ExpertRecordLinkOptions {
   /** Sends on the link while it is up; false when it isn't. */
   send: (m: RunnerExpertRecordMessage) => boolean;
   checkMs: number;
+  /** This computer's employees' ties to records (protocol 0.19.0): their jobs published, their rows listed. */
+  employeeTies?: EmployeeTies;
+  /** Told whenever an employee here changes, so its row in the listing does. */
+  onEmployeesChange?: (listener: () => void) => void;
 }
 
 export interface ExpertRecordLink {
@@ -80,16 +85,19 @@ export interface ExpertRecordLink {
   onListingSent(listener: () => void): void;
   /** Given the office's messages of what instances learn (protocol 0.18.0). */
   onWhatWasLearned(listener: (m: WhatWasLearnedServerMessage) => void): void;
+  /** Given the office's messages of employees (protocol 0.19.0). */
+  onEmployeeMessage(listener: (m: ServerEmployeeMessage) => void): void;
 }
 
-// A definition's fields, each checked for secrets, the first that matches named.
+// A definition's fields, each checked for secrets, the first that matches named. Only this
+// computer's expert files are published, and each has its proof (protocol 0.19.0).
 const FIELDS: [string, (d: ExpertDefinition) => string][] = [
   ["key", (d) => d.key],
   ["subject", (d) => d.subject],
   ["model", (d) => d.model],
   ["areas", (d) => d.areas.join("\n")],
-  ["proof.question", (d) => d.proof.question],
-  ["proof.answer", (d) => d.proof.answer],
+  ["proof.question", (d) => d.proof!.question],
+  ["proof.answer", (d) => d.proof!.answer],
 ];
 
 export function createExpertRecordLink(o: ExpertRecordLinkOptions): ExpertRecordLink {
@@ -109,6 +117,7 @@ export function createExpertRecordLink(o: ExpertRecordLinkOptions): ExpertRecord
   const othersListeners: (() => void)[] = [];
   const listingListeners: (() => void)[] = [];
   const learnedListeners: ((m: WhatWasLearnedServerMessage) => void)[] = [];
+  const employeeListeners: ((m: ServerEmployeeMessage) => void)[] = [];
   let stopped = false;
   let chain: Promise<void> = Promise.resolve();
   let saidNoList = false;
@@ -154,6 +163,8 @@ export function createExpertRecordLink(o: ExpertRecordLinkOptions): ExpertRecord
       return o.log(`couldn't tell which of this computer's experts ${server} takes (${(err as Error).message}), so what it was last told stands`);
     }
     if (stopped || mine !== connection) return;
+    // Each employee of this computer tied to this server's records, only to a server that takes employees (protocol 0.19.0).
+    if (o.employeeTies && directory?.employees) instances = [...instances, ...o.employeeTies.listingFor(server)];
     const listing: ExpertInstanceStatesMessage = { type: "expert-instance-states", v: PROTOCOL_VERSION, instances };
     const text = JSON.stringify(instances);
     if (text !== lastListing) {
@@ -215,6 +226,18 @@ export function createExpertRecordLink(o: ExpertRecordLinkOptions): ExpertRecord
           awaitingResult.set(key, definition);
         }
       }
+      // Employees' jobs, checked there, only on a connection whose directory said `employees` (protocol 0.19.0).
+      if (o.employeeTies && directory?.employees) {
+        for (const { definition, basedOn } of await o.employeeTies.definitionsFor(server)) {
+          const text = JSON.stringify(definition);
+          if (sentDefinitions.get(definition.key) === text) continue;
+          if (stopped || mine !== connection) return;
+          if (o.send({ type: "expert-definition", v: PROTOCOL_VERSION, definition, ...(basedOn && { basedOn }) })) {
+            sentDefinitions.set(definition.key, text);
+            awaitingResult.set(definition.key, definition);
+          }
+        }
+      }
     } finally {
       q.done();
     }
@@ -241,6 +264,8 @@ export function createExpertRecordLink(o: ExpertRecordLinkOptions): ExpertRecord
 
   o.experts.onChange(() => gate && resync(false));
   o.instances.onChange(() => gate && resync(false));
+  o.employeeTies?.onChange(() => gate && resync(false));
+  o.onEmployeesChange?.(() => gate && resync(false));
   // A key deleted here is a new expert from its next file on: that goes even with the definition sent before.
   o.instances.onDeleted((key) => void sentDefinitions.delete(key));
   const timer = setInterval(() => gate && resync(false), o.checkMs);
@@ -265,6 +290,7 @@ export function createExpertRecordLink(o: ExpertRecordLinkOptions): ExpertRecord
         const mine = connection;
         queue(async () => {
           await o.instances.directory(server, m);
+          await o.employeeTies?.directory(server, m);
           if (first && mine === connection) {
             o.instances.afterDirectory(server);
             for (const [expertRecordId, key] of wanted) sendNow({ type: "expert-record-wanted", v: PROTOCOL_VERSION, key, expertRecordId });
@@ -276,6 +302,8 @@ export function createExpertRecordLink(o: ExpertRecordLinkOptions): ExpertRecord
       }
       case "expert-record":
         wanted.delete(m.expertRecordId);
+        // An employee's record changes only by its own publish from here.
+        if (o.employeeTies?.has(m.definition.key)) return;
         return queue(() => o.instances.record(server, m));
       case "expert-definition-result": {
         const sent = awaitingResult.get(m.key);
@@ -284,14 +312,24 @@ export function createExpertRecordLink(o: ExpertRecordLinkOptions): ExpertRecord
         if (m.outcome === "refused") sentDefinitions.set(m.key, JSON.stringify(sent));
         const mine = connection;
         return queue(async () => {
-          await o.instances.definitionResult(server, m, sent, entryOf(m.key));
+          if (sent.job && o.employeeTies) await o.employeeTies.definitionResult(server, m, sent);
+          else await o.instances.definitionResult(server, m, sent, entryOf(m.key));
           await sync(false, mine);
         });
       }
       case "expert-deleted":
-        return queue(() => o.instances.deleted(server, m));
+        // Each side acts only where its files are tied to that record.
+        return queue(async () => {
+          await o.instances.deleted(server, m);
+          await o.employeeTies?.deleted(server, m);
+        });
       case "set-up-expert-instance": {
         if (m.by.id !== o.account.id) return o.log(`${server} asked to set up expert ${m.key} for ${m.by.name || m.by.id}, not this runner's own account, so nothing starts`);
+        // An employee's key (keys can't clash on one computer): its owner's Try again grounds it again now.
+        if (o.employeeTies?.has(m.key)) {
+          if (o.employeeTies.heldOn(server, m.key) !== m.expertRecordId) return o.log(`${server} asked to ground employee ${m.key} again for a record this computer's isn't tied to, so nothing starts`);
+          return void o.employeeTies.setUpAgain(m.key);
+        }
         const entry = entryOf(m.key);
         if (!entry || entry.expertRecordId !== m.expertRecordId) return o.log(`${server} asked to set up expert ${m.key} from a record its directory doesn't list, so nothing starts`);
         if (o.instances.keyUsedHere(server, m.key, m.expertRecordId)) return o.log(`${server} asked to set up expert ${m.key}, but this computer has another expert with that key, so nothing starts`);
@@ -309,6 +347,13 @@ export function createExpertRecordLink(o: ExpertRecordLinkOptions): ExpertRecord
       case "expert-learned-wanted-after-refused":
         // In the record link's order, after the listing and record messages before it.
         return queue(async () => void learnedListeners.forEach((l) => l(m)));
+      case "employee-drafts-received":
+      case "employee-draft-decided":
+      case "offer-to-make-an-employee-ended":
+      case "offer-to-make-an-employee-job-wanted":
+      case "make-an-employee":
+        // Employees (protocol 0.19.0), in the same order: after the directory that opened them.
+        return queue(async () => void employeeListeners.forEach((l) => l(m)));
     }
   }
 
@@ -337,6 +382,7 @@ export function createExpertRecordLink(o: ExpertRecordLinkOptions): ExpertRecord
     onOtherComputers: (listener) => void othersListeners.push(listener),
     onListingSent: (listener) => void listingListeners.push(listener),
     onWhatWasLearned: (listener) => void learnedListeners.push(listener),
+    onEmployeeMessage: (listener) => void employeeListeners.push(listener),
   };
 }
 

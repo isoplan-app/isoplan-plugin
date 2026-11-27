@@ -1604,6 +1604,14 @@ const RUNNER_FILES = [
 	"prompts/expert-judge.md",
 	"prompts/correction.md",
 	"prompts/expert-draft.md",
+	"prompts/employee-grounding.md",
+	"prompts/employee-read.md",
+	"prompts/employee-grounding-what-it-learned.md",
+	"prompts/employee-run.md",
+	"prompts/employee-correction.md",
+	"prompts/employee-what-it-learned.md",
+	"prompts/expert-correction.md",
+	"prompts/employee-job-from-sessions.md",
 	"dist/connect.js",
 	"dist/runner.js"
 ];

@@ -45,6 +45,28 @@
     "setUpWithoutAsking": false,
     "questionsKeptHours": 144
   },
+  "employees": {
+    "promoteAtTokens": 80000,
+    "runContextTokens": 180000,
+    "runMinutes": 30,
+    "dayMinutes": 90,
+    "runTokens": 3000000,
+    "dayTokens": 8000000,
+    "draftsPerRun": 10,
+    "draftsWaitHours": 48,
+    "tryAgainAfterMinutes": 10,
+    "expertAnswerWaitMinutes": 5,
+    "whoWasContacted": "who-was-contacted.csv",
+    "whoWasContactedPushTries": 5,
+    "offerAfter": { "daysOfTheLastSeven": 4, "weeksRunning": 3 },
+    "jobFromSessionsModel": "sonnet",
+    "jobFromSessionsTimeoutSeconds": 120,
+    "sessionsAJobIsWrittenFrom": 5,
+    "jobFromSessionsTriedAgainAfterHours": 24,
+    "rememberStartsDays": 30,
+    "correctionsLearnedAtOnce": 10,
+    "makingWaitMinutes": 20
+  },
   "clonesFolder": "",
   "expertCreationSuggestions": {
     "readAgain": 3,

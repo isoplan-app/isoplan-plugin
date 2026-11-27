@@ -418,3 +418,29 @@ test("a catch-up still coming in pages as a question comes is waited for before 
     await c.close();
   }
 });
+
+test("a run's question: answered from this computer's instance with no session, its asker the employee in the instance's own ledger, not counted in the office's caps, its record naming the employee; past its wait, explore meanwhile; an employee's own entry is never an expert a session asks", async () => {
+  const RUN_ANSWERS: Rule[] = [{ kind: "fork", text: "Question ", reply: ANSWER }, ...BASE];
+  const tight = { ...ASKING, perPersonPerDay: 1 };
+  const c = await ready({ rules: RUN_ANSWERS }, tight);
+  try {
+    c.take({ ...directoryOf([entryOf(), entryOf({ key: "adams-outreach", expertRecordId: OTHER_RECORD, employee: true, yours: true })], tight), employees: true });
+    await settle();
+    const run = (n: number, waitMs = 20000) => c.asking.askForAnEmployeeRun({ employee: "adams-outreach", server: SERVER, run: `${n}1111111-1111-4111-8111-111111111111`, expert: "adr", question: "Where is it held?", waitMs });
+    const first = await run(1);
+    expect(first.text).toContain("Expert adr answered question");
+    expect(first.answer).toEqual({ question: "Where is it held?", answer: ANSWERED, files: [{ path: "src/relay.ts", commit: C1 }] });
+    await run(2);
+    // Two runs' questions, and the office's one a day still lets the session ask.
+    expect((await ask(c, "toolu_1")).text).toBe(answeredText({ ...about("toolu_1"), answer: ANSWERED, commit: C1, branch: "main" }));
+    const ledger = readJsonFile<{ room: string }[]>(c.file("experts", "adr", "ledger.json"));
+    expect(ledger.filter((e) => e.room === "employee:adams-outreach")).toHaveLength(2);
+    expect(c.of("expert-question").filter((q) => q.employee).at(-1)).toMatchObject({ key: "adr", session: "employee:adams-outreach", employee: "adams-outreach", state: "answered" });
+    // An employee's directory entry is never offered, set up or asked from a session.
+    expect((await ask(c, "toolu_2", { expert: "adams-outreach" })).code).toBe("EXPERT_UNKNOWN");
+    c.rules([{ kind: "fork", text: "Question ", reply: ANSWER, delayMs: 3000 }, ...BASE]);
+    expect((await run(3, 500)).text).toMatch(/the expert is still answering\. Explore this yourself meanwhile/);
+  } finally {
+    await c.close();
+  }
+});

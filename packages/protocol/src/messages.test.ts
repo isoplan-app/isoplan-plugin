@@ -1,11 +1,17 @@
 import { describe, expect, test } from "vitest";
 import {
   arrivalEntryId,
+  employeeDisplayName,
   expertDisplayName,
   MAX_AREA_PATH_LENGTH,
   MAX_AREA_PATHS,
   MAX_BRANCH_LENGTH,
+  MAX_CORRECTION_LENGTH,
   MAX_DETAIL_LENGTH,
+  MAX_DRAFT_LENGTH,
+  MAX_DRAFT_RECIPIENT_NAME_LENGTH,
+  MAX_DRAFT_SUBJECT_LENGTH,
+  MAX_DRAFTS_PER_RUN,
   MAX_DRIVE_ID_LENGTH,
   MAX_EXPERT_ANSWER_LENGTH,
   MAX_EXPERT_RECORDS,
@@ -188,6 +194,42 @@ const expertCreationSuggestion = {
 };
 const createExpertFromSuggestion = { type: "create-expert-from-suggestion", v, request: "make-x-0123456789", expertCreationSuggestionId: "o-4f9c2a", key: "pairing-tokens", subject: expertCreationSuggestion.subject, model: "sonnet", project: isoplan, area: ["packages/server/src/pairing", "docs/adr/0004-*.md"], proof: expertCreationSuggestion.proof, by: sam };
 const area = { folder: "packages/server/src/pairing", reads: 14, searches: 9, tokens: 36000, ms: 750000, corrections: 1 };
+const docs = { id: "github.com/isoplan-app/isoplan-docs", name: "isoplan-docs" };
+const outreachRecordId = "5d2e8f1a-3c4b-4a6d-9e7f-1b2c3d4e5f60";
+const run = "8c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f";
+const stoppedRun = "d4e6f8a0-2b3c-4d5e-af60-7b8c9d0e1f2a";
+const draftId = "2e4f6a8c-0b1d-4e3f-8a5b-7c9d1e3f5a7b";
+const otherDraftId = "a1b3c5d7-e9f0-4a2b-8c4d-6e8f0a2b4c6d";
+const offerId = "offer-7k2m9q";
+const job = {
+  brief: "Each run, find agencies that qualify and draft one email to one person at each.",
+  rules: ["One email per agency.", "Never guess what tools they use."],
+  documents: ["outreach/who-qualifies.md"],
+  examples: ["outreach/approved"],
+  schedule: { every: "weekday", at: "09:00" },
+  missedRunWindowMinutes: 720,
+  tools: ["Read", "Grep", "Glob", "Agent", "WebSearch", "WebFetch"],
+  experts: ["adams-writing", "lead-generation"],
+  draftsWaitHours: 48,
+  limits: { runMinutes: 30, dayMinutes: 90, runTokens: 3000000, dayTokens: 8000000, draftsPerRun: 10 },
+  whoWasContacted: "who-was-contacted.csv",
+};
+// The job a runner writes from its person's sessions leaves out the limits and the file of who was contacted, so their defaults apply.
+const { limits: _limits, whoWasContacted: _whoWasContacted, ...jobWrittenFromSessions } = job;
+const employeeDefinition = { key: "adams-outreach", project: docs, subject: "Drafts cold emails to agencies in Adam's voice.", model: "sonnet", promoteAtTokens: 80000, areas: [], job };
+const employeeDirectoryEntry = { key: "adams-outreach", expertRecordId: outreachRecordId, project: docs, owner: adam, yours: true, revision: 1, employee: true };
+const draft = {
+  id: draftId,
+  text: "Hi Ana, I'm Adam from Isoplan. ...",
+  subject: "Handoffs at Brightside",
+  to: { name: "Ana", address: "ana@brightside.example", organisation: "Brightside" },
+  askedExperts: ["adams-writing"],
+  expiresAt: "2026-10-22T09:00:00.000Z",
+};
+const endedRun = { run, scheduledFor: at, startedAt: at, endedAt: "2026-10-20T09:12:00.000Z", outcome: "ran", drafts: 8, heldBySecretCheck: 1, someoneElseHad: 1 };
+const employeeRuns = { key: "adams-outreach", expertRecordId: outreachRecordId, ended: [] };
+const decided = { type: "employee-draft-decided", v, key: "adams-outreach", expertRecordId: outreachRecordId, draft: draftId, by: adam, at };
+const decisionApplied = { type: "employee-draft-decision-applied", v, key: "adams-outreach", expertRecordId: outreachRecordId, draft: draftId };
 
 const valid = {
   hello: {
@@ -358,6 +400,34 @@ const valid = {
   "expert-creation-suggestion-ended made": { type: "expert-creation-suggestion-ended", v, id: "o-4f9c2a", why: "made", key: "pairing-tokens" },
   "expert-creation-suggestion-ended expired": { type: "expert-creation-suggestion-ended", v, id: "o-4f9c2a", why: "expired" },
   "expert-creation-suggestion-ended refused": { type: "expert-creation-suggestion-ended", v, id: "o-4f9c2a", why: "refused" },
+  "runner that runs employees": { type: "runner", v, account: adam, machine: { name: "sevengill" }, expertInstances: true, sharesWhatExpertInstancesLearn: true, employees: true },
+  "expert-directory that takes employees": { type: "expert-directory", v, experts: [expertDirectoryEntry, employeeDirectoryEntry], asking, sharesWhatExpertInstancesLearn: true, employees: true },
+  "expert-definition of an employee": { type: "expert-definition", v, definition: employeeDefinition },
+  "expert-record of an employee": { type: "expert-record", v, expertRecordId: outreachRecordId, revision: 1, owner: adam, yours: true, definition: employeeDefinition },
+  "expert-definition-result runs-elsewhere": { type: "expert-definition-result", v, key: "adams-outreach", outcome: "refused", reason: "runs-elsewhere", machineName: "sevengill" },
+  "expert-question asked by an employee's run": { type: "expert-question", v, id: "toolu_05", key: "adr-0004", expertRecordId, session: "employee:adams-outreach", employee: "adams-outreach", blocking: true, state: "answered", askedAt: at, endedAt: "2026-10-20T09:00:20.000Z" },
+  "expert-instance-learned by an employee": { type: "expert-instance-learned", v, key: "adams-outreach", expertRecordId: outreachRecordId, id: "c3d5e7f9-1a2b-4c3d-9e4f-5a6b7c8d9e0f", text: "Say why we write in the first line, then ask one question.", files: [], learnedAt: at },
+  "employee-runs": { type: "employee-runs", v, employees: [{ ...employeeRuns, running: { run: stoppedRun, scheduledFor: "2026-10-21T09:00:00.000Z", since: "2026-10-21T09:00:30.000Z" }, ended: [endedRun], nextRunAt: "2026-10-22T09:00:00.000Z" }] },
+  "employee-runs held back": { type: "employee-runs", v, employees: [{ ...employeeRuns, heldBack: { scheduledFor: "2026-10-21T09:00:00.000Z", draftsWaiting: 14 }, ended: [{ ...endedRun, run: stoppedRun, outcome: "stopped", limit: "context", drafts: 3 }, { ...endedRun, outcome: "failed", why: "Claude Code exited with code 1.", tryingAgainAt: "2026-10-20T09:22:00.000Z" }], whoWasContactedProblem: { detail: "remote: error: GH006: Protected branch update failed for refs/heads/main.", refused: true }, approvedTwice: [{ approvedAt: at, alreadyContactedBy: "Sam", at: "2026-10-18T15:00:00.000Z" }] }] },
+  "employee-runs of an employee whose job file is gone": { type: "employee-runs", v, employees: [{ ...employeeRuns, ended: [{ run, scheduledFor: at, endedAt: "2026-10-20T21:00:00.000Z", outcome: "missed", drafts: 0, heldBySecretCheck: 0, someoneElseHad: 0 }], jobFileGone: true }] },
+  "employee-drafts": { type: "employee-drafts", v, key: "adams-outreach", expertRecordId: outreachRecordId, run, drafts: [draft, { id: otherDraftId, text: "Hi Ben, ...", askedExperts: [], afterACorrection: true, expiresAt: draft.expiresAt }] },
+  "employee-draft-decision-applied": { ...decisionApplied, whoWasContacted: "marked" },
+  "employee-draft-decision-applied to someone another sender had": { ...decisionApplied, whoWasContacted: { alreadyContactedBy: "Sam", at, claimed: true } },
+  "employee-draft-decision-applied for a rejection": decisionApplied,
+  "employee-draft-decision-applied refused": { ...decisionApplied, refused: "unknown-draft" },
+  "offer-to-make-an-employee": { type: "offer-to-make-an-employee", v, id: offerId, rhythm: { kind: "days", days: 5 }, skill: "outreach", at },
+  "offer-to-make-an-employee on a weekly rhythm": { type: "offer-to-make-an-employee", v, id: offerId, rhythm: { kind: "weeks", weeks: 3 }, at },
+  "offer-to-make-an-employee-job": { type: "offer-to-make-an-employee-job", v, request: "job-x-0123456789", id: offerId, job: { key: "adams-outreach", subject: employeeDefinition.subject, project: docs, model: "sonnet", job: jobWrittenFromSessions } },
+  "offer-to-make-an-employee-job gone": { type: "offer-to-make-an-employee-job", v, request: "job-x-0123456789", id: offerId, gone: true },
+  "making-an-employee": { type: "making-an-employee", v, request: "make-x-0123456790", key: "adams-outreach", state: "setting-up-experts" },
+  "making-an-employee failed": { type: "making-an-employee", v, request: "make-x-0123456790", key: "adams-outreach", state: "failed", detail: "job.brief: it has an email address" },
+  "employee-drafts-received": { type: "employee-drafts-received", v, key: "adams-outreach", expertRecordId: outreachRecordId, run, kept: [draftId], refused: [{ id: otherDraftId, reason: "not-this-computer" }] },
+  "employee-draft-decided approved": { ...decided, decision: "approved" },
+  "employee-draft-decided rejected": { ...decided, decision: "rejected", correction: "Don't say we help agencies scale: say what Isoplan does.", repeat: true, teach: ["adams-writing"] },
+  "employee-draft-decided skipped": { ...decided, decision: "skipped" },
+  "offer-to-make-an-employee-ended": { type: "offer-to-make-an-employee-ended", v, id: offerId, why: "made" },
+  "offer-to-make-an-employee-job-wanted": { type: "offer-to-make-an-employee-job-wanted", v, request: "job-x-0123456789", id: offerId, by: adam },
+  "make-an-employee": { type: "make-an-employee", v, request: "make-x-0123456790", by: adam, offer: offerId, definition: employeeDefinition },
 };
 
 const parsers = {
@@ -503,6 +573,34 @@ const parsers = {
   "expert-creation-suggestion-ended made": parseOfficeServerMessage,
   "expert-creation-suggestion-ended expired": parseOfficeServerMessage,
   "expert-creation-suggestion-ended refused": parseOfficeServerMessage,
+  "runner that runs employees": parseDataLayerMessage,
+  "expert-directory that takes employees": parseOfficeServerMessage,
+  "expert-definition of an employee": parseDataLayerMessage,
+  "expert-record of an employee": parseOfficeServerMessage,
+  "expert-definition-result runs-elsewhere": parseOfficeServerMessage,
+  "expert-question asked by an employee's run": parseDataLayerMessage,
+  "expert-instance-learned by an employee": parseDataLayerMessage,
+  "employee-runs": parseDataLayerMessage,
+  "employee-runs held back": parseDataLayerMessage,
+  "employee-runs of an employee whose job file is gone": parseDataLayerMessage,
+  "employee-drafts": parseDataLayerMessage,
+  "employee-draft-decision-applied": parseDataLayerMessage,
+  "employee-draft-decision-applied to someone another sender had": parseDataLayerMessage,
+  "employee-draft-decision-applied for a rejection": parseDataLayerMessage,
+  "employee-draft-decision-applied refused": parseDataLayerMessage,
+  "offer-to-make-an-employee": parseDataLayerMessage,
+  "offer-to-make-an-employee on a weekly rhythm": parseDataLayerMessage,
+  "offer-to-make-an-employee-job": parseDataLayerMessage,
+  "offer-to-make-an-employee-job gone": parseDataLayerMessage,
+  "making-an-employee": parseDataLayerMessage,
+  "making-an-employee failed": parseDataLayerMessage,
+  "employee-drafts-received": parseOfficeServerMessage,
+  "employee-draft-decided approved": parseOfficeServerMessage,
+  "employee-draft-decided rejected": parseOfficeServerMessage,
+  "employee-draft-decided skipped": parseOfficeServerMessage,
+  "offer-to-make-an-employee-ended": parseOfficeServerMessage,
+  "offer-to-make-an-employee-job-wanted": parseOfficeServerMessage,
+  "make-an-employee": parseOfficeServerMessage,
 } satisfies Record<keyof typeof valid, (value: unknown) => ParseResult<unknown>>;
 
 // Each message with one field made wrong, and the path the error should name.
@@ -649,6 +747,34 @@ const broken: Record<keyof typeof valid, [unknown, string]> = {
   "expert-creation-suggestion-ended made": [{ ...valid["expert-creation-suggestion-ended made"], key: undefined }, "key"],
   "expert-creation-suggestion-ended expired": [{ ...valid["expert-creation-suggestion-ended expired"], why: "withdrawn" }, "why"],
   "expert-creation-suggestion-ended refused": [{ ...valid["expert-creation-suggestion-ended refused"], why: "no-draft" }, "why"],
+  "runner that runs employees": [{ ...valid["runner that runs employees"], employees: false }, "employees"],
+  "expert-directory that takes employees": [{ ...valid["expert-directory that takes employees"], experts: [expertDirectoryEntry, { ...employeeDirectoryEntry, employee: false }] }, "experts[1].employee"],
+  "expert-definition of an employee": [{ ...valid["expert-definition of an employee"], definition: { ...employeeDefinition, job: { ...job, tools: ["Read", "Bash"] } } }, "definition.job.tools[1]"],
+  "expert-record of an employee": [{ ...valid["expert-record of an employee"], definition: { ...employeeDefinition, proof: expertDefinition.proof } }, "definition.proof"],
+  "expert-definition-result runs-elsewhere": [{ ...valid["expert-definition-result runs-elsewhere"], machineName: undefined }, "machineName"],
+  "expert-question asked by an employee's run": [{ ...valid["expert-question asked by an employee's run"], session: "claude-code:s2" }, "session"],
+  "expert-instance-learned by an employee": [{ ...valid["expert-instance-learned by an employee"], files: [{ path: "/etc/passwd" }] }, "files[0].path"],
+  "employee-runs": [{ ...valid["employee-runs"], employees: [{ ...employeeRuns, ended: [{ ...endedRun, outcome: "skipped" }] }] }, "employees[0].ended[0].outcome"],
+  "employee-runs held back": [{ ...valid["employee-runs held back"], employees: [{ ...employeeRuns, heldBack: { scheduledFor: at, draftsWaiting: 0 } }] }, "employees[0].heldBack.draftsWaiting"],
+  "employee-runs of an employee whose job file is gone": [{ ...valid["employee-runs of an employee whose job file is gone"], employees: [{ ...employeeRuns, jobFileGone: false }] }, "employees[0].jobFileGone"],
+  "employee-drafts": [{ ...valid["employee-drafts"], drafts: [] }, "drafts"],
+  "employee-draft-decision-applied": [{ ...valid["employee-draft-decision-applied"], whoWasContacted: "contacted" }, "whoWasContacted"],
+  "employee-draft-decision-applied to someone another sender had": [{ ...decisionApplied, whoWasContacted: { alreadyContactedBy: "", at } }, "whoWasContacted"],
+  "employee-draft-decision-applied for a rejection": [{ ...decisionApplied, draft: "draft-1" }, "draft"],
+  "employee-draft-decision-applied refused": [{ ...valid["employee-draft-decision-applied refused"], refused: "gone" }, "refused"],
+  "offer-to-make-an-employee": [{ ...valid["offer-to-make-an-employee"], skill: "/outreach" }, "skill"],
+  "offer-to-make-an-employee on a weekly rhythm": [{ ...valid["offer-to-make-an-employee on a weekly rhythm"], rhythm: { kind: "weeks", weeks: 1 } }, "rhythm.weeks"],
+  "offer-to-make-an-employee-job": [{ ...valid["offer-to-make-an-employee-job"], job: { ...valid["offer-to-make-an-employee-job"].job, key: "Adams Outreach" } }, "job.key"],
+  "offer-to-make-an-employee-job gone": [{ ...valid["offer-to-make-an-employee-job gone"], gone: false }, "gone"],
+  "making-an-employee": [{ ...valid["making-an-employee"], state: "drafting" }, "state"],
+  "making-an-employee failed": [{ ...valid["making-an-employee failed"], detail: "" }, "detail"],
+  "employee-drafts-received": [{ ...valid["employee-drafts-received"], refused: [{ id: otherDraftId, reason: "late" }] }, "refused[0].reason"],
+  "employee-draft-decided approved": [{ ...valid["employee-draft-decided approved"], by: { name: "Adam" } }, "by.id"],
+  "employee-draft-decided rejected": [{ ...valid["employee-draft-decided rejected"], correction: "   " }, "correction"],
+  "employee-draft-decided skipped": [{ ...valid["employee-draft-decided skipped"], at: "today" }, "at"],
+  "offer-to-make-an-employee-ended": [{ ...valid["offer-to-make-an-employee-ended"], why: "withdrawn" }, "why"],
+  "offer-to-make-an-employee-job-wanted": [{ ...valid["offer-to-make-an-employee-job-wanted"], id: "offer 7" }, "id"],
+  "make-an-employee": [{ ...valid["make-an-employee"], definition: expertDefinition }, "definition.job"],
 };
 
 describe.each(Object.keys(valid) as (keyof typeof valid)[])("%s", (type) => {
@@ -1241,15 +1367,15 @@ describe("what instances learn", () => {
   const since = (changed: object) => parseOfficeServerMessage({ ...valid["expert-learned-since"], ...changed });
   const numbered = (arrivalNumber: number): WhatWasLearnedEntry => ({ ...learnedEntries[0]!, arrivalNumber });
 
-  test("a thing learned is 1 to MAX_WHAT_WAS_LEARNED_LENGTH characters and rests on 1 to MAX_FILES_WHAT_WAS_LEARNED_RESTS_ON files of its repo, as a runner sends it and as it is sent back", () => {
+  test("a thing learned is 1 to MAX_WHAT_WAS_LEARNED_LENGTH characters and rests on at most MAX_FILES_WHAT_WAS_LEARNED_RESTS_ON files of its repo, or none (0.19.0), as a runner sends it and as it is sent back", () => {
     const files = (count: number) => Array.from({ length: count }, (_, i) => ({ path: `src/file-${i}.ts`, commit }));
-    const longest = { text: "x".repeat(MAX_WHAT_WAS_LEARNED_LENGTH), files: files(MAX_FILES_WHAT_WAS_LEARNED_RESTS_ON) };
-    expect(learned(longest)).toMatchObject({ ok: true });
-    expect(since({ entries: [{ ...numbered(4), ...longest }] })).toMatchObject({ ok: true });
+    for (const fits of [{ text: "x".repeat(MAX_WHAT_WAS_LEARNED_LENGTH), files: files(MAX_FILES_WHAT_WAS_LEARNED_RESTS_ON) }, { files: [] }]) {
+      expect(learned(fits)).toMatchObject({ ok: true });
+      expect(since({ entries: [{ ...numbered(4), ...fits }] })).toMatchObject({ ok: true });
+    }
     for (const [changed, path] of [
       [{ text: "" }, "text"],
       [{ text: "x".repeat(MAX_WHAT_WAS_LEARNED_LENGTH + 1) }, "text"],
-      [{ files: [] }, "files"],
       [{ files: files(MAX_FILES_WHAT_WAS_LEARNED_RESTS_ON + 1) }, "files"],
       [{ files: [{ path: "../secrets.txt" }] }, "files[0].path"],
       [{ files: [{ path: "src\\a.ts" }] }, "files[0].path"],
@@ -1299,6 +1425,121 @@ describe("what instances learn", () => {
 
   test("an entry adds its thing learned's own id to the chain, removed since or not, and a removal `removal:<id>`", () => {
     expect(learnedEntries.map(arrivalEntryId)).toEqual([learnedId, removedId, `removal:${removedId}`]);
+  });
+});
+
+describe("employees", () => {
+  const refused = (result: ParseResult<unknown>, path: string) => {
+    expect(result).toMatchObject({ ok: false, kind: "invalid" });
+    expect(!result.ok && result.error).toContain(path);
+  };
+  const definition = (changed: object) => parseDataLayerMessage({ type: "expert-definition", v, definition: { ...employeeDefinition, ...changed } });
+  const withJob = (changed: object) => definition({ job: { ...job, ...changed } });
+
+  test("an employee's definition has a job, no proof question and no area; an expert's has its proof", () => {
+    const { proof: _, ...withoutProof } = expertDefinition;
+    refused(parseDataLayerMessage({ type: "expert-definition", v, definition: withoutProof }), "definition.proof");
+    refused(definition({ proof: expertDefinition.proof }), "definition.proof");
+    refused(definition({ areas: ["outreach"] }), "definition.areas");
+  });
+
+  test("a job lists only JOB_TOOLS, each once and Read among them, and each of its experts once", () => {
+    expect(withJob({ tools: ["Read"], experts: [] })).toMatchObject({ ok: true });
+    for (const [changed, path] of [
+      [{ tools: ["Read", "Bash"] }, "definition.job.tools[1]"],
+      [{ tools: ["Read", "mcp__gmail__send_email"] }, "definition.job.tools[1]"],
+      [{ tools: ["Grep", "Glob"] }, "definition.job.tools"],
+      [{ tools: ["Read", "Grep", "Read"] }, "definition.job.tools[2]"],
+      [{ experts: ["adams-writing", "adams-writing"] }, "definition.job.experts[1]"],
+    ] as const) {
+      refused(withJob(changed), path);
+    }
+  });
+
+  test("a job runs every day or every weekday at a 24-hour HH:MM, or weekly on the day it names, in an IANA zone or its computer's own", () => {
+    for (const schedule of [{ every: "day", at: "00:00" }, { every: "weekday", at: "23:59", timeZone: "Europe/London" }, { every: "week", at: "09:00", on: "monday", timeZone: "America/Argentina/Buenos_Aires" }]) {
+      expect(withJob({ schedule })).toMatchObject({ ok: true });
+    }
+    for (const schedule of [{ every: "week", at: "09:00" }, { every: "day", at: "09:00", on: "monday" }]) refused(withJob({ schedule }), "definition.job.schedule.on");
+    for (const at of ["24:00", "9:00", "09:00:00", "9am"]) refused(withJob({ schedule: { every: "day", at } }), "definition.job.schedule.at");
+    refused(withJob({ schedule: { every: "day", at: "09:00", timeZone: "../etc/localtime" } }), "definition.job.schedule.timeZone");
+  });
+
+  test("the file of who was contacted is one file that none of the job's documents or examples cover", () => {
+    expect(withJob({ whoWasContacted: "sales/who-was-contacted.csv" })).toMatchObject({ ok: true });
+    for (const changed of [
+      { whoWasContacted: "." },
+      { whoWasContacted: "sales/*.csv" },
+      { whoWasContacted: "outreach/who-qualifies.md" },
+      { whoWasContacted: "Outreach/Approved/who-was-contacted.csv" },
+      { documents: ["outreach"], whoWasContacted: "outreach/who-was-contacted.csv" },
+      { documents: ["."] },
+    ]) {
+      refused(withJob(changed), "definition.job.whoWasContacted");
+    }
+  });
+
+  test("a stopped run names the limit it stopped at, the context's included, and no other run names one", () => {
+    const runs = (ended: object) => parseDataLayerMessage({ type: "employee-runs", v, employees: [{ ...employeeRuns, ended: [{ ...endedRun, ...ended }] }] });
+    expect(runs({ outcome: "stopped", limit: "context" })).toMatchObject({ ok: true });
+    refused(runs({ outcome: "stopped" }), "employees[0].ended[0].limit");
+    refused(runs({ outcome: "ran", limit: "run-tokens" }), "employees[0].ended[0].limit");
+  });
+
+  test("a draft's recipient has an address, and its text, subject and recipient keep within their limits", () => {
+    const drafts = (changed: object) => parseDataLayerMessage({ ...valid["employee-drafts"], drafts: [{ ...draft, ...changed }] });
+    expect(drafts({ text: "x".repeat(MAX_DRAFT_LENGTH), subject: "x".repeat(MAX_DRAFT_SUBJECT_LENGTH), to: undefined })).toMatchObject({ ok: true });
+    for (const [changed, path] of [
+      [{ to: { name: "Ana" } }, "drafts[0].to.address"],
+      [{ to: { address: "ana at brightside" } }, "drafts[0].to.address"],
+      [{ to: { ...draft.to, organisation: "x".repeat(MAX_DRAFT_RECIPIENT_NAME_LENGTH + 1) } }, "drafts[0].to.organisation"],
+      [{ text: "x".repeat(MAX_DRAFT_LENGTH + 1) }, "drafts[0].text"],
+      [{ subject: "x".repeat(MAX_DRAFT_SUBJECT_LENGTH + 1) }, "drafts[0].subject"],
+      [{ askedExperts: ["adams-writing", "adams-writing"] }, "drafts[0].askedExperts[1]"],
+    ] as const) {
+      refused(drafts(changed), path);
+    }
+  });
+
+  test("each employee, each of its ended runs and each draft is named once, and a run leaves at most MAX_DRAFTS_PER_RUN drafts", () => {
+    refused(parseDataLayerMessage({ type: "employee-runs", v, employees: [employeeRuns, employeeRuns] }), "employees[1].key");
+    refused(parseDataLayerMessage({ type: "employee-runs", v, employees: [{ ...employeeRuns, ended: [endedRun, endedRun] }] }), "employees[0].ended[1].run");
+    refused(parseDataLayerMessage({ ...valid["employee-drafts"], drafts: [draft, draft] }), "drafts[1].id");
+    refused(parseOfficeServerMessage({ ...valid["employee-drafts-received"], kept: [draftId, otherDraftId] }), "refused[0].id");
+    const many = Array.from({ length: MAX_DRAFTS_PER_RUN + 1 }, (_, i) => ({ ...draft, id: `00000000-0000-4000-8000-${String(i).padStart(12, "0")}` }));
+    expect(parseDataLayerMessage({ ...valid["employee-drafts"], drafts: many.slice(1) })).toMatchObject({ ok: true });
+    refused(parseDataLayerMessage({ ...valid["employee-drafts"], drafts: many }), "drafts");
+  });
+
+  test("a rejection carries the correction its owner typed, at most MAX_CORRECTION_LENGTH characters, and names each expert to teach once", () => {
+    const rejected = valid["employee-draft-decided rejected"];
+    const { correction: _, ...withoutCorrection } = rejected;
+    const { teach: __, ...withoutTeach } = rejected;
+    for (const [message, path] of [
+      [withoutCorrection, "correction"],
+      [{ ...rejected, correction: "x".repeat(MAX_CORRECTION_LENGTH + 1) }, "correction"],
+      [withoutTeach, "teach"],
+      [{ ...rejected, teach: ["adams-writing", "adams-writing"] }, "teach[1]"],
+    ] as const) {
+      refused(parseOfficeServerMessage(message), path);
+    }
+  });
+
+  test("a decision's answer says who was contacted, or refuses, never both; an offer's job comes, or that it is gone, never both", () => {
+    refused(parseDataLayerMessage({ ...valid["employee-draft-decision-applied"], refused: "not-yours" }), "refused");
+    for (const message of [{ ...valid["offer-to-make-an-employee-job"], gone: true }, { ...valid["offer-to-make-an-employee-job gone"], gone: undefined }]) {
+      refused(parseDataLayerMessage(message), "job");
+    }
+  });
+
+  test("an offer's job names a project with a remote, as a definition does", () => {
+    const offered = valid["offer-to-make-an-employee-job"];
+    refused(parseDataLayerMessage({ ...offered, job: { ...offered.job, project: { id: "local:sevengill/C:/w/docs", name: "docs" } } }), "job.project");
+  });
+
+  test("an employee's name is its key's words capitalised, with nothing after them", () => {
+    expect(employeeDisplayName("adams-outreach")).toBe("Adams Outreach");
+    expect(expertDisplayName("adams-outreach")).toBe("Adams Outreach Expert");
   });
 });
 

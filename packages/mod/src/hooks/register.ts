@@ -100,7 +100,7 @@ import type { AskedMessage, ConflictMessage, ExpertRight } from "@isoplan/protoc
 import { expertText, lateExpertText, mayBeAskedText } from "../ask/expert-text.js";
 import { endText, MAX_WAIT_MS } from "../ask/text.js";
 import { expertCreationSuggestionStatusLineText, expertCreationSuggestionTranscriptText, readyNoteText } from "../expert-creation-suggestion/text.js";
-import { SUPERSEDED_RECHECK_MS, type AnswerTaken, type ContextWindow, type DataLayerLine, type ExpertCreationSuggestionLine, type ExpertReadyLine, type ExpertSetUpOfferLine, type FromOffice, type MessageTaken, type OwnerAnswerLine, type OwnerMessageLine, type PairLine, type StatusLine, type TitleAskLine, type WaitMark } from "../lines.js";
+import { SUPERSEDED_RECHECK_MS, type AnswerTaken, type ContextWindow, type DataLayerLine, type ExpertCreationSuggestionLine, type ExpertReadyLine, type ExpertSetUpOfferLine, type FromOffice, type OfferToMakeAnEmployeeLine, type MessageTaken, type OwnerAnswerLine, type OwnerMessageLine, type PairLine, type StatusLine, type TitleAskLine, type WaitMark } from "../lines.js";
 import type { Host, On, ToolCallInput, ToolCallResult } from "./host.js";
 
 const RETRY_CAP_MS = 30000;
@@ -172,6 +172,8 @@ const openExpertCreationSuggestionsByOffice = new Map<string, Map<string, Expert
 const expertCreationSuggestionsPutInTranscript = new Set<string>(); // the suggestions put in the transcript, by id
 // The offers to set up an expert this computer has no instance of, by the office's address and the expert's key.
 const openExpertSetUpOffers = new Map<string, ExpertSetUpOfferLine>();
+// The runner's open offers to make an employee from this session's job (isoplan-app#341), by server and id.
+const openOffersToMakeAnEmployee = new Map<string, OfferToMakeAnEmployeeLine>();
 const readyTold = new Set<string>(); // the suggestions whose ready expert the lead was told of, by id
 // The questions waiting for an answer from the floor too, by their call's id: each ends its call.
 const floorWaits = new Map<string, (answer: OwnerAnswerLine) => void>();
@@ -482,6 +484,7 @@ async function run($: Host): Promise<void> {
     offices.clear();
     openExpertCreationSuggestionsByOffice.clear();
     openExpertSetUpOffers.clear();
+    openOffersToMakeAnEmployee.clear();
     running = session;
     lead = `claude-code:${session}:lead`;
     let switched = false;
@@ -580,6 +583,7 @@ function handle($: Host, text: string): void {
       pairings.clear();
       openExpertCreationSuggestionsByOffice.clear();
       openExpertSetUpOffers.clear();
+      openOffersToMakeAnEmployee.clear();
       show($, line.state === "down" ? RUNNER_DOWN_TEXT[line.held ?? "starting"] : statusText());
       break;
     case "title-ask":
@@ -615,6 +619,14 @@ function handle($: Host, text: string): void {
       break;
     case "expert-set-up-offer-ended":
       openExpertSetUpOffers.delete(`${line.server}\n${line.key}`);
+      show($, statusText());
+      break;
+    case "offer-to-make-an-employee":
+      openOffersToMakeAnEmployee.set(`${line.server}\n${line.id}`, line);
+      show($, statusText());
+      break;
+    case "offer-to-make-an-employee-ended":
+      openOffersToMakeAnEmployee.delete(`${line.server}\n${line.id}`);
       show($, statusText());
       break;
     case "asked":
@@ -682,6 +694,7 @@ function statusText(): string | undefined {
     if (!part) continue;
     parts.push(part);
     for (const offer of openExpertSetUpOffers.values()) if (offer.server === server) parts.push(`The ${offer.name} isn't set up on this computer · set up: ${offer.url}`);
+    for (const offer of openOffersToMakeAnEmployee.values()) if (offer.server === server) parts.push(offerToMakeAnEmployeeText(offer));
     const suggestion = [...(openExpertCreationSuggestionsByOffice.get(server)?.values() ?? [])].reverse().find((o) => !linked.has(o.id));
     if (!suggestion) continue;
     linked.add(suggestion.id);
@@ -689,6 +702,9 @@ function statusText(): string | undefined {
   }
   return parts.length ? `Isoplan: ${parts.join(" · ")}` : undefined;
 }
+
+/** The status line's words for an offer to make an employee: its skill's, or a prompt's job. */
+export const offerToMakeAnEmployeeText = (offer: Pick<OfferToMakeAnEmployeeLine, "skill" | "url">) => `${offer.skill ? `Your /${offer.skill}` : "This job"} could run on its own · make an employee: ${offer.url}`;
 
 // A suggestion open in one office: in the status line until it ends, and in the transcript once.
 function addExpertCreationSuggestion($: Host, line: ExpertCreationSuggestionLine): void {
