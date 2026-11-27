@@ -1,15 +1,9 @@
 <script setup lang="ts">
 // The pairing window: the links the runner made to pair this computer with each office waiting for
 // it. A link opens in the browser only when it is clicked.
-import { Electroview } from "electrobun/view";
 import { onMounted, onUnmounted, ref } from "vue";
 import type { PairingView } from "../bun/menu.ts";
-import type { PairingRPC } from "../shared/pairing-rpc.ts";
-
-// How long the app may take to answer; unanswered, it is asked again after as long.
-const REQUEST_MS = 5000;
-const rpc = Electroview.defineRPC<PairingRPC>({ maxRequestTime: REQUEST_MS, handlers: { requests: {}, messages: {} } });
-new Electroview({ rpc });
+import { REQUEST_MS, rpc } from "./rpc.ts";
 
 const view = ref<PairingView | null>(null);
 let timer: ReturnType<typeof setTimeout> | undefined;

@@ -13,6 +13,7 @@ Show what's running… opens a window of this user's processes on this computer,
 - `src/bun/menu.ts`: what the menu and the pairing window say, from `runner/status.json` (`packages/mod/src/runner/status.ts`).
 - `packages/mod/src/runner/processes.ts` and `src/bun/running.ts`: listing this user's processes (also the runner's, for what a removed session left running: `packages/mod/src/runner/strays.ts`), and what the window of what's running shows.
 - `src/bun/index.ts`: the tray and the windows. `src/pairing/` and `src/running/`: the windows (Vue).
+- `src/bun/error-reports.ts`: the app's errors, those its main process doesn't catch (`uncaught-errors.ts`) and those its windows pass on over their RPC (`src/shared/view-errors.ts`), sent to every office this computer is paired with (`error-report-offices.ts`), scrubbed (`error-report-scrub.ts`), checked for secrets and paced (`error-report-pace.ts`). Electrobun's own handlers stay: an exception nothing caught still ends the app, once its report has gone or 5 seconds have passed.
 - The plugin installs it (`packages/mod/src/install/app.ts`). `packages/mod/app-release.json` names the app version the plugin wants. Without one for the computer, the runner runs on node as before.
 
 Its settings are in `packages/mod/runner.json`, and a person can override them in `~/.claude/isoplan/runner.json`: `desktopApp` (false keeps the runner on node), `appDownloadSeconds`, `appRetryHours`, `appStartSeconds`, `officeUnreachableSeconds`, `trayRefreshSeconds`, `processRefreshSeconds` (how often the window of what's running looks again while it is open, 5), and `drivenCloseSeconds`: a Close, Close session or End and remove from the menu waits twice that, or twice the 10 s a driven session gets to end if that is longer. It logs to `~/.claude/isoplan/logs/app.log`.
@@ -25,7 +26,7 @@ If the app doesn't become the runner within `appStartSeconds` of being opened (b
 pnpm install
 cd packages/app
 npx electrobun prepare    # projects Electrobun's toolchain into .hutch/
-pnpm test                 # the engine, the menu and the window of what's running
+pnpm test                 # the engine, the menu, the window of what's running and the error reports
 pnpm run typecheck:app    # the Electrobun parts too
 pnpm run build:app        # unsigned build: artifacts/<channel>-<os>-<arch>-Isoplan*.tar.zst
 ```

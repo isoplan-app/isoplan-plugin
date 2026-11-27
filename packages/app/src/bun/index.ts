@@ -12,6 +12,13 @@
 //
 // Its Sessions submenu lists what the worker writes into status.json; Close on a headless one asks the
 // worker over its pipe (src/pipe), whose address and token it reads with the runner's own code.
+//
+// Its errors go to every office this computer is paired with (error-reports.ts, isoplan-app#375):
+// those of its windows, passed on over their RPC, and any its main process doesn't catch
+// (uncaught-errors.ts), which also go to app.log, their text checked for secrets as the runner's
+// worker checks its own. Electrobun's own handlers stay: a rejected promise nothing caught is written
+// to stderr and the app goes on; an exception nothing caught is written to stderr and ends the app,
+// now once its report has gone or LAST_REPORT_MS has passed.
 
 import { BrowserView, BrowserWindow, Tray, Utils } from "electrobun/main";
 import { existsSync } from "node:fs";
@@ -23,7 +30,7 @@ import { loadSettings } from "../../../mod/src/data-layer/config.js";
 import { nodeIo } from "../../../mod/src/data-layer/io.js";
 import { LOCK_REFRESH_MS } from "../../../mod/src/runner/start.js";
 import { readStatus, statusPath, type RunnerStatus } from "../../../mod/src/runner/status.js";
-import { cut, loadPatterns } from "../../../mod/src/runner/scan.js";
+import { cut, errorText, loadPatterns } from "../../../mod/src/runner/scan.js";
 import { closeSession } from "../../../mod/src/pipe/pipe.js";
 import { menuCloseWaitMs } from "../../../mod/src/runner/session.js";
 import { alive } from "../../../mod/src/wake/lock.js";
@@ -34,12 +41,21 @@ import { closing, currentStatus, pairingView, trayMenu, type MenuInput } from ".
 import { listProcesses } from "../../../mod/src/runner/processes.js";
 import { endPid } from "../../../mod/src/runner/strays.js";
 import { endChoice, parseClaudeSession, patternsProblemLine, runningView, workTreeFinder, type ClaudeSessionRecord, type RunningView } from "./running.ts";
+import { errorOf, passedError, type RawError } from "../shared/error-of.ts";
+import { reportOffices } from "./error-report-offices.ts";
+import { whoOf } from "./error-report-scrub.ts";
+import { createErrorReports, osOf } from "./error-reports.ts";
+import { onUncaughtErrors, type UncaughtHandler } from "./uncaught-errors.ts";
 import pkg from "../../package.json" with { type: "json" };
 
 const LOG_CAP_BYTES = 256 * 1024;
+// How long an error that ends the app waits for its report to reach the offices.
+const LAST_REPORT_MS = 5000;
 
-const claudeDir = claudePaths(process.env, os.homedir()).dir;
+const { dir: claudeDir, json: claudeJson } = claudePaths(process.env, os.homedir());
 const isoplanDir = path.join(claudeDir, "isoplan");
+// The runner copy the plugin installs, which holds its config.json, runner.json and secret-patterns.json.
+const appDir = path.join(isoplanDir, "runner", "app");
 const logFile = path.join(isoplanDir, "logs", "app.log");
 let logging = Promise.resolve();
 function log(text: string) {
@@ -51,6 +67,41 @@ function log(text: string) {
       else await fs.appendFile(logFile, line);
     })
     .catch(() => {});
+}
+
+const secretPatterns = () => loadPatterns(path.join(appDir, "secret-patterns.json"), path.join(isoplanDir, "secret-patterns.json"), () => {});
+const errorReports = createErrorReports({
+  release: pkg.version,
+  os: osOf(process.platform),
+  who: whoOf(os.homedir()),
+  patterns: secretPatterns,
+  offices: () => reportOffices({ claudeDir, claudeJson, appDir, log }),
+  log,
+});
+
+// What the main process doesn't catch. Electrobun's exception handlers, registered as electrobun/main
+// loaded (before this module's body runs), are taken off so they run once the report has gone.
+// Electrobun's take an Error, which an exception nothing caught is given.
+const electrobunOnException = process.listeners("uncaughtException") as UncaughtHandler[];
+process.removeAllListeners("uncaughtException");
+onUncaughtErrors({
+  on: (event, handler) => void process.on(event, handler),
+  electrobun: electrobunOnException,
+  report: (err) => errorReports.report(errorOf(err)),
+  said: async (err) => errorText(err, await secretPatterns().catch(() => null)),
+  log,
+  logged: () => logging,
+  end: (err) => {
+    console.error(err);
+    process.exit(1);
+  },
+  lastReportMs: LAST_REPORT_MS,
+});
+
+// A window's error, passed on over its RPC.
+function viewError(payload: RawError): void {
+  const error = passedError(payload);
+  if (error) void errorReports.report(error);
 }
 
 // A menu-bar app: no Dock icon.
@@ -147,6 +198,7 @@ function openPairing(): void {
         open: async ({ url }) => {
           if (pairingView(await input(), 0).waiting.some((p) => p.url === url)) Utils.openExternal(url);
         },
+        error: viewError,
       },
     },
   });
@@ -175,7 +227,6 @@ function patternsProblem(reasons: string[]): void {
 async function runningNow(): Promise<RunningView> {
   const s = await settings();
   const status = engine.state() === "running" ? currentStatus(await readStatus(statusPath(claudeDir)), alive) : null;
-  const appDir = path.join(isoplanDir, "runner", "app");
   const problems: string[] = [];
   const patterns = await loadPatterns(path.join(appDir, "secret-patterns.json"), path.join(isoplanDir, "secret-patterns.json"), (text) => problems.push(text)).catch((err: Error) => (problems.push(err.message), null));
   patternsProblem(problems);
@@ -201,7 +252,7 @@ async function endFromWindow(asked: { folder: string; pid?: number; started?: st
 // Only ever from a person's click on the menu item.
 function openRunning(): void {
   if (running) return void running.focus();
-  const rpc = BrowserView.defineRPC<RunningRPC>({ maxRequestTime: 15000, handlers: { requests: { view: () => runningNow(), end: (asked) => endFromWindow(asked) }, messages: {} } });
+  const rpc = BrowserView.defineRPC<RunningRPC>({ maxRequestTime: 15000, handlers: { requests: { view: () => runningNow(), end: (asked) => endFromWindow(asked) }, messages: { error: viewError } } });
   running = new BrowserWindow({ title: "What's running", url: "views://running/index.html", frame: { width: 900, height: 620, x: 200, y: 120 }, rpc });
   running.on("close", () => (running = null));
 }

@@ -5,5 +5,5 @@
     "allowImportingTsExtensions": true,
     "types": ["node"]
   },
-  "include": ["src/bun/engine.ts", "src/bun/menu.ts", "src/bun/processes.ts", "src/bun/running.ts", "src/bun/*.test.ts"]
+  "include": ["src/bun/engine.ts", "src/bun/menu.ts", "src/bun/processes.ts", "src/bun/running.ts", "src/bun/error-reports.ts", "src/bun/error-report-offices.ts", "src/bun/error-report-pace.ts", "src/bun/error-report-scrub.ts", "src/bun/uncaught-errors.ts", "src/shared/error-of.ts", "src/shared/view-errors.ts", "src/bun/*.test.ts", "src/shared/*.test.ts"]
 }
